@@ -6,10 +6,14 @@ Bluetooth Classic RFCOMM is now the default **source** transport: video-only
 MediaProjection capture at a 480-pixel short edge, up to 30 fps and a 1 Mbps H.264
 target, without LAN or ADB. It requires the new Android companion and a rebuilt
 Mac app. The compiled Android test APK is included at
-`outputs/DroidMirror-Bluetooth-0.1-debug.apk`; checked-in Mac app binaries have not
+`outputs/DroidMirror-Bluetooth-0.2-debug.apk`; checked-in Mac app binaries have not
 been updated. See
 [Bluetooth setup, build steps and validation limits](Native/CLASSIC-BLUETOOTH.md).
 Choose USB / wireless ADB in Connection settings for the original full controls.
+The Android companion can optionally request Shizuku permission for physical
+panel-off mirroring, with app-process Binder death recovery and a two-second
+watchdog lease running in a separate shell process. Device support and recovery
+latency still need hardware validation; see the setup guide.
 
 ## ADB mode highlights
 

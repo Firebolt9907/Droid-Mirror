@@ -7,14 +7,16 @@ are negotiated by the operating systems; the app cannot guarantee an EDR mode or
 
 The new path is **video only**. Android's public MediaProjection API requires a
 user-approved capture session and a foreground service. It does not grant scrcpy's
-shell privileges for input injection, locking, screen-off capture, clipboard,
-UHID, or audio. Choose **USB / wireless ADB** in Connection settings for the
-existing full-featured mode. The existing BLE notification bridge is separate.
+shell privileges for input injection, locking, clipboard, UHID, or audio.
+Optional physical-panel control is available through a separately authorized
+Shizuku user service, as described below. Choose **USB / wireless ADB** in
+Connection settings for the existing full-featured mode. The existing BLE notification bridge is separate.
 
 ## Build and use
 
 A compiled, debug-signed Android APK is included at
-`outputs/DroidMirror-Bluetooth-0.1-debug.apk`, alongside its SHA-256 checksum.
+`outputs/DroidMirror-Bluetooth-0.2-debug.apk`, alongside its SHA-256 checksum.
+It uses the same test signing key as 0.1 and can be installed over that version.
 Install it using the phone's package installer. This is a test build, not a store
 release. Future APKs signed with a different debug key require uninstalling this
 build before installation.
@@ -28,8 +30,7 @@ cd BluetoothCompanion
 ```
 
 Install the APK produced in `build/outputs/apk/debug/` using the phone's package
-installer. No USB or
-wireless debugging is required. The companion has a new package identity and does
+installer. No USB or wireless debugging is required for normal Bluetooth capture. The companion has a new package identity and does
 not replace BLE-ADB-Bridge or use its pairing secrets.
 
 On macOS 14+, install the client build dependencies:
@@ -66,6 +67,59 @@ Static screens request a repeat frame once per second. Rotation/content resizing
 is fitted into the initial encoder surface; restart capture to change its shape.
 Android encoder support and actual output frame rate require device validation.
 
+## Optional screen-off with Shizuku
+
+1. Install and start Shizuku 13 or newer on the phone. Its initial setup may
+   require wireless debugging or root; Bluetooth streaming itself still uses
+   neither ADB nor LAN.
+2. In **DroidMirror Bluetooth**, tap **Authorize Shizuku** and approve the system
+   permission dialog. Enabling Nearby Devices alone does not authorize Shizuku.
+3. Check **Turn phone panel off with Shizuku recovery**, start capture and approve
+   MediaProjection, then connect the Mac. The panel stays on until an encoded
+   media frame has actually been transmitted.
+4. Stop capture to restore the panel. **Restore phone display** explicitly asks
+   the shell service to turn the panel back on and cancels any active screen-off
+   lease. Screen-off is opt-in each new activity/session, not an unattended default.
+
+`DisplayGuardService` is a Shizuku **daemon user service**, running in a separate
+shell/root process. It is not the companion's Android foreground Service and it
+continues after the app process dies. It resolves physical display tokens and
+uses the same hidden SurfaceControl/DisplayControl power APIs as scrcpy. It never
+uses a power-key sleep command, locks the phone, changes screen brightness, or
+writes persistent system settings. API differences/OEM restrictions can make
+screen-off unavailable; the companion reports failure and continues video with
+the display on. Normal screen timeout/lock can still stop MediaProjection.
+
+Before OFF, the guard registers an app-owned Binder death recipient and calls
+NORMAL to check that the restoration API can be invoked. It records recovery
+intent before OFF, including partial failures across multiple physical displays.
+App process death triggers a direct restoration attempt from the shell process.
+An independent shell timer checks a **two-second lease** every 100 ms; the app
+renews every 250 ms only while encoded video continues to transmit and Shizuku
+permission remains available. Late heartbeats cannot revive an expired lease.
+Stop, capture revocation, Bluetooth failure, missing video progress, app hangs,
+manual recovery and normal guard shutdown also attempt restoration. Failed NORMAL
+calls are retried by the shell timer; new OFF leases are refused until recovery
+succeeds. The app detaches without terminating the daemon guard.
+
+This is prompt best-effort recovery, **not an absolute guarantee of immediate
+restoration**. Binder callbacks, scheduling and display-driver calls take time.
+The two-second timeout applies while the guard is running and scheduled; Android
+suspension or a blocked display API can delay it. Shell UID/process separation
+protects against ordinary app lifecycle kills, not SIGKILL of the guard, a driver
+hang, reboot or every OEM behavior. Shutdown hooks cannot handle SIGKILL. If the
+guard itself is forcibly killed while the panel is off, restart Shizuku/the app
+and use Restore phone display; a physical wake/power cycle or reboot is the final
+fallback. No setting that persists across reboot is changed. Do not rely on this
+as an unlock mechanism or a guarantee that capture survives panel-off on your OEM.
+
+The portable `DisplayLeaseTest` verifies timeout, stop/death-path restoration,
+foreign/stale owner rejection, late-heartbeat rejection, failed ON preflight,
+partial OFF rollback, retrying failed restorations without app heartbeats and
+manual recovery. These use simulated display power and clock, not a real Binder
+or display driver. On-device verification still needs app crash/force-stop,
+Bluetooth loss, permission revocation, screen lock and physical power-key tests.
+
 ## Transport and lifecycle
 
 `CaptureService` advertises UUID `c356a44e-6f2b-4da9-85e5-397991b8a603` through a
@@ -99,13 +153,15 @@ requires new capture consent. The sender and Mac bridge do not save screen data.
 
 The Android companion was compiled successfully in this workspace using JDK 17,
 Android SDK 35, AGP 8.9.1 and Gradle 8.11.1. `assembleDebug lintDebug` passed with
-zero lint errors (nine advisory warnings for localization, backup metadata, app
+zero lint errors (advisory warnings for localization, backup metadata, app
 icon and newer AGP availability). The included APK passes `apksigner verify` using
 APK Signature Scheme v2. The permission checks identified by lint were fixed;
 revoking Bluetooth access causes capture to stop.
 
 Also validated in the Linux workspace:
 
+- Pure Java DisplayLease tests: restoration, two-second expiry, stale-owner and
+  late-heartbeat rejection, partial OFF rollback, failed ON preflight and ON retries.
 - Pure Java VideoWire tests: scrcpy 5 headers, timestamps/config/keyframe flags,
   packet boundaries and bounds, and portrait/landscape/no-upscale dimensions.
 - Existing scrcpy CLI tests plus external mode cases: valid/invalid ports,
@@ -129,6 +185,8 @@ Run the portable Java tests:
 ```sh
 javac -d /tmp/droidmirror-wire-tests BluetoothCompanion/src/main/java/app/droidmirror/bluetooth/VideoWire.java BluetoothCompanion/tests/VideoWireTest.java
 java -cp /tmp/droidmirror-wire-tests VideoWireTest
+javac -d /tmp/droidmirror-wire-tests BluetoothCompanion/src/main/java/app/droidmirror/bluetooth/DisplayLease.java BluetoothCompanion/tests/DisplayLeaseTest.java
+java -cp /tmp/droidmirror-wire-tests DisplayLeaseTest
 ```
 
 ## Adaptive quality follow-on

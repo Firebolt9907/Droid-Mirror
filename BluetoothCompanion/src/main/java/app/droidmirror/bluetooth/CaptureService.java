@@ -33,6 +33,7 @@ public final class CaptureService extends Service {
     private MediaProjection projection;
     private Thread worker;
     private ScheduledExecutorService watchdog;
+    private volatile ShizukuDisplayClient displayGuard;
 
     @Override public IBinder onBind(Intent intent) { return null; }
     private Notification notification(String text) {
@@ -58,6 +59,11 @@ public final class CaptureService extends Service {
                 @Override public void onStop() { stopSelf(); }
             }, new Handler(getMainLooper()));
         } catch (RuntimeException error) { stopSelf(); return START_NOT_STICKY; }
+        if (intent.getBooleanExtra("screenOff", false)) {
+            displayGuard = new ShizukuDisplayClient(getApplicationContext(), text -> {
+                if (!stopping) notifications.notify(1, notification(text));
+            });
+        }
         watchdog = Executors.newSingleThreadScheduledExecutor();
         watchdog.scheduleWithFixedDelay(() -> {
             if (writeStarted != 0 && SystemClock.elapsedRealtime() - writeStarted > 1000) abort();
@@ -130,6 +136,8 @@ public final class CaptureService extends Service {
                         writeStarted = SystemClock.elapsedRealtime();
                         out.write(packet.bytes); out.flush();
                         writeStarted = 0;
+                        ShizukuDisplayClient guard = displayGuard;
+                        if (guard != null && (packet.bytes[0] & 0x40) == 0) guard.frameSent();
                     }
                 } catch (IOException | InterruptedException error) { abort(); }
             }, "BluetoothVideoWriter"); sender.start();
@@ -165,6 +173,8 @@ public final class CaptureService extends Service {
     }
     private void abort() {
         stopping = true;
+        ShizukuDisplayClient guard = displayGuard;
+        if (guard != null) guard.close();
         try { if (listener != null) listener.close(); } catch (IOException ignored) {}
         try { if (socket != null) socket.close(); } catch (IOException ignored) {}
     }
