@@ -3,6 +3,7 @@ import Foundation
 enum ToolLocator {
     static func find(_ name: String) -> String? {
         let candidates = [
+            Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/\(name)").path,
             "/opt/homebrew/bin/\(name)",
             "/usr/local/bin/\(name)",
             "/usr/bin/\(name)"

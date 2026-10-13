@@ -5,13 +5,34 @@ struct SettingsView: View {
 
     var body: some View {
         Form {
+            Section("Connection") {
+                Picker("Transport", selection: $model.preferences.transport) {
+                    ForEach(MirrorTransport.allCases) { Text($0.label).tag($0) }
+                }.disabled(model.isMirroring || model.isStarting)
+                if model.preferences.transport == .bluetoothClassic {
+                    Picker("Paired phone", selection: $model.selectedID) {
+                        Text("Select a phone").tag(String?.none)
+                        ForEach(model.devices) { Text($0.displayName).tag(Optional($0.id)) }
+                    }.disabled(model.isMirroring || model.isStarting)
+                    HStack {
+                        Button("Refresh") { model.refreshDevices() }.disabled(model.isStarting || model.isMirroring)
+                        Button(model.isMirroring || model.isStarting ? "Stop" : "Mirror") {
+                            if model.isMirroring || model.isStarting { model.stop() } else { model.start() }
+                        }.disabled(!model.isMirroring && !model.isStarting && model.selectedDevice == nil)
+                    }
+                    Text(model.status).font(.caption).foregroundStyle(.secondary)
+                }
+                Text("Bluetooth uses the Android companion at 480p, up to 30 fps, and 1 Mbps H.264. Approve screen capture on Android each session. Audio, remote input, and screen-off require ADB.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             Section("iPhone-like behavior") {
                 Toggle("Turn the Android display off while mirroring", isOn: $model.preferences.turnDeviceScreenOff)
                 Toggle("Keep the device awake while connected", isOn: $model.preferences.stayAwake)
                 Toggle("Keep the mirror above other windows", isOn: $model.preferences.alwaysOnTop)
                 Toggle("Forward audio when no media is already playing", isOn: $model.preferences.forwardAudio)
             }
-            Section("Picture") {
+            .disabled(model.preferences.transport == .bluetoothClassic)
+            Section("Picture (ADB)") {
                 Picker("Codec", selection: $model.preferences.codec) {
                     ForEach(VideoCodec.allCases) { Text($0.label).tag($0) }
                 }
@@ -23,6 +44,7 @@ struct SettingsView: View {
                 }
                 Stepper("Bit rate: \(model.preferences.bitRateMbps) Mbps", value: $model.preferences.bitRateMbps, in: 4...32, step: 2)
             }
+            .disabled(model.preferences.transport == .bluetoothClassic)
             Section("Input") {
                 Picker("Scrolling", selection: $model.preferences.scrollMode) {
                     ForEach(ScrollMode.allCases) { Text($0.label).tag($0) }
@@ -34,7 +56,11 @@ struct SettingsView: View {
                 Text("Touch-style scrolling is handled inside the mirror and does not require Accessibility permission. Smart text input gives the best clipboard behavior; UHID behaves like a physical keyboard.")
                     .font(.caption).foregroundStyle(.secondary)
             }
+            .disabled(model.preferences.transport == .bluetoothClassic)
         }.formStyle(.grouped).padding(.vertical, 12)
+        .alert("DroidMirror", isPresented: Binding(get: { model.errorMessage != nil }, set: { if !$0 { model.errorMessage = nil } })) {
+            Button("OK") { model.errorMessage = nil }
+        } message: { Text(model.errorMessage ?? "") }
     }
 }
 

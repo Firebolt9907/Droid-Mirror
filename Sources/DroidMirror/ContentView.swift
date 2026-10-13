@@ -14,7 +14,7 @@ struct ContentView: View {
             devicePicker
             Divider().frame(height: 28).padding(.horizontal, 2)
 
-            if model.isMirroring {
+            if model.isMirroring && model.selectedDevice?.isBluetooth != true {
                 toolbarButton("chevron.backward", help: "Back", action: model.goBack)
                 toolbarButton("circle", help: "Home", action: model.goHome)
                 toolbarButton("square.on.square", help: "Recent apps", action: model.switchApps)
@@ -50,7 +50,7 @@ struct ContentView: View {
             }
             .buttonStyle(.borderedProminent)
             .tint(model.isMirroring ? .red : .accentColor)
-            .disabled(!model.isMirroring && model.selectedDevice?.isOnline != true)
+            .disabled(model.isStarting || (!model.isMirroring && model.selectedDevice?.isOnline != true))
 
             Button { showSettings.toggle() } label: {
                 Image(systemName: "ellipsis").frame(width: 22, height: 22)
@@ -78,7 +78,7 @@ struct ContentView: View {
     private var connectionIndicator: some View {
         ZStack {
             Circle().fill(.black.opacity(0.18)).frame(width: 34, height: 34)
-            Image(systemName: model.selectedDevice?.isWireless == true ? "wifi" : "smartphone")
+            Image(systemName: model.selectedDevice?.isBluetooth == true ? "antenna.radiowaves.left.and.right" : (model.selectedDevice?.isWireless == true ? "wifi" : "smartphone"))
                 .font(.system(size: 15, weight: .semibold))
                 .foregroundStyle(model.selectedDevice?.isOnline == true ? Color.accentColor : Color.secondary)
         }
@@ -127,6 +127,14 @@ struct ContentView: View {
     private var compactSettings: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text("Mirror options").font(.headline)
+            Picker("Connection", selection: $model.preferences.transport) {
+                ForEach(MirrorTransport.allCases) { Text($0.label).tag($0) }
+            }.disabled(model.isMirroring || model.isStarting)
+            if model.preferences.transport == .bluetoothClassic {
+                Text("Start the Android companion and approve capture, then press Mirror. 480p · up to 30 fps · 1 Mbps. Video only.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Group {
             Toggle("Start mirroring automatically", isOn: $model.preferences.autoStart)
             Toggle("Keep phone screen off", isOn: $model.preferences.turnDeviceScreenOff)
             Toggle("Forward audio to Mac", isOn: $model.preferences.forwardAudio)
@@ -145,6 +153,7 @@ struct ContentView: View {
             Picker("Frame rate", selection: $model.preferences.maxFPS) {
                 Text("30 fps").tag(30); Text("60 fps").tag(60); Text("90 fps").tag(90)
             }
+            }.disabled(model.preferences.transport == .bluetoothClassic)
             Text("Changes apply the next time the mirror starts.")
                 .font(.caption).foregroundStyle(.secondary)
         }

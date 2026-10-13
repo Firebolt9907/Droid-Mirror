@@ -545,21 +545,21 @@ sc_server_init(struct sc_server *server, const struct sc_server_params *params,
     // end of the program
     server->params = *params;
 
-    bool ok = sc_adb_init();
+    bool ok = params->external_video_port || sc_adb_init();
     if (!ok) {
         return false;
     }
 
     ok = sc_mutex_init(&server->mutex);
     if (!ok) {
-        sc_adb_destroy();
+        if (!params->external_video_port) { sc_adb_destroy(); }
         return false;
     }
 
     ok = sc_cond_init(&server->cond_stopped);
     if (!ok) {
         sc_mutex_destroy(&server->mutex);
-        sc_adb_destroy();
+        if (!params->external_video_port) { sc_adb_destroy(); }
         return false;
     }
 
@@ -567,7 +567,7 @@ sc_server_init(struct sc_server *server, const struct sc_server_params *params,
     if (!ok) {
         sc_cond_destroy(&server->cond_stopped);
         sc_mutex_destroy(&server->mutex);
-        sc_adb_destroy();
+        if (!params->external_video_port) { sc_adb_destroy(); }
         return false;
     }
 
@@ -961,11 +961,45 @@ sc_server_kill_adb_if_requested(struct sc_server *server) {
     }
 }
 
+// The bridge presents the normal dummy byte, 64-byte device name, codec ID,
+// and scrcpy 5 session/frame packets. Never create an ADB process or tunnel.
+static int
+run_external_video(struct sc_server *server) {
+    server->serial = strdup("bluetooth-classic");
+    if (!server->serial) {
+        LOG_OOM();
+        goto fail;
+    }
+    sc_socket socket = connect_to_server(server, 1, 0, IPV4_LOCALHOST,
+                                         server->params.external_video_port);
+    if (socket == SC_SOCKET_NONE) {
+        goto fail;
+    }
+    server->video_socket = socket;
+    if (!device_read_info(&server->intr, socket, &server->info)) {
+        goto fail;
+    }
+    server->cbs->on_connected(server, server->cbs_userdata);
+    sc_mutex_lock(&server->mutex);
+    while (!server->stopped) {
+        sc_cond_wait(&server->cond_stopped, &server->mutex);
+    }
+    sc_mutex_unlock(&server->mutex);
+    net_interrupt(socket);
+    return 0;
+fail:
+    server->cbs->on_connection_failed(server, server->cbs_userdata);
+    return -1;
+}
+
 static int
 run_server(void *data) {
     struct sc_server *server = data;
 
     const struct sc_server_params *params = &server->params;
+    if (params->external_video_port) {
+        return run_external_video(server);
+    }
 
     // Execute "adb start-server" before "adb devices" so that daemon starting
     // output/errors is correctly printed in the console ("adb devices" output
@@ -1220,5 +1254,5 @@ sc_server_destroy(struct sc_server *server) {
     sc_cond_destroy(&server->cond_stopped);
     sc_mutex_destroy(&server->mutex);
 
-    sc_adb_destroy();
+    if (!server->params.external_video_port) { sc_adb_destroy(); }
 }

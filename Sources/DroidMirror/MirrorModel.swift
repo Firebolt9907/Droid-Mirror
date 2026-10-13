@@ -15,13 +15,24 @@ final class MirrorModel: ObservableObject {
     @Published var errorMessage: String?
     @Published var log = ""
     @Published var preferences: MirrorPreferences {
-        didSet { savePreferences() }
+        didSet {
+            savePreferences()
+            if preferences.transport != oldValue.transport, !isMirroring, !isStarting {
+                selectedID = nil
+                devices = []
+                autoStartAttemptedFor = nil
+                refreshDevices()
+            }
+        }
     }
     @Published var pairingAddress = ""
     @Published var pairingCode = ""
     @Published var connectAddress = ""
 
     private var mirrorProcess: Process?
+    private let classicBluetooth = ClassicBluetoothTransport()
+    @Published private(set) var isStarting = false
+    private var sessionIsBluetooth = false
     private var refreshTimer: Timer?
     private var lockPollTimer: Timer?
     private var toolbarPositionTimer: Timer?
@@ -65,6 +76,10 @@ final class MirrorModel: ObservableObject {
     }
 
     func refreshDevices(silently: Bool = false) {
+        if preferences.transport == .bluetoothClassic {
+            refreshBluetoothDevices(silently: silently)
+            return
+        }
         guard !isRefreshing, let adbPath else {
             if self.adbPath == nil { status = "adb not found — install scrcpy with Homebrew" }
             return
@@ -73,6 +88,7 @@ final class MirrorModel: ObservableObject {
         Task {
             do {
                 let text = try await ProcessRunner.output(adbPath, ["devices", "-l"])
+                guard preferences.transport == .adb else { isRefreshing = false; return }
                 let parsed = parseDevices(text)
                 devices = parsed
                 if selectedID == nil || !parsed.contains(where: { $0.id == selectedID }) {
@@ -83,7 +99,7 @@ final class MirrorModel: ObservableObject {
                 }
                 if parsed.first(where: \ .isOnline) == nil {
                     autoStartAttemptedFor = nil
-                } else if mirrorProcess == nil,
+                } else if preferences.autoStart, mirrorProcess == nil,
                           let online = parsed.first(where: \ .isOnline),
                           autoStartAttemptedFor != online.id {
                     selectedID = online.id
@@ -112,10 +128,95 @@ final class MirrorModel: ObservableObject {
         }
     }
 
+    private func refreshBluetoothDevices(silently: Bool) {
+        guard !isRefreshing, !isMirroring, !isStarting else { return }
+        isRefreshing = true
+        Task {
+            defer { isRefreshing = false }
+            do {
+                let paired = try await ClassicBluetoothTransport.pairedDevices()
+                guard preferences.transport == .bluetoothClassic else { return }
+                devices = paired
+                if selectedID == nil || !paired.contains(where: { $0.id == selectedID }) {
+                    selectedID = paired.first?.id
+                }
+                status = paired.isEmpty ? "Pair your phone in Bluetooth settings" : "Start capture on Android, then press Mirror"
+            } catch {
+                status = error.localizedDescription
+                if !silently { errorMessage = error.localizedDescription }
+            }
+        }
+    }
+
     func start() {
-        guard mirrorProcess == nil else { return }
+        guard mirrorProcess == nil, !isStarting else { return }
+        if preferences.transport == .bluetoothClassic {
+            isStarting = true
+            Task {
+                defer { isStarting = false }
+                await startBluetooth()
+            }
+            return
+        }
+        isStarting = true
         status = "Starting adb…"
-        Task { await startAfterADBCheck() }
+        Task {
+            defer { isStarting = false }
+            await startAfterADBCheck()
+        }
+    }
+
+    private func startBluetooth() async {
+        guard let device = selectedDevice, device.isBluetooth, let scrcpyPath else {
+            errorMessage = "Select a paired Bluetooth phone and install the bundled scrcpy client."
+            return
+        }
+        status = "Connecting over Bluetooth Classic…"
+        do {
+            let port = try await classicBluetooth.connect(address: device.id)
+            guard preferences.transport == .bluetoothClassic, !isTerminatingApplication else {
+                classicBluetooth.stop()
+                return
+            }
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: scrcpyPath)
+            process.arguments = ["--external-video-port=\(port)", "--window-title=DroidMirror — \(device.displayName)",
+                                 "--window-borderless", "--window-width=430", "--video-buffer=0",
+                                 "--no-audio", "--no-control", "--pause-on-exit=false"]
+            if preferences.alwaysOnTop { process.arguments?.append("--always-on-top") }
+            // No serial, ADB environment, injected ADB toolbar, or shell cleanup.
+            var environment = ProcessInfo.processInfo.environment
+            for key in ["ADB", "ANDROID_SERIAL", "DROIDMIRROR_SERIAL", "DYLD_INSERT_LIBRARIES"] {
+                environment.removeValue(forKey: key)
+            }
+            process.environment = environment
+            process.standardOutput = FileHandle.nullDevice
+            process.standardError = FileHandle.nullDevice
+            process.terminationHandler = { [weak self] child in
+                Task { @MainActor in
+                    guard let self else { return }
+                    self.classicBluetooth.stop()
+                    self.mirrorProcess = nil
+                    self.isMirroring = false
+                    self.sessionIsBluetooth = false
+                    self.status = "Bluetooth mirror closed"
+                    if child.terminationStatus != 0 {
+                        self.errorMessage = "Bluetooth video stopped. Restart capture on Android and reconnect. Ensure the bundled scrcpy supports --external-video-port."
+                    }
+                }
+            }
+            try process.run()
+            mirrorProcess = process
+            sessionIsBluetooth = true
+            isMirroring = true
+            status = "Bluetooth · 480p · up to 30 fps · 1 Mbps"
+        } catch is CancellationError {
+            status = "Bluetooth connection cancelled"
+        } catch {
+            classicBluetooth.stop()
+            errorMessage = error.localizedDescription
+            status = "Bluetooth connection failed"
+        }
     }
 
     private func startAfterADBCheck() async {
@@ -214,6 +315,7 @@ final class MirrorModel: ObservableObject {
     }
 
     func stop() {
+        classicBluetooth.stop()
         stopLockMonitoring()
         stopToolbarPositioning()
         isDeviceLocked = false
@@ -224,6 +326,7 @@ final class MirrorModel: ObservableObject {
     func shutdownForApplicationTermination() async {
         guard !isTerminatingApplication else { return }
         isTerminatingApplication = true
+        classicBluetooth.stop()
         refreshTimer?.invalidate()
         refreshTimer = nil
         stopLockMonitoring()
@@ -328,12 +431,12 @@ final class MirrorModel: ObservableObject {
     @discardableResult func submitPin() -> Bool { postKeyToMirror(36) }
 
     private func sendShortcut(_ keys: [String]) {
-        guard let adbPath, let serial = selectedID else { return }
+        guard !sessionIsBluetooth, preferences.transport == .adb, let adbPath, let serial = selectedID else { return }
         Task { _ = try? await ProcessRunner.output(adbPath, ["-s", serial, "shell", "input", "keyevent"] + keys) }
     }
 
     private func postKeyToMirror(_ keyCode: CGKeyCode) -> Bool {
-        guard let process = mirrorProcess else { return false }
+        guard !sessionIsBluetooth, let process = mirrorProcess else { return false }
         let trusted = AXIsProcessTrustedWithOptions(["AXTrustedCheckOptionPrompt": true] as CFDictionary)
         guard trusted else {
             errorMessage = "PIN entry needs Accessibility permission so DroidMirror can send keys directly to the mirror. Enable DroidMirror in System Settings → Privacy & Security → Accessibility, then try again."

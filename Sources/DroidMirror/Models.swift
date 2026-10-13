@@ -8,7 +8,8 @@ struct AndroidDevice: Identifiable, Hashable {
     let transport: String
 
     var isOnline: Bool { state == "device" }
-    var isWireless: Bool { id.contains(":") }
+    var isBluetooth: Bool { transport == "bluetooth-classic" }
+    var isWireless: Bool { !isBluetooth && id.contains(":") }
     var displayName: String {
         model.replacingOccurrences(of: "_", with: " ").trimmingCharacters(in: .whitespaces).nilIfEmpty
             ?? (isWireless ? "Wireless Android" : "Android device")
@@ -39,7 +40,14 @@ enum ScrollMode: String, CaseIterable, Identifiable, Codable {
     }
 }
 
+enum MirrorTransport: String, CaseIterable, Identifiable, Codable {
+    case bluetoothClassic, adb
+    var id: String { rawValue }
+    var label: String { self == .bluetoothClassic ? "Bluetooth Classic (video only)" : "USB / wireless ADB" }
+}
+
 struct MirrorPreferences: Codable {
+    var transport: MirrorTransport = .bluetoothClassic
     var autoStart = true
     var turnDeviceScreenOff = true
     var powerOffOnClose = false
@@ -55,7 +63,7 @@ struct MirrorPreferences: Codable {
     var showTouches = false
 
     private enum CodingKeys: String, CodingKey {
-        case autoStart, turnDeviceScreenOff, powerOffOnClose, stayAwake
+        case transport, autoStart, turnDeviceScreenOff, powerOffOnClose, stayAwake
         case alwaysOnTop, forwardAudio, maxFPS, bitRateMbps, maxSize
         case codec, keyboard, scrollMode, showTouches
     }
@@ -65,6 +73,7 @@ struct MirrorPreferences: Codable {
     init(from decoder: Decoder) throws {
         self.init()
         let values = try decoder.container(keyedBy: CodingKeys.self)
+        transport = try values.decodeIfPresent(MirrorTransport.self, forKey: .transport) ?? transport
         autoStart = try values.decodeIfPresent(Bool.self, forKey: .autoStart) ?? autoStart
         turnDeviceScreenOff = try values.decodeIfPresent(Bool.self, forKey: .turnDeviceScreenOff) ?? turnDeviceScreenOff
         powerOffOnClose = try values.decodeIfPresent(Bool.self, forKey: .powerOffOnClose) ?? powerOffOnClose

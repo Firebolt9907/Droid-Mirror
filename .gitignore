@@ -1,3 +1,6 @@
 /.DS_Store
 /.build
 /.vscode
+/BluetoothCompanion/.gradle/
+/BluetoothCompanion/build/
+/BluetoothCompanion/local.properties

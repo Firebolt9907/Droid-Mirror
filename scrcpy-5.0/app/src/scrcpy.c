@@ -438,6 +438,7 @@ scrcpy(struct scrcpy_options *options) {
         .port_range = options->port_range,
         .tunnel_host = options->tunnel_host,
         .tunnel_port = options->tunnel_port,
+        .external_video_port = options->external_video_port,
         .min_size_alignment = options->min_size_alignment,
         .max_size = options->max_size,
         .video_bit_rate = options->video_bit_rate,

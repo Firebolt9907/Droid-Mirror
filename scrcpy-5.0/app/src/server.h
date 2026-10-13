@@ -40,6 +40,8 @@ struct sc_server_params {
     struct sc_port_range port_range;
     uint32_t tunnel_host;
     uint16_t tunnel_port;
+    // ADB-free, video-only scrcpy stream from a loopback transport bridge.
+    uint16_t external_video_port;
     uint16_t max_size;
     uint8_t min_size_alignment;
     uint32_t video_bit_rate;

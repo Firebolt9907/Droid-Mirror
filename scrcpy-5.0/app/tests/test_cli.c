@@ -149,10 +149,37 @@ static void test_parse_shortcut_mods(void) {
     assert(!ok);
 }
 
+static void test_external_video(void) {
+    struct scrcpy_cli_args args = {.opts = scrcpy_options_default};
+    char *argv[] = {"scrcpy", "--external-video-port=45678"};
+    assert(scrcpy_parse_args(&args, ARRAY_LEN(argv), argv));
+    assert(args.opts.external_video_port == 45678);
+    assert(args.opts.video);
+    assert(!args.opts.audio);
+    assert(!args.opts.control);
+    assert(!args.opts.clipboard_autosync);
+
+    const char *bad[] = {"--external-video-port=0", "--external-video-port=65536",
+                         "--external-video-port=-1", "--external-video-port=abc"};
+    for (size_t i = 0; i < ARRAY_LEN(bad); ++i) {
+        args = (struct scrcpy_cli_args) {.opts = scrcpy_options_default};
+        char *invalid[] = {"scrcpy", (char *) bad[i]};
+        assert(!scrcpy_parse_args(&args, ARRAY_LEN(invalid), invalid));
+    }
+    const char *conflicts[] = {"--serial=phone", "--tcpip=127.0.0.1",
+                              "--kill-adb-on-close", "--list-encoders", "--tunnel-port=1234"};
+    for (size_t i = 0; i < ARRAY_LEN(conflicts); ++i) {
+        args = (struct scrcpy_cli_args) {.opts = scrcpy_options_default};
+        char *invalid[] = {"scrcpy", "--external-video-port=45678", (char *) conflicts[i]};
+        assert(!scrcpy_parse_args(&args, ARRAY_LEN(invalid), invalid));
+    }
+}
+
 int main(int argc, char *argv[]) {
     (void) argc;
     (void) argv;
 
+    test_external_video();
     test_flag_version();
     test_flag_help();
     test_options();

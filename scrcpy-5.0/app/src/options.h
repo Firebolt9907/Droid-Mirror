@@ -293,6 +293,8 @@ struct scrcpy_options {
     struct sc_port_range port_range;
     uint32_t tunnel_host;
     uint16_t tunnel_port;
+    // ADB-free, video-only scrcpy stream from a loopback transport bridge.
+    uint16_t external_video_port;
     uint8_t shortcut_mods; // OR of enum sc_shortcut_mod values
     uint8_t min_size_alignment;
     uint16_t max_size;

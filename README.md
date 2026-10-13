@@ -2,7 +2,16 @@
 
 A native SwiftUI control center for scrcpy that makes Android mirroring on macOS feel closer to Apple's iPhone Mirroring.
 
-## Highlights
+Bluetooth Classic RFCOMM is now the default **source** transport: video-only
+MediaProjection capture at a 480-pixel short edge, up to 30 fps and a 1 Mbps H.264
+target, without LAN or ADB. It requires the new Android companion and a rebuilt
+Mac app. The compiled Android test APK is included at
+`outputs/DroidMirror-Bluetooth-0.1-debug.apk`; checked-in Mac app binaries have not
+been updated. See
+[Bluetooth setup, build steps and validation limits](Native/CLASSIC-BLUETOOTH.md).
+Choose USB / wireless ADB in Connection settings for the original full controls.
+
+## ADB mode highlights
 
 - Automatic USB and wireless device discovery
 - Guided Android 11+ wireless pairing
@@ -14,7 +23,7 @@ A native SwiftUI control center for scrcpy that makes Android mirroring on macOS
 
 ## Build and run
 
-Requirements: macOS 14+, Xcode command-line tools, and scrcpy (`brew install scrcpy`).
+Requirements: macOS 14+, Xcode command-line tools, and the client dependencies (`brew install meson ninja pkg-config sdl3 ffmpeg libusb`). Bluetooth setup also requires the Android companion; see the linked guide.
 
 ```sh
 chmod +x build-app.sh
@@ -22,12 +31,12 @@ chmod +x build-app.sh
 open outputs/DroidMirror.app
 ```
 
-On Android, enable **Developer options → USB debugging**. Connect once by USB and approve the computer. For wireless use, open the app's **Wireless connection** sheet and follow the pairing instructions.
+For ADB mode, on Android enable **Developer options → USB debugging**. Connect once by USB and approve the computer. For wireless use, open the app's **Wireless connection** sheet and follow the pairing instructions.
 
 Launch the app from Finder. Opening it through a sandboxed preview host can prevent adb from opening its local port. Touch-style scrolling is intercepted inside the scrcpy window and does not require Accessibility permission.
 
 The mirror itself is scrcpy's hardware-accelerated window. DroidMirror deliberately uses the stable scrcpy input/video path instead of re-encoding or screen-capturing that window, preserving scrcpy's low latency.
 
-## Default scrcpy profile
+## ADB scrcpy profile
 
-The default launch profile uses a borderless 430×860 window, H.264 at 12 Mbps, 1920 px maximum size, 60 fps, zero video buffering, 30 ms audio buffering, SDK mouse/keyboard input, screen-off mirroring, stay-awake, and macOS Command remapped to Android Control when chorded with another key (standalone Command presses are not forwarded).
+The ADB launch profile uses a borderless 430×860 window, H.264 at 12 Mbps, 1920 px maximum size, 60 fps, zero video buffering, 30 ms audio buffering, SDK mouse/keyboard input, screen-off mirroring, stay-awake, and macOS Command remapped to Android Control when chorded with another key (standalone Command presses are not forwarded).

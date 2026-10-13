@@ -112,6 +112,7 @@ enum {
     OPT_IGNORE_VIDEO_ENCODER_CONSTRAINTS,
     OPT_NO_TERMINAL_TITLE,
     OPT_HWDEC,
+    OPT_EXTERNAL_VIDEO_PORT,
 };
 
 struct sc_option {
@@ -148,6 +149,14 @@ struct sc_getopt_adapter {
 };
 
 static const struct sc_option options[] = {
+    {
+        .longopt_id = OPT_EXTERNAL_VIDEO_PORT,
+        .longopt = "external-video-port",
+        .argdesc = "port",
+        .text = "Read a scrcpy 5 video stream from a loopback transport bridge "
+                "without starting ADB. Video only; capture settings are owned "
+                "by the companion app. No audio, input, or file transfer.",
+    },
     {
         .longopt_id = OPT_ALWAYS_ON_TOP,
         .longopt = "always-on-top",
@@ -2793,6 +2802,14 @@ parse_args_with_getopt(struct scrcpy_cli_args *args, int argc, char *argv[],
             case OPT_NO_CLIPBOARD_AUTOSYNC:
                 opts->clipboard_autosync = false;
                 break;
+            case OPT_EXTERNAL_VIDEO_PORT: {
+                long port;
+                if (!parse_integer_arg(optarg, &port, false, 1, 65535, "port")) {
+                    return false;
+                }
+                opts->external_video_port = (uint16_t) port;
+                break;
+            }
             case OPT_TCPIP:
                 opts->tcpip = true;
                 opts->tcpip_dst = optarg;
@@ -3036,6 +3053,27 @@ parse_args_with_getopt(struct scrcpy_cli_args *args, int argc, char *argv[],
              "  --select-tcpip (-e)\n"
              "  --tcpip=<addr> (with an argument)");
         return false;
+    }
+
+    if (opts->external_video_port) {
+        if (selectors || opts->list || opts->start_app || opts->kill_adb_on_close
+                || opts->tcpip || opts->tunnel_host || opts->tunnel_port) {
+            LOGE("External video cannot be combined with ADB/device options");
+            return false;
+        }
+#ifdef HAVE_USB
+        if (opts->otg) {
+            LOGE("External video cannot be combined with OTG");
+            return false;
+        }
+#endif
+        opts->audio = false;
+        opts->control = false;
+        opts->turn_screen_off = false;
+        opts->stay_awake = false;
+        opts->power_off_on_close = false;
+        opts->show_touches = false;
+        opts->clipboard_autosync = false;
     }
 
     bool otg = false;
