@@ -34,6 +34,7 @@ final class MirrorModel: ObservableObject {
     @Published private(set) var isStarting = false
     private var sessionIsBluetooth = false
     private var phoneTakenOver = false
+    private var sessionEndedOnPhone = false
     private var refreshTimer: Timer?
     private var lockPollTimer: Timer?
     private var toolbarPositionTimer: Timer?
@@ -174,6 +175,7 @@ final class MirrorModel: ObservableObject {
         }
         status = "Connecting over Bluetooth Classic…"
         phoneTakenOver = false
+        sessionEndedOnPhone = false
         classicBluetooth.onEvent = { [weak self] event in
             guard let self else { return }
             switch event {
@@ -185,7 +187,9 @@ final class MirrorModel: ObservableObject {
                 }
             case .captureFailed:
                 self.errorMessage = "Privileged capture unavailable. Authorize Shizuku and enable Mac connections once in the Android companion."
-            case .sessionEnded: self.status = "Remote session ended"
+            case .sessionEnded:
+                self.sessionEndedOnPhone = true
+                self.status = "Remote session ended"
             }
         }
         do {
@@ -217,7 +221,7 @@ final class MirrorModel: ObservableObject {
                     self.isMirroring = false
                     self.sessionIsBluetooth = false
                     self.status = "Bluetooth mirror closed"
-                    if child.terminationStatus != 0 && !self.phoneTakenOver && self.errorMessage == nil {
+                    if child.terminationStatus != 0 && !self.phoneTakenOver && !self.sessionEndedOnPhone && self.errorMessage == nil {
                         self.errorMessage = "Bluetooth video stopped. Reconnect from your Mac. Keep Shizuku running and use the updated companion and bundled client."
                     }
                 }

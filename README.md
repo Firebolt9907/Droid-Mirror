@@ -8,7 +8,7 @@ press **Mirror on the Mac** to start privileged scrcpy capture. There is no
 per-session Android screen-share prompt and no ADB/LAN transport. The profile
 is approximately 480p, up to 30 fps and a 1 Mbps H.264 target.
 
-The compiled test APK is `outputs/DroidMirror-Bluetooth-0.4-debug.apk`.
+The compiled test APK is `outputs/DroidMirror-Bluetooth-0.5-debug.apk`.
 Rebuild the Mac app for the matching event transport; checked-in Mac binaries are
 unchanged. A phone power/screen-lock action ends the session, locks/restores the
 phone through Shizuku, and shows a separate **phone was used** popup on Mac.

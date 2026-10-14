@@ -19,6 +19,10 @@ public final class CaptureService extends Service {
     private volatile BluetoothServerSocket listener;
     private volatile BluetoothSocket socket;
     private static final class SessionState {
+        final String token = UUID.randomUUID().toString();
+        String peerName;
+        volatile long startedElapsed;
+        volatile boolean promotionDismissed;
         volatile ParcelFileDescriptor inputPipe;
         volatile ShizukuDisplayClient guard;
         volatile boolean stopped;
@@ -32,7 +36,8 @@ public final class CaptureService extends Service {
     private final BroadcastReceiver screenActions = new BroadcastReceiver() {
         @Override public void onReceive(Context context, Intent intent) {
             SessionState state = current;
-            if (Intent.ACTION_SCREEN_OFF.equals(intent.getAction()) && state != null && !state.stopped && state.guard != null)
+            if (Intent.ACTION_SCREEN_OFF.equals(intent.getAction()) && state != null && !state.stopped
+                && state.endEvent.get() == 0 && state.guard != null)
                 state.guard.localUse();
         }
     };
@@ -45,6 +50,7 @@ public final class CaptureService extends Service {
     private volatile long writeStarted;
     private Thread server;
     private ScheduledExecutorService watchdog;
+    private final Object notificationLock = new Object();
 
     enum ReadyResult { START_REQUESTED, NOT_CONFIGURED, PERMISSION_REQUIRED, BACKGROUND_RESTRICTED, FAILED }
 
@@ -67,22 +73,37 @@ public final class CaptureService extends Service {
     }
     @Override public IBinder onBind(Intent intent) { return null; }
     private Notification notification(String text) {
+        SessionState state = current;
+        if (state != null && state.streamStarted.get() && !state.stopped)
+            return StreamNotifications.streaming(this, state.token, state.peerName, state.startedElapsed, state.promotionDismissed);
         PendingIntent open = PendingIntent.getActivity(this, 0, new Intent(this, CaptureActivity.class), PendingIntent.FLAG_IMMUTABLE);
         return new Notification.Builder(this, "capture").setSmallIcon(android.R.drawable.ic_menu_camera)
-            .setContentTitle("DroidMirror Bluetooth").setContentText(text).setContentIntent(open).setOngoing(true).build();
+            .setContentTitle("DroidMirror Bluetooth").setContentText(text).setContentIntent(open)
+            .setOngoing(true).setOnlyAlertOnce(true).build();
     }
     private void status(String text) {
-        if (!shutdown) getSystemService(NotificationManager.class).notify(1, notification(text));
+        synchronized (notificationLock) {
+            if (!shutdown) getSystemService(NotificationManager.class).notify(1, notification(text));
+        }
     }
     @Override public int onStartCommand(Intent intent, int flags, int id) {
+        if (intent != null && (StreamNotifications.DISCONNECT.equals(intent.getAction())
+                || StreamNotifications.DISMISSED.equals(intent.getAction()))) {
+            notificationAction(intent);
+            // A stale PendingIntent must not start readiness after a process death.
+            if (server == null) { stopSelfResult(id); return START_NOT_STICKY; }
+            return START_STICKY;
+        }
         if (!getSharedPreferences("ready", MODE_PRIVATE).getBoolean("enabled", false)) { stopSelf(); return START_NOT_STICKY; }
         if (Build.VERSION.SDK_INT >= 31 && checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
             stopSelf(); return START_NOT_STICKY;
         }
         NotificationManager notifications = getSystemService(NotificationManager.class);
         notifications.createNotificationChannel(new NotificationChannel("capture", "Bluetooth readiness", NotificationManager.IMPORTANCE_LOW));
-        if (Build.VERSION.SDK_INT >= 29) startForeground(1, notification("Ready for your paired Mac"), ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE);
-        else startForeground(1, notification("Ready for your paired Mac"));
+        synchronized (notificationLock) {
+            if (Build.VERSION.SDK_INT >= 29) startForeground(1, notification("Ready for your paired Mac"), ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE);
+            else startForeground(1, notification("Ready for your paired Mac"));
+        }
         if (server != null) return START_STICKY;
         watchdog = Executors.newSingleThreadScheduledExecutor();
         watchdog.scheduleWithFixedDelay(() -> {
@@ -90,6 +111,25 @@ public final class CaptureService extends Service {
         }, 100, 100, TimeUnit.MILLISECONDS);
         server = new Thread(this::listen, "BluetoothReady"); server.start();
         return START_STICKY;
+    }
+    private synchronized void notificationAction(Intent intent) {
+        SessionState state = current;
+        if (state == null || state.stopped || !state.streamStarted.get()
+                || !state.token.equals(intent.getStringExtra(StreamNotifications.TOKEN))) return;
+        if (StreamNotifications.DISMISSED.equals(intent.getAction())) {
+            state.promotionDismissed = true;
+            return;
+        }
+        if (!state.endEvent.compareAndSet(0, BluetoothWire.SESSION_ENDED)) return;
+        // Ordinary release restores the panel. Never route notification actions through localUse().
+        ShizukuDisplayClient guard = state.guard;
+        if (guard != null) guard.close();
+        // Normally capture EOF drains SESSION_ENDED; bound shutdown even if an encoder fails to close.
+        if (watchdog != null) watchdog.schedule(() -> {
+            synchronized (CaptureService.this) {
+                if (current == state && !state.stopped) { stopSession(); status("Ready for your paired Mac"); }
+            }
+        }, 750, TimeUnit.MILLISECONDS);
     }
     private void listen() {
         while (!shutdown) {
@@ -121,6 +161,10 @@ public final class CaptureService extends Service {
         SessionState state = new SessionState(); current = state; writeStarted = 0;
         BluetoothWire wire = null;
         try {
+            if (Build.VERSION.SDK_INT >= 31 && checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED)
+                throw new SecurityException("Nearby Devices permission was revoked");
+            String name = socket.getRemoteDevice().getName();
+            state.peerName = name == null || name.trim().isEmpty() ? getString(R.string.stream_peer_fallback) : name;
             wire = new BluetoothWire(socket.getOutputStream());
             if (!ShizukuDisplayClient.authorized()) { wire.event(BluetoothWire.CAPTURE_FAILED); status("Authorize Shizuku on the phone once to enable Mac-initiated capture"); return; }
             state.hasGuard = true;
@@ -147,7 +191,13 @@ public final class CaptureService extends Service {
                     byte[] frame = new byte[12 + size]; System.arraycopy(frameHeader, 0, frame, 0, 12); input.readFully(frame, 12, size);
                     sendVideo(wire, frame);
                     if ((frameHeader[0] & 0x40) == 0) {
-                        if (state.streamStarted.compareAndSet(false, true)) wire.event(BluetoothWire.STREAM_STARTED);
+                        if (!state.streamStarted.get()) {
+                            state.startedElapsed = SystemClock.elapsedRealtime();
+                            if (state.streamStarted.compareAndSet(false, true)) {
+                                wire.event(BluetoothWire.STREAM_STARTED);
+                                status("Streaming");
+                            }
+                        }
                         state.guard.frameSent();
                     }
                 }
@@ -174,11 +224,13 @@ public final class CaptureService extends Service {
     private synchronized void stopSession() {
         SessionState state = current;
         if (state != null) {
+            boolean wasStreaming = state.streamStarted.get() && !state.stopped;
             state.stopped = true;
             ShizukuDisplayClient active = state.guard; state.guard = null;
             if (active != null) active.close(); else if (!state.hasGuard && state.streamStarted.get()) auditEnd(state, false);
             try { if (state.inputPipe != null) state.inputPipe.close(); } catch (IOException ignored) {}
             state.inputPipe = null;
+            if (wasStreaming) StreamNotifications.ended(this, state.token);
         }
         try { if (socket != null) socket.close(); } catch (IOException ignored) {}
         socket = null; writeStarted = 0;

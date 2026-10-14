@@ -18,6 +18,10 @@ public final class RemoteSessionTest {
         require(session.begin(a)); require(session.finish(a, RemoteSession.APP_DIED));
         require(!session.finish(a, RemoteSession.STOP)); require(causes.size() == 3);
         require(session.begin(b)); require(session.finish(b, RemoteSession.STOP));
+        int stoppedCount = causes.size();
+        session.tick(false); // Notification disconnect followed by a screen-off broadcast is still an ordinary stop.
+        require(!session.finish(b, RemoteSession.LOCAL_USE));
+        require(causes.size() == stoppedCount && causes.get(stoppedCount - 1) == RemoteSession.STOP);
         require(session.begin(a, 10000)); clock.addAndGet(3000); session.tick(true); require(session.owns(a));
         require(session.heartbeat(a)); clock.addAndGet(2000); session.tick(true); require(!session.owns(a));
         System.out.println("RemoteSession: local-use precedence, crash/stop/timeout, stale owners and one end event per session passed");

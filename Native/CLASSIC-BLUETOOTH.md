@@ -9,8 +9,8 @@ of Android's ordinary app permissions. Remote input and audio remain ADB-only.
 
 ## Install and set up once
 
-The compiled Android test APK is `outputs/DroidMirror-Bluetooth-0.4-debug.apk`,
-with a SHA-256 checksum beside it. It uses the same signing certificate as 0.1/0.2/0.3
+The compiled Android test APK is `outputs/DroidMirror-Bluetooth-0.5-debug.apk`,
+with a SHA-256 checksum beside it. It uses the same signing certificate as 0.1/0.2/0.3/0.4
 and can be installed over them. It is a debug build, not a store release.
 
 1. Pair the phone and Mac in their system Bluetooth settings.
@@ -89,9 +89,48 @@ new alert. The entry points are public for Tasker, but only the configured bonde
 Mac can connect and initiate capture. Compilation/lint do not validate Android/OEM
 background launch policies; test the Tasker profile on your phone.
 
+## Stream live update (Android 0.5)
+
+Once an actual video frame has reached the Mac, the readiness notification
+becomes **Screen sharing**, showing the bonded Mac's Bluetooth name, elapsed
+session time, and **Disconnect**. The system chronometer counts up without
+reposting every second. Tapping the notification opens a compact details dialog
+with the same name, duration and action. Ending the stream closes an open dialog
+and returns the notification to Bluetooth readiness; capture startup failures do
+not create a live stream notification.
+
+On Android 16 systems supporting the 36.1 live-update APIs, the app requests
+promotion to a persistent status-bar chip. Tap the system chip to expand its
+notification details. The app declares `POST_PROMOTED_NOTIFICATIONS` and uses the
+documented `android.requestPromotedOngoing` extra, a standard BigText notification,
+ongoing flag and low-importance channel. Base Android 16 and older phones fall
+back to the ongoing notification; user notification/live-update settings and OEM
+eligibility rules can also prevent the chip. Grant notification access during
+setup, and enable Live Updates for DroidMirror in system app notification settings
+where that control exists. The app does not repeatedly re-promote a dismissed
+update during the same session. System placement/visibility is not app-controlled.
+
+**Disconnect** releases the normal Shizuku session and restores the physical
+panel without invoking the power-button/local-use path. macOS receives the normal
+`SESSION_ENDED` event, closes the mirror, and posts the existing remote-use audit;
+it does not show the “phone turned on” / “phone was used” takeover popup. A slow
+or failed link can lose the final event, but cannot turn Disconnect into a
+local-use event. Cleanup is bounded if the encoder fails to close, with shell
+watchdog recovery still active. Readiness remains enabled for the next Mac start.
+Each action is immutable and carries a unique session token; stale actions cannot
+stop a subsequent stream. Both the action service and details activity are private.
+
+The pill is usable while the phone panel is on. With the panel-off option enabled,
+pressing the hardware power button to regain phone access still follows the
+previously requested takeover flow and ends the session with its separate Mac
+popup. The live update does not bypass keyguard or change power-button behavior.
+Rebuild the Mac from this commit to suppress generic stream-failure messages after
+an intentional normal end. Actual chip presentation and notification interaction
+still require phone/OEM testing.
+
 ## Build
 
-Android requires JDK 17+ and Android SDK 35. Gradle 8.11.1 is pinned and checksum
+Android requires JDK 17+ and Android SDK 36. Gradle 8.11.1 is pinned and checksum
 verified by the checked-in wrapper:
 
 ```sh
@@ -210,13 +249,13 @@ are killed. Reconnection/status notifications are not evidence of an unlock.
 ## Validation
 
 `assembleDebug lintDebug` succeeds with zero lint errors in the Linux workspace,
-using JDK 17, SDK 35, AGP 8.9.1 and Gradle 8.11.1. The signed APK verifies and uses
+using JDK 17, SDK 36, AGP 8.9.1 and Gradle 8.11.1. The signed APK verifies and uses
 the same certificate as the previous test builds. Portable checks include:
 
 - DisplayLease: stop/death-path recovery, expiry, stale owners, late heartbeats,
   failed ON preflight, partial OFF rollback and retrying restoration.
 - RemoteSession: one end event, local-use precedence, crash/stop/timeout, stale
-  owners and startup grace becoming the short active-stream timeout.
+  owners, ordinary disconnect followed by screen-off, and startup grace becoming the short active-stream timeout.
 - VideoWire and BluetoothWire: scrcpy headers/flags, dimensions, chunking and events.
 - Native C parser under address/undefined-behavior sanitizers: every fragment size,
   event/video isolation, legacy input, malformed records and truncation.

@@ -2,7 +2,7 @@ plugins { id 'com.android.application' version '8.9.1' }
 android {
     namespace 'app.droidmirror.bluetooth'
     buildFeatures { aidl true }
-    compileSdk 35
+    compileSdk 36
     sourceSets {
         main.java.srcDirs += '../scrcpy-5.0/server/src/main/java'
         main.aidl.srcDirs += '../scrcpy-5.0/server/src/main/aidl'
@@ -11,8 +11,8 @@ android {
         applicationId 'app.droidmirror.bluetooth'
         minSdk 26
         targetSdk 35
-        versionCode 4
-        versionName '0.4'
+        versionCode 5
+        versionName '0.5'
     }
 }
 
