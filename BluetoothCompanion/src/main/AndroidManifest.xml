@@ -3,9 +3,10 @@
     <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="moe.shizuku.manager.permission.API_V23" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-feature android:name="android.hardware.bluetooth" android:required="true" />
     <application android:label="DroidMirror Bluetooth" android:theme="@android:style/Theme.Material.Light.NoActionBar" android:allowBackup="false">
         <provider android:name="rikka.shizuku.ShizukuProvider"
@@ -15,6 +16,9 @@
         <activity android:name=".CaptureActivity" android:exported="true">
             <intent-filter><action android:name="android.intent.action.MAIN" /><category android:name="android.intent.category.LAUNCHER" /></intent-filter>
         </activity>
-        <service android:name=".CaptureService" android:exported="false" android:foregroundServiceType="mediaProjection" />
+        <receiver android:name=".ReadyReceiver" android:exported="false">
+            <intent-filter><action android:name="android.intent.action.BOOT_COMPLETED" /></intent-filter>
+        </receiver>
+        <service android:name=".CaptureService" android:exported="false" android:foregroundServiceType="connectedDevice" />
     </application>
 </manifest>

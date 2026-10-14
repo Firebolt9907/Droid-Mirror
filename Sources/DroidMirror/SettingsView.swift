@@ -22,7 +22,7 @@ struct SettingsView: View {
                     }
                     Text(model.status).font(.caption).foregroundStyle(.secondary)
                 }
-                Text("Bluetooth uses the Android companion at 480p, up to 30 fps, and 1 Mbps H.264. Approve screen capture on Android each session. Audio and remote input require ADB. For screen-off, enable Shizuku recovery in the Android companion.")
+                Text("Bluetooth uses the Android companion at 480p, up to 30 fps, and 1 Mbps H.264. Authorize Shizuku and enable Mac connections once on Android; future streams start from the Mac. Audio and remote input require ADB. For screen-off, enable Shizuku recovery in the Android companion.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section("iPhone-like behavior") {

@@ -6,6 +6,34 @@ final class ClassicBluetoothTransport {
     private var outputHandle: FileHandle?
     private var outputURL: URL?
     private var generation = UUID()
+    private var monitor: Task<Void, Never>?
+    private var consumedLines = 0
+    var onEvent: ((Event) -> Void)?
+    enum Event: String {
+        case phoneOn = "PHONE_ON", sessionEnded = "SESSION_ENDED", phoneLocalUse = "PHONE_LOCAL_USE"
+        case streamStarted = "STREAM_STARTED", captureFailed = "CAPTURE_FAILED"
+    }
+    private func pollEvents() {
+        guard let outputURL, let data = try? Data(contentsOf: outputURL), data.count <= 16_384 else { return }
+        let lines = String(decoding: data, as: UTF8.self).components(separatedBy: "\n")
+        let completed = max(0, lines.count - 1)
+        if completed > consumedLines {
+            for line in lines[consumedLines..<completed] {
+                if line.hasPrefix("EVENT "), let event = Event(rawValue: String(line.dropFirst(6))) { onEvent?(event) }
+            }
+            consumedLines = completed
+        }
+    }
+    private func monitorEvents() {
+        monitor = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self else { return }
+                self.pollEvents()
+                if self.process?.isRunning != true { return }
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+        }
+    }
 
     static var helperPath: String? {
         let url = Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/DroidMirrorBluetooth")
@@ -35,7 +63,7 @@ final class ClassicBluetoothTransport {
         child.standardInput = FileHandle.nullDevice
         child.standardOutput = handle
         child.standardError = handle
-        outputURL = url; outputHandle = handle; process = child
+        outputURL = url; outputHandle = handle; process = child; consumedLines = 0
         do {
             try child.run()
             for _ in 0..<200 {
@@ -44,11 +72,16 @@ final class ClassicBluetoothTransport {
                 guard data.count <= 16_384 else { throw RunnerError.failed("Bluetooth helper returned too much output") }
                 let text = String(decoding: data, as: UTF8.self)
                 if let line = text.split(separator: "\n").first(where: { $0.hasPrefix("READY ") }),
-                   let port = UInt16(line.dropFirst(6)), port != 0, child.isRunning { return port }
-                if !child.isRunning { throw RunnerError.failed(text.nilIfEmpty ?? "Bluetooth connection failed") }
+                   let port = UInt16(line.dropFirst(6)), port != 0, child.isRunning { monitorEvents(); return port }
+                if !child.isRunning {
+                    if text.contains("EVENT CAPTURE_FAILED") {
+                        throw RunnerError.failed("Privileged capture unavailable. Authorize Shizuku and enable Mac connections once on Android.")
+                    }
+                    throw RunnerError.failed(text.nilIfEmpty ?? "Bluetooth connection failed")
+                }
                 try await Task.sleep(for: .milliseconds(100))
             }
-            throw RunnerError.failed("Bluetooth connection timed out. Start capture on Android and select the paired Mac there.")
+            throw RunnerError.failed("Bluetooth connection timed out. Enable Mac connections once in Android setup and keep Shizuku running.")
         } catch {
             if token == generation { stop() }
             throw error
@@ -56,6 +89,8 @@ final class ClassicBluetoothTransport {
     }
 
     func stop() {
+        pollEvents()
+        monitor?.cancel(); monitor = nil
         generation = UUID()
         if process?.isRunning == true { process?.terminate() }
         process = nil

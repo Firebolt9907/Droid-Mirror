@@ -2,18 +2,20 @@
 
 A native SwiftUI control center for scrcpy that makes Android mirroring on macOS feel closer to Apple's iPhone Mirroring.
 
-Bluetooth Classic RFCOMM is now the default **source** transport: video-only
-MediaProjection capture at a 480-pixel short edge, up to 30 fps and a 1 Mbps H.264
-target, without LAN or ADB. It requires the new Android companion and a rebuilt
-Mac app. The compiled Android test APK is included at
-`outputs/DroidMirror-Bluetooth-0.2-debug.apk`; checked-in Mac app binaries have not
-been updated. See
-[Bluetooth setup, build steps and validation limits](Native/CLASSIC-BLUETOOTH.md).
-Choose USB / wireless ADB in Connection settings for the original full controls.
-The Android companion can optionally request Shizuku permission for physical
-panel-off mirroring, with app-process Binder death recovery and a two-second
-watchdog lease running in a separate shell process. Device support and recovery
-latency still need hardware validation; see the setup guide.
+Bluetooth Classic RFCOMM is the default source transport: after one-time Android
+setup (Shizuku authorization, a selected paired Mac and **Enable Mac connections**),
+press **Mirror on the Mac** to start privileged scrcpy capture. There is no
+per-session Android screen-share prompt and no ADB/LAN transport. The profile
+is approximately 480p, up to 30 fps and a 1 Mbps H.264 target.
+
+The compiled test APK is `outputs/DroidMirror-Bluetooth-0.3-debug.apk`.
+Rebuild the Mac app for the matching event transport; checked-in Mac binaries are
+unchanged. A phone power/screen-lock action ends the session, locks/restores the
+phone through Shizuku, and shows a separate **phone was used** popup on Mac.
+End-of-session audit notifications are posted on phone and Mac. Shell watchdog
+recovery covers app death and stale stream leases; physical-device behavior still
+needs validation. Audio and remote input remain available through ADB mode.
+See [setup, behavior and validation limits](Native/CLASSIC-BLUETOOTH.md).
 
 ## ADB mode highlights
 

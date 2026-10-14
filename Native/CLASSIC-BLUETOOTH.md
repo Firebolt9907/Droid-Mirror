@@ -1,216 +1,188 @@
-# Bluetooth Classic video transport
+# Bluetooth Classic: Mac-initiated mirroring
 
-DroidMirror defaults to Bluetooth Classic RFCOMM, independent of LAN and ADB.
-This is EDR-capable Classic Bluetooth, not BLE. EDR modulation and radio throughput
-are negotiated by the operating systems; the app cannot guarantee an EDR mode or
-1 Mbps sustained throughput on every Mac/phone combination.
+Version 0.3 replaces the per-session MediaProjection workflow. After one-time
+phone setup, pressing **Mirror on the Mac** opens the secure Bluetooth connection
+and starts the embedded scrcpy 5 capture engine in a Shizuku shell user service.
+There is no Android-managed screen-share prompt and no ADB or LAN connection in
+the streaming path. Shizuku must be running and authorized; this is not a bypass
+of Android's ordinary app permissions. Remote input and audio remain ADB-only.
 
-The new path is **video only**. Android's public MediaProjection API requires a
-user-approved capture session and a foreground service. It does not grant scrcpy's
-shell privileges for input injection, locking, clipboard, UHID, or audio.
-Optional physical-panel control is available through a separately authorized
-Shizuku user service, as described below. Choose **USB / wireless ADB** in
-Connection settings for the existing full-featured mode. The existing BLE notification bridge is separate.
+## Install and set up once
 
-## Build and use
+The compiled Android test APK is `outputs/DroidMirror-Bluetooth-0.3-debug.apk`,
+with a SHA-256 checksum beside it. It uses the same signing certificate as 0.1/0.2
+and can be installed over them. It is a debug build, not a store release.
 
-A compiled, debug-signed Android APK is included at
-`outputs/DroidMirror-Bluetooth-0.2-debug.apk`, alongside its SHA-256 checksum.
-It uses the same test signing key as 0.1 and can be installed over that version.
-Install it using the phone's package installer. This is a test build, not a store
-release. Future APKs signed with a different debug key require uninstalling this
-build before installation.
+1. Pair the phone and Mac in their system Bluetooth settings.
+2. Install/start Shizuku 13 or newer. Its startup may require wireless debugging
+   or root. Grant Shizuku access in **DroidMirror Bluetooth**.
+3. Grant Nearby Devices and notification access. Select the paired Mac, choose
+   whether to turn the phone panel off, and tap **Enable Mac connections** once.
+   Only that bonded Mac is accepted. The ongoing notification shows readiness.
+4. Pull/rebuild the Mac app as below. Allow its Bluetooth and notifications
+   permissions, select the phone and press **Mirror**. Close the mirror to stop.
+   The phone listener returns to ready state; the next session starts from Mac.
 
-To rebuild the standalone companion, use JDK 17+ and Android SDK 35. The checked-in
-Gradle wrapper pins and verifies Gradle 8.11.1:
+Configuration and selected peer are saved on Android. The listener is a
+`connectedDevice` foreground service with `START_STICKY` and a boot receiver;
+it does not use the `mediaProjection` foreground-service type. Closing the phone
+setup activity does not end readiness or capture. **Disable Mac connections**
+turns off background readiness. Shizuku permissions/startup have no fixed weekly
+schedule: reboots, revocation and Shizuku itself determine when attention is
+needed. Android force-stop prevents automatic restart until the app is opened;
+OEM battery restrictions can also delay/stop the listener. These are lifecycle
+limits, not per-session capture approvals.
+
+A sleeping phone is made logically awake through Android's normal power policy.
+The configured keyguard is never dismissed, bypassed or reconfigured. This implementation is video-only,
+so unlocking/input from Mac still requires the existing ADB mode.
+
+## Build
+
+Android requires JDK 17+ and Android SDK 35. Gradle 8.11.1 is pinned and checksum
+verified by the checked-in wrapper:
 
 ```sh
 cd BluetoothCompanion
 ./gradlew assembleDebug lintDebug
 ```
 
-Install the APK produced in `build/outputs/apk/debug/` using the phone's package
-installer. No USB or wireless debugging is required for normal Bluetooth capture. The companion has a new package identity and does
-not replace BLE-ADB-Bridge or use its pairing secrets.
+The companion compiles the actual capture sources and AIDL from
+`scrcpy-5.0/server/`; it does not launch scrcpy's ADB server entry point or push
+anything through ADB. The embedded `com.genymobile.scrcpy.BuildConfig` pins the
+engine version to 5.0. SDK/OEM incompatibilities can still reject privileged
+capture at runtime, in which case the connection closes and Mac reports failure.
 
-On macOS 14+, install the client build dependencies:
+On macOS 14+ with Xcode command-line tools:
 
 ```sh
+git pull origin main
 brew install meson ninja pkg-config sdl3 ffmpeg libusb
 ./build-app.sh
 open outputs/DroidMirror.app
 ```
 
-The build script compiles the customized scrcpy client and the IOBluetooth helper;
-stock Homebrew scrcpy does not understand `--external-video-port`. The existing
-bundled matching scrcpy 5 server is needed only for ADB mode. The new companion APK is included in `outputs/`; the checked-in Mac app binaries
-remain unchanged until you rebuild on macOS. Signing uses the existing build
-script's ad-hoc signature; use the documented development signing workflow if
-maintaining the existing notification helper's Keychain identity.
+Rebuild the Mac for the 0.3 framed transport and events. The new helper also accepts
+old raw 0.1/0.2 video streams, but those APKs retain their old capture prompts and
+cannot report the new events. Checked-in Mac binaries are not updated here.
+Use the documented development-signing workflow if preserving the existing BLE
+notification helper's Keychain identity; the build script signs ad-hoc.
 
-1. Pair phone and Mac using their system Bluetooth settings.
-2. Open **DroidMirror Bluetooth** on Android, grant Nearby Devices access, and
-   select the paired Mac. Tap **Start Bluetooth capture** and approve capture.
-   Android 14+ may let you choose one app or the entire screen.
-3. Open DroidMirror on Mac, grant Bluetooth access, select the paired phone in
-   Connection settings, and press **Mirror**. The list includes all bonded devices;
-   choose the Android phone, not headphones or other peripherals.
-4. Stop on either side. Start a fresh capture and approve it again to reconnect.
-   Android's system capture indicator and the foreground notification can stop
-   capture too. Protected content remains protected.
+## Video and control events
 
-There is no automatic ADB fallback. The Bluetooth profile is fixed at a 480-pixel
-short edge, aspect-preserving dimensions aligned down to 16 pixels, H.264 Baseline,
-1,000,000 bit/s target and at most 30 fps. Portrait 1080×2400 becomes 480×1056;
-landscape 1920×1080 becomes 848×480. Smaller displays are not upscaled.
-Static screens request a repeat frame once per second. Rotation/content resizing
-is fitted into the initial encoder surface; restart capture to change its shape.
-Android encoder support and actual output frame rate require device validation.
+The fixed profile is H.264 at a 1,000,000 bit/s target, up to 30 fps and about a
+480-pixel short edge, aligned down to 16 pixels while preserving aspect ratio.
+Encoder constraints and fallback may reduce the actual dimensions/rate. The
+radio negotiates Classic/EDR itself; the app cannot force an EDR PHY rate.
 
-## Optional screen-off with Shizuku
+The secure RFCOMM UUID is `c356a44e-6f2b-4da9-85e5-397991b8a603`. Android owns the
+bonded-peer listener; the Shizuku daemon owns capture and recovery. A file-descriptor
+pipe transfers scrcpy video from the shell service to the app's Bluetooth relay.
+No screen content is saved. The matching wire format is dummy byte, 64-byte device
+name, codec ID, then scrcpy 5 session/frame packets, preserving decoder/renderer
+compatibility, rotation metadata, and protected-content restrictions.
 
-1. Install and start Shizuku 13 or newer on the phone. Its initial setup may
-   require wireless debugging or root; Bluetooth streaming itself still uses
-   neither ADB nor LAN.
-2. In **DroidMirror Bluetooth**, tap **Authorize Shizuku** and approve the system
-   permission dialog. Enabling Nearby Devices alone does not authorize Shizuku.
-3. Check **Turn phone panel off with Shizuku recovery**, start capture and approve
-   MediaProjection, then connect the Mac. The panel stays on until an encoded
-   media frame has actually been transmitted.
-4. Stop capture to restore the panel. **Restore phone display** explicitly asks
-   the shell service to turn the panel back on and cancels any active screen-off
-   lease. Screen-off is opt-in each new activity/session, not an unattended default.
+Version 0.3 wraps that stream with `DMBT0003` followed by records comprising a
+one-byte type, a four-byte big-endian length, and payload. Type 0 is video in chunks
+of at most 16 KiB. Type 1 is a one-byte event: PHONE_ON (1), SESSION_ENDED (2),
+PHONE_LOCAL_USE (3), STREAM_STARTED (4), CAPTURE_FAILED (5). The Mac's incremental C
+parser removes envelopes/events before forwarding only video to scrcpy's existing
+`--external-video-port` loopback mode. Events go to the host through bounded helper
+status output. Malformed lengths/types/events close the connection.
 
-`DisplayGuardService` is a Shizuku **daemon user service**, running in a separate
-shell/root process. It is not the companion's Android foreground Service and it
-continues after the app process dies. It resolves physical display tokens and
-uses the same hidden SurfaceControl/DisplayControl power APIs as scrcpy. It never
-uses a power-key sleep command, locks the phone, changes screen brightness, or
-writes persistent system settings. API differences/OEM restrictions can make
-screen-off unavailable; the companion reports failure and continues video with
-the display on. Normal screen timeout/lock can still stop MediaProjection.
+The loopback listener accepts one client and is not authenticated local IPC; a
+local process can race to connect. Radio access relies on secure system Bluetooth
+bonding and the saved peer address, independent of the older BLE notification
+bridge. The relay rejects encoded packets over 128 KiB and closes Bluetooth writes
+blocked for one second. The Mac bounds pending video to 128 KiB with a one-second
+pending deadline. No arbitrary reference frames are discarded.
 
-Before OFF, the guard registers an app-owned Binder death recipient and calls
-NORMAL to check that the restoration API can be invoked. It records recovery
-intent before OFF, including partial failures across multiple physical displays.
-App process death triggers a direct restoration attempt from the shell process.
-An independent shell timer checks a **two-second lease** every 100 ms; the app
-renews every 250 ms only while encoded video continues to transmit and Shizuku
-permission remains available. Late heartbeats cannot revive an expired lease.
-Stop, capture revocation, Bluetooth failure, missing video progress, app hangs,
-manual recovery and normal guard shutdown also attempt restoration. Failed NORMAL
-calls are retried by the shell timer; new OFF leases are refused until recovery
-succeeds. The app detaches without terminating the daemon guard.
+## Panel-off and recovery
 
-This is prompt best-effort recovery, **not an absolute guarantee of immediate
-restoration**. Binder callbacks, scheduling and display-driver calls take time.
-The two-second timeout applies while the guard is running and scheduled; Android
-suspension or a blocked display API can delay it. Shell UID/process separation
-protects against ordinary app lifecycle kills, not SIGKILL of the guard, a driver
-hang, reboot or every OEM behavior. Shutdown hooks cannot handle SIGKILL. If the
-guard itself is forcibly killed while the panel is off, restart Shizuku/the app
-and use Restore phone display; a physical wake/power cycle or reboot is the final
-fallback. No setting that persists across reboot is changed. Do not rely on this
-as an unlock mechanism or a guarantee that capture survives panel-off on your OEM.
+The Shizuku daemon registers the app's Binder death callback before capture or OFF.
+Panel-off is applied only after a media frame is transmitted. It uses scrcpy-style
+physical SurfaceControl/DisplayControl APIs, not brightness changes, sleep-key
+commands, or persistent system settings. It tests NORMAL before OFF and records
+recovery intent before partial multi-display OFF operations.
 
-The portable `DisplayLeaseTest` verifies timeout, stop/death-path restoration,
-foreign/stale owner rejection, late-heartbeat rejection, failed ON preflight,
-partial OFF rollback, retrying failed restorations without app heartbeats and
-manual recovery. These use simulated display power and clock, not a real Binder
-or display driver. On-device verification still needs app crash/force-stop,
-Bluetooth loss, permission revocation, screen lock and physical power-key tests.
+App death, session stop, Bluetooth/encoder failure, manual recovery, and normal
+guard shutdown restore the panel. A shell watchdog checks every 100 ms. Startup
+has a ten-second grace period; after video starts, the app renews a two-second
+session/display lease every 250 ms while frames keep transmitting. Failed NORMAL
+operations are retried; new OFF requests are refused while recovery is pending.
+Retired/folded display tokens are refreshed after restoration failures.
 
-## Transport and lifecycle
+Recovery is prompt best effort, not guaranteed instantaneous. Scheduling,
+suspension, or blocked display APIs can delay it. Shell UID protects against
+ordinary app lifecycle kills but not SIGKILL of the guard, every OEM restriction,
+or driver hangs. Shutdown hooks cannot handle SIGKILL. **Restore phone display**
+is available in setup; a physical power cycle/reboot is the final fallback if the
+guard itself is forcibly killed. No display setting persists across reboot.
 
-`CaptureService` advertises UUID `c356a44e-6f2b-4da9-85e5-397991b8a603` through a
-secure RFCOMM server socket. It accepts only the phone-selected, system-bonded Mac.
-It closes the listening socket after accepting a session. Capture consent expires
-if no accepted Mac connects within 60 seconds. Video relies on system Bluetooth
-bonding/encryption; it does not reuse the BLE bridge's application-layer protocol.
+## Local phone use and notifications
 
-The Mac helper discovers the RFCOMM channel through SDP and forwards the video to
-an ephemeral IPv4 loopback listener. Only one local client is accepted. The local
-bridge is process-local plumbing over TCP; no LAN connection or ADB tunnel is
-involved. As with other loopback IPC, another local process could race to connect;
-this is not an authenticated local IPC boundary.
+A short physical power press produces a logical SCREEN_OFF/sleep transition.
+The app's protected SCREEN_OFF broadcast receiver requests local takeover, and
+the shell service independently polls display interactivity every 100 ms. During
+healthy streaming it sends NO_CHANGE_LIGHTS user-activity updates once per second
+so ordinary idle timeout does not interrupt mirroring or relight the physical panel.
+If that OEM API is unavailable, timeout can still interrupt capture. Another local
+screen-lock/sleep action also produces this transition: an ordinary app
+cannot distinguish raw hardware power presses from all other screen-off causes.
+Long-press menus or presses which produce no screen transition are not detected.
 
-The stream uses the scrcpy 5 wire format: dummy byte, 64-byte device name, H.264
-codec ID, session dimensions, then 12-byte frame headers and encoded payloads.
-The client reads it through `--external-video-port`, skipping ADB initialization,
-device selection, server push/launch, tunnels, and process cleanup. It retains the
-normal decoder, rendering, recording options, and hardware-decoding fallback.
-The Mac host removes injected ADB shims and shell environment from this launch.
+Local takeover invalidates the remote session, requests `IWindowManager.lockNow`,
+checks keyguard lock for up to 500 ms, restores physical panel power, and wakes the
+phone through `IPowerManager`. It never wakes deliberately without confirming the
+lock. A confirmed transition sends PHONE_ON to Mac. Mac shows a separate popup
+headed **phone was used**, with **phone turned on** and the lock/restore result.
+If confirmation fails, PHONE_LOCAL_USE reports that failure without claiming
+success. Streaming ends in both cases; readiness remains available for the next
+Mac-initiated session. Events are best effort if the radio link fails at that moment.
 
-The Android sender permits four bounded packets, rejects packets over 128 KiB,
-refuses to send a packet queued for over 500 ms, and closes a blocked Bluetooth
-write after one second. The Mac has a 128 KiB pending byte limit and a one-second
-pending-data deadline. Slow links stop instead of dropping arbitrary H.264
-reference frames or growing an unbounded queue. These are stall safeguards, not
-a measured end-to-end latency guarantee. Disconnecting stops the projection and
-requires new capture consent. The sender and Mac bridge do not save screen data.
+At session end, Mac posts **Phone was used remotely** through UserNotifications,
+deduplicating stream-close/quit/disconnect callbacks. The phone's shell watchdog
+posts the same audit title through Android's shell notification command, surviving
+capture-app crash/force-stop while Shizuku remains alive. The app falls back to its
+own notification if that command fails and the app is still running. The end policy
+commits an end once per session; stop, EOF, local takeover and Binder death cannot
+post repeated shell audits for that session. The notification replaces the prior
+phone audit entry rather than storing a screen recording or a full activity history.
 
-## Validation status
+Notifications are subject to OS permissions, Focus/channel settings and process
+availability. Older Android versions lacking the shell notification command cannot
+post a crash notification from a dead app. No implementation can guarantee a Mac
+popup over a disconnected radio or deliver immediately when all relevant processes
+are killed. Reconnection/status notifications are not evidence of an unlock.
 
-The Android companion was compiled successfully in this workspace using JDK 17,
-Android SDK 35, AGP 8.9.1 and Gradle 8.11.1. `assembleDebug lintDebug` passed with
-zero lint errors (advisory warnings for localization, backup metadata, app
-icon and newer AGP availability). The included APK passes `apksigner verify` using
-APK Signature Scheme v2. The permission checks identified by lint were fixed;
-revoking Bluetooth access causes capture to stop.
+## Validation
 
-Also validated in the Linux workspace:
+`assembleDebug lintDebug` succeeds with zero lint errors in the Linux workspace,
+using JDK 17, SDK 35, AGP 8.9.1 and Gradle 8.11.1. The signed APK verifies and uses
+the same certificate as the previous test builds. Portable checks include:
 
-- Pure Java DisplayLease tests: restoration, two-second expiry, stale-owner and
-  late-heartbeat rejection, partial OFF rollback, failed ON preflight and ON retries.
-- Pure Java VideoWire tests: scrcpy 5 headers, timestamps/config/keyframe flags,
-  packet boundaries and bounds, and portrait/landscape/no-upscale dimensions.
-- Existing scrcpy CLI tests plus external mode cases: valid/invalid ports,
-  audio/input suppression, and conflicting ADB options.
-- C syntax check of `server.c`; XML/plist parse; clean whitespace diff.
+- DisplayLease: stop/death-path recovery, expiry, stale owners, late heartbeats,
+  failed ON preflight, partial OFF rollback and retrying restoration.
+- RemoteSession: one end event, local-use precedence, crash/stop/timeout, stale
+  owners and startup grace becoming the short active-stream timeout.
+- VideoWire and BluetoothWire: scrcpy headers/flags, dimensions, chunking and events.
+- Native C parser under address/undefined-behavior sanitizers: every fragment size,
+  event/video isolation, legacy input, malformed records and truncation.
+- A real Java-generated envelope fixture decoded by the C receiver.
+- Earlier scrcpy CLI tests and C syntax checks (with dependency header shims).
 
-The CLI tests and C syntax check used temporary dependency header/logging shims
-because SDL/FFmpeg development headers were unavailable. They are not a full
-client build. macOS Swift/Objective-C compilation and real radio throughput remain **unvalidated**.
-The Android SDK and full JDK were downloaded with the executor's explicit network
-permission. No physical phone or Mac is attached.
+These are compile/state/protocol tests, not physical Binder/driver/radio tests.
+Mac Swift/Objective-C compilation and the actual phone's capture, power, lock,
+notification delivery and restart behavior still need hardware validation. Test
+repeated Mac-only starts, foreground/background readiness, phone power press,
+normal timeout, Bluetooth loss, app kill/force-stop, Shizuku stop, rotation and
+sleeping/locked startup before relying on unattended mirroring.
 
-Before calling this production-ready, build on Mac and Android SDK hosts, then
-verify TCC permissions, secure pairing/SDP, no running ADB dependency, start/stop
-and capture revocation, device rotation, static screens, scrolling, frame rate,
-throughput, and latency under interference. The checked-in Mac app still runs the previous implementation until rebuilt;
-install the new companion APK for the Android side.
+## Adaptive quality
 
-Run the portable Java tests:
-
-```sh
-javac -d /tmp/droidmirror-wire-tests BluetoothCompanion/src/main/java/app/droidmirror/bluetooth/VideoWire.java BluetoothCompanion/tests/VideoWireTest.java
-java -cp /tmp/droidmirror-wire-tests VideoWireTest
-javac -d /tmp/droidmirror-wire-tests BluetoothCompanion/src/main/java/app/droidmirror/bluetooth/DisplayLease.java BluetoothCompanion/tests/DisplayLeaseTest.java
-java -cp /tmp/droidmirror-wire-tests DisplayLeaseTest
-```
-
-## Adaptive quality follow-on
-
-Adaptive bitrate and higher-resolution still frames are feasible but are not
-implemented in this baseline. Add framed reverse-channel feedback first: measured
-receive throughput, queued bytes and delay, plus a session/sequence identifier.
-Treat 1 Mbps as a video target, not as proof of available radio capacity. Apply
-`MediaCodec.setParameters(PARAMETER_KEY_VIDEO_BITRATE)` with conservative headroom,
-a fast decrease on growing queue delay, and a slow increase after sustained
-stability. Check support on target encoders; frame rate and resolution may still
-need changing when bitrate alone cannot maintain latency.
-
-For readability, first test a fixed higher resolution with adaptive bitrate and
-fewer frames while static. Motion prediction and unchanged blocks already help
-H.264 encode scrolling/typing; portable text-field-specific region-of-interest
-encoding is not available across Android encoders. A high-quality refresh/keyframe
-after 300–500 ms of stillness may improve text without resizing. A keyframe itself
-can create a bandwidth burst, so budget and pace it.
-
-If two resolution tiers are needed, require sustained motion/stillness and a
-minimum dwell time, preserve the viewport, and use scrcpy 5 session packets plus
-fresh codec configuration/keyframes at each switch. Reconfigure the encoder and
-resize the existing VirtualDisplay/change its surface rather than asking the
-same MediaProjection token to create a second display on Android 14+. Avoid
-immediate sharp/blurry transitions after every scroll; visual quality and switch
-thresholds need testing with users and actual phones.
+Adaptive bitrate and static-screen resolution tiers remain follow-on work. Add
+measured receive-rate/queue-delay feedback first, then adjust MediaCodec bitrate
+with fast decreases and slow increases. Fixed higher resolution with fewer static
+frames is less visually disruptive than toggling resolution after every scroll.
+If resolution tiers are used, require sustained motion/stillness, preserve the
+viewport, and send new session metadata/configuration/keyframes at each switch.

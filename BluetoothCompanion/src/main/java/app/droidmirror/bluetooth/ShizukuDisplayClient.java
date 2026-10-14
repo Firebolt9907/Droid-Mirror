@@ -9,11 +9,14 @@ import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
 import android.os.RemoteException;
+import android.os.ParcelFileDescriptor;
 import android.os.SystemClock;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.CompletableFuture;
 import java.util.function.Consumer;
+import java.util.function.BiConsumer;
 import rikka.shizuku.Shizuku;
 
 /** App-side lease client. Recovery itself is implemented outside this process. */
@@ -22,6 +25,16 @@ final class ShizukuDisplayClient implements AutoCloseable {
     private final ScheduledExecutorService heartbeats = Executors.newSingleThreadScheduledExecutor();
     private final Handler main = new Handler(Looper.getMainLooper());
     private final Consumer<String> status;
+    private final Consumer<Boolean> audit;
+    private final BiConsumer<Integer, Boolean> ended;
+    private final boolean panelOff;
+    private volatile boolean auditKnown;
+    private volatile boolean auditResult;
+    private volatile boolean registered;
+    private final CompletableFuture<IDisplayGuard> ready = new CompletableFuture<>();
+    private final IStreamEvents observer = new IStreamEvents.Stub() {
+        @Override public void onEnded(int cause, boolean lockedAndAwake) { ended.accept(cause, lockedAndAwake); }
+    };
     private final Shizuku.UserServiceArgs args;
     private volatile IDisplayGuard guard;
     private volatile boolean closed;
@@ -36,27 +49,43 @@ final class ShizukuDisplayClient implements AutoCloseable {
     }
     private static Shizuku.UserServiceArgs arguments(Context context) {
         return new Shizuku.UserServiceArgs(new ComponentName(context.getPackageName(), DisplayGuardService.class.getName()))
-            .daemon(true).processNameSuffix("display_guard").debuggable(false).version(2);
+            .daemon(true).processNameSuffix("display_guard").debuggable(false).version(3);
     }
     private final ServiceConnection connection = new ServiceConnection() {
         @Override public void onServiceConnected(ComponentName name, IBinder binder) {
             guard = IDisplayGuard.Stub.asInterface(binder);
+            ready.complete(guard);
             if (closed) unbind();
         }
         @Override public void onServiceDisconnected(ComponentName name) {
             guard = null;
+            ready.completeExceptionally(new IllegalStateException("Display guard disconnected"));
             if (closed) return;
             close();
             status.accept("Shizuku display guard disconnected. Screen restoration cannot be confirmed.");
         }
     };
-    ShizukuDisplayClient(Context context, Consumer<String> status) {
-        this.status = status;
+    ShizukuDisplayClient(Context context, boolean panelOff, Consumer<String> status,
+                         BiConsumer<Integer, Boolean> ended, Consumer<Boolean> audit) {
+        this.status = status; this.panelOff = panelOff; this.ended = ended; this.audit = audit;
         args = arguments(context);
-        if (!authorized()) { closed = true; heartbeats.shutdown(); status.accept("Shizuku is not authorized; phone display stays on."); return; }
+        if (!authorized()) { closed = true; auditKnown = true; heartbeats.shutdown();
+            ready.completeExceptionally(new IllegalStateException("Shizuku unavailable")); status.accept("Shizuku is not authorized; phone display stays on."); return; }
         try { Shizuku.bindUserService(args, connection); }
-        catch (RuntimeException error) { closed = true; heartbeats.shutdown(); status.accept("Shizuku guard could not start; phone display stays on."); return; }
+        catch (RuntimeException error) { closed = true; auditKnown = true; heartbeats.shutdown();
+            ready.completeExceptionally(new IllegalStateException("Shizuku unavailable")); status.accept("Shizuku guard could not start; phone display stays on."); return; }
         heartbeats.scheduleWithFixedDelay(this::update, 250, 250, TimeUnit.MILLISECONDS);
+    }
+    void startVideo(ParcelFileDescriptor output) throws Exception {
+        IDisplayGuard remote = ready.get(10, TimeUnit.SECONDS);
+        if (closed || !remote.startCapture(owner, observer, output)) throw new IllegalStateException(remote.getLastError());
+    }
+    void localUse() {
+        if (closed) return;
+        try { heartbeats.execute(() -> {
+            try { IDisplayGuard remote = guard; if (!closed && remote != null) remote.localUse(owner); }
+            catch (RemoteException | RuntimeException ignored) {}
+        }); } catch (java.util.concurrent.RejectedExecutionException ignored) {}
     }
     void frameSent() { lastVideo = SystemClock.elapsedRealtime(); }
     private void update() {
@@ -76,11 +105,15 @@ final class ShizukuDisplayClient implements AutoCloseable {
             }
             if (!attempted) {
                 attempted = true;
-                armed = remote.acquire(owner);
+                armed = remote.acquire(owner, observer, panelOff);
+                registered = armed;
                 if (!armed) {
                     status.accept("Screen-off unavailable: " + remote.getLastError()); close(); return;
                 }
-                status.accept("Streaming with phone panel off · Shizuku recovery active");
+                String error = remote.getLastError();
+                status.accept(!error.isEmpty() ? "Display stays on: " + error : panelOff
+                    ? "Streaming with phone panel off · Shizuku recovery active"
+                    : "Streaming · Shizuku local-use monitor active");
             } else if (armed && !remote.heartbeat(owner)) {
                 status.accept("Screen-off lease ended; phone display restored or recovery is retrying."); close();
             }
@@ -89,15 +122,18 @@ final class ShizukuDisplayClient implements AutoCloseable {
         }
     }
     @Override public synchronized void close() {
-        if (closed) return;
+        if (closed) { if (auditKnown) audit.accept(auditResult); return; }
         closed = true; // Suppress any future acquisition before queuing release.
         heartbeats.execute(() -> {
             try {
                 IDisplayGuard remote = guard;
-                if (remote != null) remote.release(owner);
+                auditResult = remote != null && remote.release(owner);
             } catch (RemoteException | RuntimeException ignored) {
                 // Process-death/lease timeout recovery runs independently in the shell service.
-            } finally { main.post(this::unbind); }
+            } finally {
+                auditKnown = true; audit.accept(auditResult);
+                main.post(this::unbind);
+            }
         });
         heartbeats.shutdown(); // Let an in-flight acquire finish, then restore it in order.
     }

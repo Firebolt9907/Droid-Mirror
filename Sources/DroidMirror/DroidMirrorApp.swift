@@ -7,6 +7,7 @@ final class DroidMirrorAppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         installMainMenu()
+        Task { await SessionNotifications.shared.requestPermission() }
         DistributedNotificationCenter.default().addObserver(
             self,
             selector: #selector(quitRequestedByMirror(_:)),

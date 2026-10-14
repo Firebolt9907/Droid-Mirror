@@ -3,12 +3,16 @@ android {
     namespace 'app.droidmirror.bluetooth'
     buildFeatures { aidl true }
     compileSdk 35
+    sourceSets {
+        main.java.srcDirs += '../scrcpy-5.0/server/src/main/java'
+        main.aidl.srcDirs += '../scrcpy-5.0/server/src/main/aidl'
+    }
     defaultConfig {
         applicationId 'app.droidmirror.bluetooth'
         minSdk 26
         targetSdk 35
-        versionCode 2
-        versionName '0.2'
+        versionCode 3
+        versionName '0.3'
     }
 }
 

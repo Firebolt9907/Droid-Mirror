@@ -131,7 +131,7 @@ struct ContentView: View {
                 ForEach(MirrorTransport.allCases) { Text($0.label).tag($0) }
             }.disabled(model.isMirroring || model.isStarting)
             if model.preferences.transport == .bluetoothClassic {
-                Text("Start the Android companion and approve capture, then press Mirror. 480p · up to 30 fps · 1 Mbps. Video only.")
+                Text("Authorize Shizuku and enable Mac connections once on Android, then press Mirror on the Mac. 480p · up to 30 fps · 1 Mbps. Video only.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Group {

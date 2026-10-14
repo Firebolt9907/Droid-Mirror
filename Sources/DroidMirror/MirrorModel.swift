@@ -33,6 +33,7 @@ final class MirrorModel: ObservableObject {
     private let classicBluetooth = ClassicBluetoothTransport()
     @Published private(set) var isStarting = false
     private var sessionIsBluetooth = false
+    private var phoneTakenOver = false
     private var refreshTimer: Timer?
     private var lockPollTimer: Timer?
     private var toolbarPositionTimer: Timer?
@@ -140,7 +141,7 @@ final class MirrorModel: ObservableObject {
                 if selectedID == nil || !paired.contains(where: { $0.id == selectedID }) {
                     selectedID = paired.first?.id
                 }
-                status = paired.isEmpty ? "Pair your phone in Bluetooth settings" : "Start capture on Android, then press Mirror"
+                status = paired.isEmpty ? "Pair your phone in Bluetooth settings" : "Ready to mirror via Bluetooth"
             } catch {
                 status = error.localizedDescription
                 if !silently { errorMessage = error.localizedDescription }
@@ -172,6 +173,21 @@ final class MirrorModel: ObservableObject {
             return
         }
         status = "Connecting over Bluetooth Classic…"
+        phoneTakenOver = false
+        classicBluetooth.onEvent = { [weak self] event in
+            guard let self else { return }
+            switch event {
+            case .streamStarted: SessionNotifications.shared.began()
+            case .phoneOn, .phoneLocalUse:
+                if !self.phoneTakenOver {
+                    self.phoneTakenOver = true
+                    SessionNotifications.shared.localUse(restored: event == .phoneOn)
+                }
+            case .captureFailed:
+                self.errorMessage = "Privileged capture unavailable. Authorize Shizuku and enable Mac connections once in the Android companion."
+            case .sessionEnded: self.status = "Remote session ended"
+            }
+        }
         do {
             let port = try await classicBluetooth.connect(address: device.id)
             guard preferences.transport == .bluetoothClassic, !isTerminatingApplication else {
@@ -196,12 +212,13 @@ final class MirrorModel: ObservableObject {
                 Task { @MainActor in
                     guard let self else { return }
                     self.classicBluetooth.stop()
+                    await SessionNotifications.shared.ended()
                     self.mirrorProcess = nil
                     self.isMirroring = false
                     self.sessionIsBluetooth = false
                     self.status = "Bluetooth mirror closed"
-                    if child.terminationStatus != 0 {
-                        self.errorMessage = "Bluetooth video stopped. Restart capture on Android and reconnect. Ensure the bundled scrcpy supports --external-video-port."
+                    if child.terminationStatus != 0 && !self.phoneTakenOver && self.errorMessage == nil {
+                        self.errorMessage = "Bluetooth video stopped. Reconnect from your Mac. Keep Shizuku running and use the updated companion and bundled client."
                     }
                 }
             }
@@ -286,6 +303,7 @@ final class MirrorModel: ObservableObject {
             Task { @MainActor in
                 guard let self else { return }
                 self.log = output
+                await SessionNotifications.shared.ended()
                 await self.restoreDeviceStateAndLock()
                 self.stopLockMonitoring()
                 self.stopToolbarPositioning()
@@ -307,6 +325,7 @@ final class MirrorModel: ObservableObject {
             try process.run()
             mirrorProcess = process
             isMirroring = true
+            SessionNotifications.shared.began()
             status = "Mirroring \(device.displayName)"
         } catch {
             await restoreDeviceStateAndLock()
@@ -327,6 +346,7 @@ final class MirrorModel: ObservableObject {
         guard !isTerminatingApplication else { return }
         isTerminatingApplication = true
         classicBluetooth.stop()
+        await SessionNotifications.shared.ended()
         refreshTimer?.invalidate()
         refreshTimer = nil
         stopLockMonitoring()

@@ -6,12 +6,15 @@
 #import <unistd.h>
 #import <errno.h>
 #import <string.h>
+#import "ClassicBluetoothWire.h"
 
 // The UUID is shared with BluetoothCompanion. This is RFCOMM, not CoreBluetooth.
 static NSString *const DMServiceUUID = @"c356a44e-6f2b-4da9-85e5-397991b8a603";
 static const NSUInteger DMQueueLimit = 128 * 1024;
 
-@interface DMClassicBridge : NSObject <IOBluetoothRFCOMMChannelDelegate>
+@interface DMClassicBridge : NSObject <IOBluetoothRFCOMMChannelDelegate> {
+    DMClassicWire _wire;
+}
 @property(nonatomic, strong) IOBluetoothDevice *device;
 @property(nonatomic, strong) IOBluetoothRFCOMMChannel *channel;
 @property(nonatomic, strong) NSMutableData *pending;
@@ -21,7 +24,15 @@ static const NSUInteger DMQueueLimit = 128 * 1024;
 @property(nonatomic) NSTimeInterval pendingSince;
 @property(nonatomic) NSTimeInterval lastData;
 @property(nonatomic) BOOL failing;
+@property(nonatomic) uint8_t eventMask;
+- (BOOL)receiveVideo:(const uint8_t *)data length:(size_t)length;
+- (void)receiveEvent:(uint8_t)event;
 @end
+
+static bool DMVideo(void *context, const uint8_t *bytes, size_t length) {
+    return [(__bridge DMClassicBridge *)context receiveVideo:bytes length:length];
+}
+static void DMEvent(void *context, uint8_t event) { [(__bridge DMClassicBridge *)context receiveEvent:event]; }
 
 @implementation DMClassicBridge
 - (void)fail:(NSString *)reason {
@@ -43,16 +54,26 @@ static const NSUInteger DMQueueLimit = 128 * 1024;
     }
     if (!_pending.length) _pendingSince = 0;
 }
+- (BOOL)receiveVideo:(const uint8_t *)data length:(size_t)length {
+    if (length > DMQueueLimit - _pending.length) return NO;
+    if (!_pending.length) _pendingSince = NSDate.timeIntervalSinceReferenceDate;
+    [_pending appendBytes:data length:length]; [self flush]; return YES;
+}
+- (void)receiveEvent:(uint8_t)event {
+    uint8_t mask = (uint8_t)(1u << (event - 1));
+    if (_eventMask & mask) return;
+    _eventMask |= mask;
+    const char *names[] = {"PHONE_ON", "SESSION_ENDED", "PHONE_LOCAL_USE", "STREAM_STARTED", "CAPTURE_FAILED"};
+    printf("EVENT %s\n", names[event - 1]); fflush(stdout);
+}
 - (void)rfcommChannelData:(IOBluetoothRFCOMMChannel *)channel data:(void *)data length:(size_t)length {
     if (channel != _channel) return;
-    if (length > DMQueueLimit - _pending.length) [self fail:@"Bluetooth video backlog exceeded 128 KiB; reconnect"];
-    if (!_pending.length) _pendingSince = NSDate.timeIntervalSinceReferenceDate;
-    [_pending appendBytes:data length:length];
     _lastData = NSDate.timeIntervalSinceReferenceDate;
-    [self flush];
+    if (!dm_classic_wire_feed(&_wire, data, length, DMVideo, DMEvent, (__bridge void *)self))
+        [self fail:@"Invalid Bluetooth stream or video backlog exceeded; update the Android companion and Mac app"];
 }
 - (void)rfcommChannelClosed:(IOBluetoothRFCOMMChannel *)channel {
-    [self fail:@"Bluetooth stream closed. Start a new capture session on Android."];
+    [self fail:@"Bluetooth stream closed. Reconnect from your Mac."];
 }
 - (void)sdpQueryComplete:(IOBluetoothDevice *)device status:(IOReturn)status {
     if (status != kIOReturnSuccess) [self fail:@"Bluetooth service discovery failed"];
@@ -63,7 +84,7 @@ static const NSUInteger DMQueueLimit = 128 * 1024;
     IOBluetoothSDPServiceRecord *record = [device getServiceRecordForUUID:uuid];
     BluetoothRFCOMMChannelID channelID = 0;
     if (!record || [record getRFCOMMChannelID:&channelID] != kIOReturnSuccess)
-        [self fail:@"DroidMirror capture service not found. Tap Start on Android first."];
+        [self fail:@"DroidMirror capture service not found. Enable Mac connections in Android setup first."];
     IOBluetoothRFCOMMChannel *channel = nil;
     if ([device openRFCOMMChannelAsync:&channel withChannelID:channelID delegate:self] != kIOReturnSuccess)
         [self fail:@"Could not connect to the paired Android phone"];
@@ -81,6 +102,7 @@ static const NSUInteger DMQueueLimit = 128 * 1024;
 - (void)start:(NSString *)address {
     _listener = -1; _client = -1;
     _pending = [NSMutableData data];
+    dm_classic_wire_init(&_wire);
     _device = [IOBluetoothDevice deviceWithAddressString:address];
     if (!_device || !_device.isPaired) [self fail:@"Pair the phone in macOS Bluetooth settings first"];
     _listener = socket(AF_INET, SOCK_STREAM, 0);

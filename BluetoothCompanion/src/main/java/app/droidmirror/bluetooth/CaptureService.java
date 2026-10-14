@@ -1,187 +1,186 @@
 package app.droidmirror.bluetooth;
 
-import android.app.*;
 import android.Manifest;
-import android.content.pm.PackageManager;
+import android.app.*;
 import android.bluetooth.*;
-import android.content.Intent;
+import android.content.*;
+import android.content.pm.PackageManager;
 import android.content.pm.ServiceInfo;
-import android.graphics.Rect;
-import android.hardware.display.DisplayManager;
-import android.hardware.display.VirtualDisplay;
-import android.media.*;
-import android.media.projection.*;
 import android.os.*;
-import android.view.Surface;
-import android.view.WindowManager;
 import java.io.*;
-import java.nio.ByteBuffer;
 import java.util.UUID;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.*;
 
+/** Persistent, paired-Mac listener. Capture begins when the Mac connects, never from a phone share prompt. */
 public final class CaptureService extends Service {
-    private static final class QueuedPacket {
-        final byte[] bytes;
-        final long created = SystemClock.elapsedRealtime();
-        QueuedPacket(byte[] bytes) { this.bytes = bytes; }
-    }
     private static final UUID SERVICE = UUID.fromString("c356a44e-6f2b-4da9-85e5-397991b8a603");
-    private volatile boolean stopping;
+    private volatile boolean shutdown;
     private volatile BluetoothServerSocket listener;
     private volatile BluetoothSocket socket;
+    private static final class SessionState {
+        volatile ParcelFileDescriptor inputPipe;
+        volatile ShizukuDisplayClient guard;
+        volatile boolean stopped;
+        volatile boolean hasGuard;
+        final AtomicInteger endEvent = new AtomicInteger();
+        final AtomicBoolean streamStarted = new AtomicBoolean();
+        final AtomicBoolean auditPosted = new AtomicBoolean();
+        final CountDownLatch eventReady = new CountDownLatch(1);
+    }
+    private volatile SessionState current;
+    private final BroadcastReceiver screenActions = new BroadcastReceiver() {
+        @Override public void onReceive(Context context, Intent intent) {
+            SessionState state = current;
+            if (Intent.ACTION_SCREEN_OFF.equals(intent.getAction()) && state != null && !state.stopped && state.guard != null)
+                state.guard.localUse();
+        }
+    };
+    @Override public void onCreate() {
+        super.onCreate();
+        IntentFilter filter = new IntentFilter(Intent.ACTION_SCREEN_OFF);
+        if (Build.VERSION.SDK_INT >= 33) registerReceiver(screenActions, filter, Context.RECEIVER_NOT_EXPORTED);
+        else registerReceiver(screenActions, filter);
+    }
     private volatile long writeStarted;
-    private MediaProjection projection;
-    private Thread worker;
+    private Thread server;
     private ScheduledExecutorService watchdog;
-    private volatile ShizukuDisplayClient displayGuard;
 
+    static void enableIfConfigured(Context context) {
+        android.content.SharedPreferences settings = context.getSharedPreferences("ready", MODE_PRIVATE);
+        if (!settings.getBoolean("enabled", false) || settings.getString("peer", "").isEmpty()) return;
+        if (Build.VERSION.SDK_INT >= 31 && context.checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) return;
+        try { context.startForegroundService(new Intent(context, CaptureService.class)); }
+        catch (RuntimeException ignored) { /* Android may forbid background/force-stopped startup; setup UI reports readiness. */ }
+    }
     @Override public IBinder onBind(Intent intent) { return null; }
     private Notification notification(String text) {
-        return new Notification.Builder(this, "capture")
-            .setSmallIcon(android.R.drawable.ic_menu_camera).setContentTitle("DroidMirror Bluetooth")
-            .setContentText(text).setOngoing(true)
-            .addAction(new Notification.Action.Builder(null, "Stop", PendingIntent.getService(this, 0,
-                new Intent(this, CaptureService.class).setAction("stop"), PendingIntent.FLAG_IMMUTABLE)).build()).build();
+        PendingIntent open = PendingIntent.getActivity(this, 0, new Intent(this, CaptureActivity.class), PendingIntent.FLAG_IMMUTABLE);
+        return new Notification.Builder(this, "capture").setSmallIcon(android.R.drawable.ic_menu_camera)
+            .setContentTitle("DroidMirror Bluetooth").setContentText(text).setContentIntent(open).setOngoing(true).build();
+    }
+    private void status(String text) {
+        if (!shutdown) getSystemService(NotificationManager.class).notify(1, notification(text));
     }
     @Override public int onStartCommand(Intent intent, int flags, int id) {
-        if (intent == null || "stop".equals(intent.getAction())) { stopSelf(); return START_NOT_STICKY; }
-        if (worker != null) { stopSelf(); return START_NOT_STICKY; }
-        NotificationManager notifications = getSystemService(NotificationManager.class);
-        notifications.createNotificationChannel(new NotificationChannel("capture", "Bluetooth screen capture", NotificationManager.IMPORTANCE_LOW));
-        if (Build.VERSION.SDK_INT >= 29) startForeground(1, notification("Waiting for the selected Mac"), ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION);
-        else startForeground(1, notification("Waiting for the selected Mac"));
-        Intent permission = intent.getParcelableExtra("permission");
-        String peer = intent.getStringExtra("peer");
-        if (permission == null || peer == null) { stopSelf(); return START_NOT_STICKY; }
-        try {
-            projection = getSystemService(MediaProjectionManager.class).getMediaProjection(intent.getIntExtra("result", Activity.RESULT_CANCELED), permission);
-            projection.registerCallback(new MediaProjection.Callback() {
-                @Override public void onStop() { stopSelf(); }
-            }, new Handler(getMainLooper()));
-        } catch (RuntimeException error) { stopSelf(); return START_NOT_STICKY; }
-        if (intent.getBooleanExtra("screenOff", false)) {
-            displayGuard = new ShizukuDisplayClient(getApplicationContext(), text -> {
-                if (!stopping) notifications.notify(1, notification(text));
-            });
+        if (!getSharedPreferences("ready", MODE_PRIVATE).getBoolean("enabled", false)) { stopSelf(); return START_NOT_STICKY; }
+        if (Build.VERSION.SDK_INT >= 31 && checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
+            stopSelf(); return START_NOT_STICKY;
         }
+        NotificationManager notifications = getSystemService(NotificationManager.class);
+        notifications.createNotificationChannel(new NotificationChannel("capture", "Bluetooth readiness", NotificationManager.IMPORTANCE_LOW));
+        if (Build.VERSION.SDK_INT >= 29) startForeground(1, notification("Ready for your paired Mac"), ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE);
+        else startForeground(1, notification("Ready for your paired Mac"));
+        if (server != null) return START_STICKY;
         watchdog = Executors.newSingleThreadScheduledExecutor();
         watchdog.scheduleWithFixedDelay(() -> {
-            if (writeStarted != 0 && SystemClock.elapsedRealtime() - writeStarted > 1000) abort();
+            if (writeStarted != 0 && SystemClock.elapsedRealtime() - writeStarted > 1000) stopSession();
         }, 100, 100, TimeUnit.MILLISECONDS);
-        worker = new Thread(() -> capture(peer), "BluetoothCapture"); worker.start();
-        return START_NOT_STICKY;
+        server = new Thread(this::listen, "BluetoothReady"); server.start();
+        return START_STICKY;
     }
-    private void capture(String peer) {
-        MediaCodec codec = null;
-        VirtualDisplay display = null;
-        Surface surface = null;
-        Thread sender = null;
-        try {
-            if (Build.VERSION.SDK_INT >= 31 && checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED)
-                throw new SecurityException("Bluetooth permission is required");
-            BluetoothAdapter adapter = getSystemService(BluetoothManager.class).getAdapter();
-            if (adapter == null || !adapter.isEnabled()) throw new IOException("Enable Bluetooth first");
-            // Secure RFCOMM requires system bonding/encryption. Only the phone-selected Mac is accepted.
-            listener = adapter.listenUsingRfcommWithServiceRecord("DroidMirror video", SERVICE);
-            long deadline = SystemClock.elapsedRealtime() + 60000;
-            while (!stopping && socket == null) {
-                int remaining = (int)(deadline - SystemClock.elapsedRealtime());
-                if (remaining <= 0) throw new IOException("Mac connection timed out");
-                BluetoothSocket candidate = listener.accept(remaining);
-                BluetoothDevice remote = candidate.getRemoteDevice();
-                if (remote.getBondState() != BluetoothDevice.BOND_BONDED || !peer.equals(remote.getAddress())) {
-                    candidate.close(); continue;
+    private void listen() {
+        while (!shutdown) {
+            try {
+                if (Build.VERSION.SDK_INT >= 31 && checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) throw new SecurityException();
+                BluetoothAdapter adapter = getSystemService(BluetoothManager.class).getAdapter();
+                if (adapter == null || !adapter.isEnabled()) { status("Enable Bluetooth to connect your Mac"); Thread.sleep(2000); continue; }
+                String peer = getSharedPreferences("ready", MODE_PRIVATE).getString("peer", "");
+                listener = adapter.listenUsingRfcommWithServiceRecord("DroidMirror video", SERVICE);
+                BluetoothSocket candidate = listener.accept();
+                if (!peer.equals(candidate.getRemoteDevice().getAddress()) || candidate.getRemoteDevice().getBondState() != BluetoothDevice.BOND_BONDED) {
+                    candidate.close(); listener.close(); listener = null; continue;
                 }
-                socket = candidate;
+                socket = candidate; listener.close(); listener = null;
+                serve();
+            } catch (IOException | InterruptedException | RuntimeException error) {
+                if (!shutdown) {
+                    status("Waiting for Bluetooth and Shizuku");
+                    try { Thread.sleep(1000); } catch (InterruptedException ignored) {}
+                }
+            } finally {
+                stopSession();
+                try { if (listener != null) listener.close(); } catch (IOException ignored) {}
+                listener = null;
             }
-            listener.close(); listener = null;
-            if (stopping || socket == null) return;
-            Rect bounds;
-            if (Build.VERSION.SDK_INT >= 30) bounds = getSystemService(WindowManager.class).getMaximumWindowMetrics().getBounds();
-            else {
-                android.util.DisplayMetrics metrics = new android.util.DisplayMetrics();
-                getSystemService(WindowManager.class).getDefaultDisplay().getRealMetrics(metrics);
-                bounds = new Rect(0, 0, metrics.widthPixels, metrics.heightPixels);
-            }
-            int[] size = VideoWire.dimensions(bounds.width(), bounds.height());
-            MediaFormat format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, size[0], size[1]);
-            format.setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface);
-            format.setInteger(MediaFormat.KEY_BIT_RATE, 1_000_000);
-            format.setInteger(MediaFormat.KEY_FRAME_RATE, 30);
-            format.setFloat("max-fps-to-encoder", 30);
-            // A static display still emits a small refresh frame once a second.
-            format.setLong("repeat-previous-frame-after", 1_000_000);
-            format.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 2);
-            format.setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR);
-            format.setInteger(MediaFormat.KEY_PROFILE, MediaCodecInfo.CodecProfileLevel.AVCProfileBaseline);
-            codec = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC);
-            codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE);
-            surface = codec.createInputSurface(); codec.start();
-            display = projection.createVirtualDisplay("DroidMirror Bluetooth", size[0], size[1],
-                getResources().getDisplayMetrics().densityDpi, DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-                surface, null, null);
-            DataOutputStream out = new DataOutputStream(socket.getOutputStream());
-            writeStarted = SystemClock.elapsedRealtime();
-            VideoWire.header(out, Build.MODEL, size[0], size[1]);
-            writeStarted = 0;
-            // At most four packets can wait. Never discard H.264 reference frames:
-            // if the transport falls behind, close and require fresh capture consent.
-            ArrayBlockingQueue<QueuedPacket> packets = new ArrayBlockingQueue<>(4);
-            sender = new Thread(() -> {
-                try {
-                    while (!stopping) {
-                        QueuedPacket packet = packets.poll(100, TimeUnit.MILLISECONDS);
-                        if (packet == null) continue;
-                        if (SystemClock.elapsedRealtime() - packet.created > 500) throw new IOException("Stale video packet");
-                        writeStarted = SystemClock.elapsedRealtime();
-                        out.write(packet.bytes); out.flush();
-                        writeStarted = 0;
-                        ShizukuDisplayClient guard = displayGuard;
-                        if (guard != null && (packet.bytes[0] & 0x40) == 0) guard.frameSent();
-                    }
-                } catch (IOException | InterruptedException error) { abort(); }
-            }, "BluetoothVideoWriter"); sender.start();
-            getSystemService(NotificationManager.class).notify(1, notification("Streaming 480p · up to 30 fps · 1 Mbps"));
-            MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
-            while (!stopping) {
-                int index = codec.dequeueOutputBuffer(info, 100000);
-                if (index < 0) continue;
-                try {
-                    if (info.size > 0) {
-                        if (info.size > VideoWire.MAX_PACKET) throw new IOException("Oversized video frame");
-                        ByteBuffer encoded = codec.getOutputBuffer(index);
-                        encoded.position(info.offset); encoded.limit(info.offset + info.size);
-                        byte[] payload = new byte[info.size]; encoded.get(payload);
-                        byte[] packet = VideoWire.packet(payload, info.presentationTimeUs,
-                            (info.flags & MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0,
-                            (info.flags & MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0);
-                        if (!packets.offer(new QueuedPacket(packet), 100, TimeUnit.MILLISECONDS)) throw new IOException("Bluetooth video queue full");
-                    }
-                } finally { codec.releaseOutputBuffer(index, false); }
-                if ((info.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) break;
-            }
-        } catch (IOException | InterruptedException | RuntimeException error) {
-            // Keep screen content and Bluetooth peer identifiers out of logs.
-        } finally {
-            abort();
-            if (sender != null) sender.interrupt();
-            if (display != null) display.release();
-            if (codec != null) { try { codec.stop(); } catch (RuntimeException ignored) {} codec.release(); }
-            if (surface != null) surface.release();
-            stopSelf();
         }
     }
-    private void abort() {
-        stopping = true;
-        ShizukuDisplayClient guard = displayGuard;
-        if (guard != null) guard.close();
-        try { if (listener != null) listener.close(); } catch (IOException ignored) {}
+    private void serve() {
+        SessionState state = new SessionState(); current = state; writeStarted = 0;
+        BluetoothWire wire = null;
+        try {
+            wire = new BluetoothWire(socket.getOutputStream());
+            if (!ShizukuDisplayClient.authorized()) { wire.event(BluetoothWire.CAPTURE_FAILED); status("Authorize Shizuku on the phone once to enable Mac-initiated capture"); return; }
+            state.hasGuard = true;
+            state.guard = new ShizukuDisplayClient(this, getSharedPreferences("ready", MODE_PRIVATE).getBoolean("panelOff", true), this::status,
+                (cause, awake) -> {
+                    if (!state.stopped) {
+                        state.endEvent.compareAndSet(0, cause == RemoteSession.LOCAL_USE
+                            ? (awake ? BluetoothWire.PHONE_ON : BluetoothWire.LOCAL_USE_FAILED) : BluetoothWire.SESSION_ENDED);
+                        state.eventReady.countDown();
+                    }
+                }, posted -> auditEnd(state, posted));
+            ParcelFileDescriptor[] pipe = ParcelFileDescriptor.createPipe(); state.inputPipe = pipe[0];
+            try (ParcelFileDescriptor output = pipe[1]) { state.guard.startVideo(output); }
+            ByteArrayOutputStream header = new ByteArrayOutputStream();
+            VideoWire.deviceHeader(new DataOutputStream(header), Build.MODEL);
+            sendVideo(wire, header.toByteArray());
+            try (DataInputStream input = new DataInputStream(new ParcelFileDescriptor.AutoCloseInputStream(state.inputPipe))) {
+                byte[] codec = new byte[4]; input.readFully(codec); sendVideo(wire, codec);
+                while (!shutdown && !state.stopped && state.endEvent.get() == 0) {
+                    byte[] frameHeader = new byte[12]; input.readFully(frameHeader);
+                    if ((frameHeader[0] & 0x80) != 0) { sendVideo(wire, frameHeader); continue; }
+                    int size = ((frameHeader[8] & 255) << 24) | ((frameHeader[9] & 255) << 16) | ((frameHeader[10] & 255) << 8) | (frameHeader[11] & 255);
+                    if (size <= 0 || size > VideoWire.MAX_PACKET) throw new IOException("Invalid video frame size");
+                    byte[] frame = new byte[12 + size]; System.arraycopy(frameHeader, 0, frame, 0, 12); input.readFully(frame, 12, size);
+                    sendVideo(wire, frame);
+                    if ((frameHeader[0] & 0x40) == 0) {
+                        if (state.streamStarted.compareAndSet(false, true)) wire.event(BluetoothWire.STREAM_STARTED);
+                        state.guard.frameSent();
+                    }
+                }
+            } catch (EOFException captureEnded) {
+                state.eventReady.await(300, TimeUnit.MILLISECONDS); // Allow the shell's oneway callback to reach this process.
+            }
+            if (!state.stopped && state.endEvent.get() != 0) {
+                writeStarted = SystemClock.elapsedRealtime(); wire.event(state.endEvent.get()); writeStarted = 0;
+                Thread.sleep(150); // Short best-effort radio drain; lock/recovery already happened.
+            }
+        } catch (Exception error) {
+            if (wire != null && !state.streamStarted.get()) {
+                try { writeStarted = SystemClock.elapsedRealtime(); wire.event(BluetoothWire.CAPTURE_FAILED); writeStarted = 0; Thread.sleep(100); }
+                catch (IOException | InterruptedException ignored) {}
+            }
+            status("Capture unavailable. Keep Shizuku running and authorize it in setup.");
+        } finally {
+            stopSession(); status("Ready for your paired Mac");
+        }
+    }
+    private void sendVideo(BluetoothWire wire, byte[] bytes) throws IOException {
+        writeStarted = SystemClock.elapsedRealtime(); wire.video(bytes); writeStarted = 0;
+    }
+    private synchronized void stopSession() {
+        SessionState state = current;
+        if (state != null) {
+            state.stopped = true;
+            ShizukuDisplayClient active = state.guard; state.guard = null;
+            if (active != null) active.close(); else if (!state.hasGuard && state.streamStarted.get()) auditEnd(state, false);
+            try { if (state.inputPipe != null) state.inputPipe.close(); } catch (IOException ignored) {}
+            state.inputPipe = null;
+        }
         try { if (socket != null) socket.close(); } catch (IOException ignored) {}
+        socket = null; writeStarted = 0;
+    }
+    private void auditEnd(SessionState state, boolean shellPosted) {
+        if (!state.streamStarted.get() || !state.auditPosted.compareAndSet(false, true)) return;
+        if (!shellPosted) SessionAudit.phone(this);
     }
     @Override public void onDestroy() {
-        abort();
+        shutdown = true;
+        stopSession();
+        try { if (listener != null) listener.close(); } catch (IOException ignored) {}
         if (watchdog != null) watchdog.shutdownNow();
-        if (projection != null) projection.stop();
+        unregisterReceiver(screenActions);
         super.onDestroy();
     }
 }
