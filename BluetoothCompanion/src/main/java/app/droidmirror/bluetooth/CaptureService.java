@@ -46,12 +46,24 @@ public final class CaptureService extends Service {
     private Thread server;
     private ScheduledExecutorService watchdog;
 
-    static void enableIfConfigured(Context context) {
+    enum ReadyResult { START_REQUESTED, NOT_CONFIGURED, PERMISSION_REQUIRED, BACKGROUND_RESTRICTED, FAILED }
+
+    static ReadyResult enableIfConfigured(Context context) {
         android.content.SharedPreferences settings = context.getSharedPreferences("ready", MODE_PRIVATE);
-        if (!settings.getBoolean("enabled", false) || settings.getString("peer", "").isEmpty()) return;
-        if (Build.VERSION.SDK_INT >= 31 && context.checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) return;
-        try { context.startForegroundService(new Intent(context, CaptureService.class)); }
-        catch (RuntimeException ignored) { /* Android may forbid background/force-stopped startup; setup UI reports readiness. */ }
+        if (!settings.getBoolean("enabled", false) || settings.getString("peer", "").isEmpty()) return ReadyResult.NOT_CONFIGURED;
+        if (Build.VERSION.SDK_INT >= 31 && context.checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) return ReadyResult.PERMISSION_REQUIRED;
+        try {
+            context.startForegroundService(new Intent(context, CaptureService.class));
+            return ReadyResult.START_REQUESTED;
+        } catch (SecurityException error) {
+            android.util.Log.w("DroidMirrorReady", "Readiness requires existing permissions", error);
+            return ReadyResult.PERMISSION_REQUIRED;
+        } catch (RuntimeException error) {
+            android.util.Log.w("DroidMirrorReady", "Android refused readiness startup", error);
+            if (Build.VERSION.SDK_INT >= 31 && error instanceof ForegroundServiceStartNotAllowedException)
+                return ReadyResult.BACKGROUND_RESTRICTED;
+            return ReadyResult.FAILED;
+        }
     }
     @Override public IBinder onBind(Intent intent) { return null; }
     private Notification notification(String text) {

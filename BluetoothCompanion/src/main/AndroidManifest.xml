@@ -19,6 +19,12 @@
         <receiver android:name=".ReadyReceiver" android:exported="false">
             <intent-filter><action android:name="android.intent.action.BOOT_COMPLETED" /></intent-filter>
         </receiver>
+        <receiver android:name=".AutomationReceiver" android:exported="true">
+            <intent-filter><action android:name="app.droidmirror.bluetooth.action.START_READY" /></intent-filter>
+        </receiver>
+        <activity android:name=".SilentStartActivity" android:exported="true"
+            android:theme="@style/SilentStartTheme" android:excludeFromRecents="true"
+            android:noHistory="true" android:taskAffinity="" />
         <service android:name=".CaptureService" android:exported="false" android:foregroundServiceType="connectedDevice" />
     </application>
 </manifest>

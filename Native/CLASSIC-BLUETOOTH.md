@@ -9,8 +9,8 @@ of Android's ordinary app permissions. Remote input and audio remain ADB-only.
 
 ## Install and set up once
 
-The compiled Android test APK is `outputs/DroidMirror-Bluetooth-0.3-debug.apk`,
-with a SHA-256 checksum beside it. It uses the same signing certificate as 0.1/0.2
+The compiled Android test APK is `outputs/DroidMirror-Bluetooth-0.4-debug.apk`,
+with a SHA-256 checksum beside it. It uses the same signing certificate as 0.1/0.2/0.3
 and can be installed over them. It is a debug build, not a store release.
 
 1. Pair the phone and Mac in their system Bluetooth settings.
@@ -29,13 +29,65 @@ it does not use the `mediaProjection` foreground-service type. Closing the phone
 setup activity does not end readiness or capture. **Disable Mac connections**
 turns off background readiness. Shizuku permissions/startup have no fixed weekly
 schedule: reboots, revocation and Shizuku itself determine when attention is
-needed. Android force-stop prevents automatic restart until the app is opened;
+needed. Android force-stop prevents automatic restart until an explicit launch;
 OEM battery restrictions can also delay/stop the listener. These are lifecycle
 limits, not per-session capture approvals.
 
 A sleeping phone is made logically awake through Android's normal power policy.
 The configured keyguard is never dismissed, bypassed or reconfigured. This implementation is video-only,
 so unlocking/input from Mac still requires the existing ADB mode.
+
+## Silent Tasker restart (Android 0.4)
+
+Complete phone setup once and leave **Enable Mac connections** enabled. Create a
+Tasker **Bluetooth Connected** profile for your Mac with a **Send Intent** entry task:
+
+| Field | Value |
+| --- | --- |
+| Action | `app.droidmirror.bluetooth.action.START_READY` |
+| Package | `app.droidmirror.bluetooth` |
+| Class | `app.droidmirror.bluetooth.SilentStartActivity` |
+| Target | Activity |
+
+Leave data, MIME type and extras empty. This transparent activity resumes the
+saved listener and immediately finishes, without opening setup, requesting
+permissions or starting capture. It can briefly take foreground focus; it has
+no preview, animation or recent-task entry. Tasker must be permitted to launch
+activities from the background on your Android/OEM version (Tasker's setup may
+require “Display over other apps”). It does not unlock the phone.
+
+For an activity-free attempt, change Class to
+`app.droidmirror.bluetooth.AutomationReceiver` and Target to **Broadcast Receiver**.
+Keep the same action/package. Android 12+ may reject this path with
+`BACKGROUND_RESTRICTED` when the sender has no foreground-service exemption;
+use the activity entry above if that happens. The receiver does not automatically
+open an activity. Ordered broadcasts return code -1 with `START_REQUESTED`, or
+code 0 with a refusal reason in result data. This acknowledges the startup request,
+not Bluetooth/Shizuku readiness. Diagnostics use log tag `DroidMirrorReady`.
+
+Equivalent commands for a shell-capable automation runner:
+
+```sh
+am start -a app.droidmirror.bluetooth.action.START_READY -n app.droidmirror.bluetooth/.SilentStartActivity -f 0x10000000
+am broadcast -a app.droidmirror.bluetooth.action.START_READY -n app.droidmirror.bluetooth/.AutomationReceiver -f 0x20
+```
+
+The broadcast's `0x20` includes stopped packages; a real force-stop differs from
+Android killing the process, and background restrictions still apply. Explicit
+activity launch is preferred for force-stop recovery. Ordinary Bluetooth events
+alone do not restart a force-stopped package. Tasker needs an actual Bluetooth
+connection/profile event: pairing and discovery are not connections, and a dead
+RFCOMM listener cannot accept the Mac's stream attempt. Use an independently
+available Bluetooth connection event or another Tasker trigger if the Mac profile
+does not fire.
+
+Both entries are idempotent and only reuse saved settings. They cannot enable a
+previously disabled listener, select a peer, grant Shizuku permission or dismiss
+keyguard. An active stream stays active. Android still requires the existing
+low-importance foreground-service notification; silent means no setup screen or
+new alert. The entry points are public for Tasker, but only the configured bonded
+Mac can connect and initiate capture. Compilation/lint do not validate Android/OEM
+background launch policies; test the Tasker profile on your phone.
 
 ## Build
 
