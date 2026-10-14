@@ -4,6 +4,7 @@
 #import <objc/message.h>
 #import <objc/runtime.h>
 #import <unistd.h>
+#include <SDL3/SDL_events.h>
 #import "DeviceCorners.h"
 #import "CornerResize.h"
 #import "ScrollDirection.h"
@@ -158,6 +159,15 @@ static BOOL DMEventIsQ(NSEvent *event) {
 }
 @end
 static DMMirrorQuitTarget *DMMirrorQuit;
+
+// Let scrcpy release injected keys and drain its control queue before exiting.
+static void DMGracefulMirrorTerminate(NSApplication *app, SEL selector, id sender) {
+    (void)app;
+    (void)selector;
+    (void)sender;
+    SDL_Event event = { .type = SDL_EVENT_QUIT };
+    SDL_PushEvent(&event);
+}
 
 static void DMSendEvent(NSApplication *app, SEL selector, NSEvent *event) {
     if ((event.type == NSEventTypeKeyDown || event.type == NSEventTypeKeyUp) &&
@@ -388,6 +398,8 @@ static void DMLoadOriginalAndInstall(void) {
 // the process-exit fallback for ordinary SDL shutdowns.
 __attribute__((constructor))
 static void DMObserveScrcpyTermination(void) {
+    Method terminate = class_getInstanceMethod(NSApplication.class, @selector(terminate:));
+    method_setImplementation(terminate, (IMP)DMGracefulMirrorTerminate);
     Method sendEvent = class_getInstanceMethod(NSApplication.class, @selector(sendEvent:));
     DMOriginalSendEvent = (void *)method_getImplementation(sendEvent);
     method_setImplementation(sendEvent, (IMP)DMSendEvent);

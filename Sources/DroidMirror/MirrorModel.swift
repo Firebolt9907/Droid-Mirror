@@ -357,7 +357,13 @@ final class MirrorModel: ObservableObject {
         stopToolbarPositioning()
         mirrorProcess?.terminationHandler = nil
         if mirrorProcess?.isRunning == true {
-            mirrorProcess?.terminate()
+            mirrorProcess?.interrupt()
+            // Allow scrcpy's SDL quit path to send releases before fallback.
+            for _ in 0..<10 {
+                if mirrorProcess?.isRunning != true { break }
+                try? await Task.sleep(for: .milliseconds(50))
+            }
+            if mirrorProcess?.isRunning == true { mirrorProcess?.terminate() }
         }
         mirrorProcess = nil
         await restoreDeviceStateAndLock()

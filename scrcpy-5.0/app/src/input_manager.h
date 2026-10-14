@@ -48,6 +48,8 @@ struct sc_input_manager {
     uint64_t next_sequence; // used for request acknowledgements
 
     bool disconnected;
+    struct sc_key_event pressed_keys[SDL_SCANCODE_COUNT];
+    bool pressed_shortcuts[512];
 };
 
 struct sc_input_manager_params {
@@ -72,5 +74,8 @@ sc_input_manager_init(struct sc_input_manager *im,
 void
 sc_input_manager_handle_event(struct sc_input_manager *im,
                               const SDL_Event *event);
+
+void
+sc_input_manager_release_all(struct sc_input_manager *im);
 
 #endif

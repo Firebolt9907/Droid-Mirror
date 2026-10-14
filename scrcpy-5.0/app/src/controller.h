@@ -20,6 +20,7 @@ struct sc_controller {
     sc_mutex mutex;
     sc_cond msg_cond;
     bool stopped;
+    bool sending;
 
     struct sc_control_msg_queue queue;
 
@@ -60,6 +61,10 @@ sc_controller_start(struct sc_controller *controller);
 
 void
 sc_controller_stop(struct sc_controller *controller);
+
+// Wait at most until deadline for queued messages and the current send.
+bool
+sc_controller_flush(struct sc_controller *controller, sc_tick deadline);
 
 void
 sc_controller_join(struct sc_controller *controller);

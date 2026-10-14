@@ -20,6 +20,7 @@ struct sc_keyboard_sdk {
 
     enum sc_key_inject_mode key_inject_mode;
     bool forward_key_repeat;
+    bool pressed[512]; // Android keycodes successfully queued for injection
 };
 
 void

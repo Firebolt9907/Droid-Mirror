@@ -7,6 +7,7 @@ int main(void) {
     msg.type = SC_CONTROL_MSG_TYPE_UHID_INPUT; assert(!sc_control_msg_is_droppable(&msg));
     msg.type = SC_CONTROL_MSG_TYPE_UHID_CREATE; assert(!sc_control_msg_is_droppable(&msg));
     msg.type = SC_CONTROL_MSG_TYPE_UHID_DESTROY; assert(!sc_control_msg_is_droppable(&msg));
+    msg.type = SC_CONTROL_MSG_TYPE_INJECT_KEYCODE; assert(!sc_control_msg_is_droppable(&msg));
     msg.type = SC_CONTROL_MSG_TYPE_INJECT_SCROLL_EVENT; assert(sc_control_msg_is_droppable(&msg));
     puts("PASS: UHID keyboard transitions remain non-droppable under Wi-Fi backpressure");
 }

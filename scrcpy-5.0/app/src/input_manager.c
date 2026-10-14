@@ -52,6 +52,8 @@ sc_input_manager_init(struct sc_input_manager *im,
     im->next_sequence = 1; // 0 is reserved for SC_SEQUENCE_INVALID
 
     im->disconnected = false;
+    memset(im->pressed_keys, 0, sizeof(im->pressed_keys));
+    memset(im->pressed_shortcuts, 0, sizeof(im->pressed_shortcuts));
 }
 
 static void
@@ -71,6 +73,8 @@ send_keycode(struct sc_input_manager *im, enum android_keycode keycode,
 
     if (!sc_controller_push_msg(im->controller, &msg)) {
         LOGW("Could not request 'inject %s'", name);
+    } else if ((unsigned) keycode < 512) {
+        im->pressed_shortcuts[keycode] = action == SC_ACTION_DOWN;
     }
 }
 
@@ -744,6 +748,41 @@ sc_input_manager_process_key(struct sc_input_manager *im,
 
     assert(im->kp->ops->process_key);
     im->kp->ops->process_key(im->kp, &evt, ack_to_wait);
+    if ((unsigned) scancode < SDL_SCANCODE_COUNT) {
+        im->pressed_keys[scancode] = evt;
+        if (evt.action == SC_ACTION_UP) {
+            im->pressed_keys[scancode].scancode = SC_SCANCODE_UNKNOWN;
+        }
+    }
+}
+
+void
+sc_input_manager_release_all(struct sc_input_manager *im) {
+    if (im->kp) {
+        if (im->kp->ops->release_all) {
+            im->kp->ops->release_all(im->kp);
+        } else {
+            for (unsigned i = 0; i < SDL_SCANCODE_COUNT; ++i) {
+                struct sc_key_event evt = im->pressed_keys[i];
+                if (evt.scancode == SC_SCANCODE_UNKNOWN) {
+                    continue;
+                }
+                evt.action = SC_ACTION_UP;
+                evt.mods_state = 0;
+                evt.repeat = false;
+                im->kp->ops->process_key(im->kp, &evt, SC_SEQUENCE_INVALID);
+            }
+        }
+    }
+    memset(im->pressed_keys, 0, sizeof(im->pressed_keys));
+    for (unsigned key = 0; key < 512; ++key) {
+        if (im->pressed_shortcuts[key]) {
+            send_keycode(im, key, SC_ACTION_UP, "shortcut release");
+        }
+    }
+    im->key_repeat = 0;
+    im->last_keycode = SDLK_UNKNOWN;
+    im->last_mod = 0;
 }
 
 static struct sc_position
@@ -1187,6 +1226,11 @@ void
 sc_input_manager_handle_event(struct sc_input_manager *im,
                               const SDL_Event *event) {
     switch (event->type) {
+        case SDL_EVENT_WINDOW_FOCUS_LOST:
+        case SDL_EVENT_WINDOW_HIDDEN:
+        case SDL_EVENT_WINDOW_MINIMIZED:
+            sc_input_manager_release_all(im);
+            break;
         case SDL_EVENT_TEXT_INPUT:
             sc_input_manager_process_text_input(im, &event->text);
             break;

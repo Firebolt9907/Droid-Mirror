@@ -58,6 +58,7 @@ sc_controller_init(struct sc_controller *controller, sc_socket control_socket,
 
     controller->control_socket = control_socket;
     controller->stopped = false;
+    controller->sending = false;
 
     controller->resize_display.width = 0;
     controller->resize_display.height = 0;
@@ -107,7 +108,7 @@ sc_controller_push_msg(struct sc_controller *controller,
         sc_vecdeque_push_noresize(&controller->queue, *msg);
         pushed = true;
         if (was_empty) {
-            sc_cond_signal(&controller->msg_cond);
+            sc_cond_broadcast(&controller->msg_cond);
         }
     } else if (!sc_control_msg_is_droppable(msg)) {
         bool ok = sc_vecdeque_push(&controller->queue, *msg);
@@ -134,7 +135,7 @@ sc_controller_resize_display(struct sc_controller *controller,
     controller->resize_display.width = width;
     controller->resize_display.height = height;
     if (!was_set) {
-        sc_cond_signal(&controller->msg_cond);
+        sc_cond_broadcast(&controller->msg_cond);
     }
     sc_mutex_unlock(&controller->mutex);
 }
@@ -193,6 +194,7 @@ run_controller(void *data) {
         } else {
             msg = sc_vecdeque_pop(&controller->queue);
         }
+        controller->sending = true;
         sc_mutex_unlock(&controller->mutex);
 
         if (sc_get_log_level() <= SC_LOG_LEVEL_VERBOSE) {
@@ -202,6 +204,13 @@ run_controller(void *data) {
         bool eos;
         bool ok = process_msg(controller, &msg, &eos);
         sc_control_msg_destroy(&msg);
+        sc_mutex_lock(&controller->mutex);
+        controller->sending = false;
+        if (!ok) {
+            controller->stopped = true;
+        }
+        sc_cond_broadcast(&controller->msg_cond);
+        sc_mutex_unlock(&controller->mutex);
         if (!ok) {
             if (eos) {
                 LOGD("Controller stopped (socket closed)");
@@ -240,8 +249,26 @@ void
 sc_controller_stop(struct sc_controller *controller) {
     sc_mutex_lock(&controller->mutex);
     controller->stopped = true;
-    sc_cond_signal(&controller->msg_cond);
+    sc_cond_broadcast(&controller->msg_cond);
     sc_mutex_unlock(&controller->mutex);
+}
+
+bool
+sc_controller_flush(struct sc_controller *controller, sc_tick deadline) {
+    sc_mutex_lock(&controller->mutex);
+    while (!controller->stopped && (controller->sending
+            || controller->resize_display.width
+            || !sc_vecdeque_is_empty(&controller->queue))) {
+        if (!sc_cond_timedwait(&controller->msg_cond, &controller->mutex,
+                              deadline)) {
+            break;
+        }
+    }
+    bool flushed = !controller->stopped && !controller->sending
+        && !controller->resize_display.width
+        && sc_vecdeque_is_empty(&controller->queue);
+    sc_mutex_unlock(&controller->mutex);
+    return flushed;
 }
 
 void

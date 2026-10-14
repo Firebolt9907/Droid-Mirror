@@ -1044,6 +1044,16 @@ aoa_complete:
     disconnected = ret == SCRCPY_EXIT_DISCONNECTED;
 
 end:
+    // Queue key-ups while the transport is still alive. Stopping the controller
+    // first would discard them, so give the sender a bounded chance to drain.
+    if (screen_initialized && !disconnected) {
+        sc_input_manager_release_all(&s->screen.im);
+        if (controller_started
+                && !sc_controller_flush(&s->controller,
+                                        sc_tick_now() + SC_TICK_FROM_MS(300))) {
+            LOGW("Could not flush input releases before disconnect");
+        }
+    }
     if (timeout_started) {
         sc_timeout_stop(&s->timeout);
     }

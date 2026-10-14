@@ -364,6 +364,7 @@ sc_control_msg_is_droppable(const struct sc_control_msg *msg) {
     return msg->type != SC_CONTROL_MSG_TYPE_UHID_CREATE
         // Keep every keyboard-state transition under Wi-Fi backpressure.
         && msg->type != SC_CONTROL_MSG_TYPE_UHID_INPUT
+        && msg->type != SC_CONTROL_MSG_TYPE_INJECT_KEYCODE
         && msg->type != SC_CONTROL_MSG_TYPE_UHID_DESTROY;
 }
 

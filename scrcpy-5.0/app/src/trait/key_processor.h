@@ -34,6 +34,10 @@ struct sc_key_processor {
 
 struct sc_key_processor_ops {
 
+    // Release keys accepted by this processor, bypassing normal input filters.
+    // Optional; the input manager synthesizes key-ups for HID processors.
+    void (*release_all)(struct sc_key_processor *kp);
+
     /**
      * Process a keyboard event
      *

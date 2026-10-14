@@ -5,6 +5,7 @@
 #import <dlfcn.h>
 
 static void (*DMOriginalSetExecutableURL)(NSTask *, SEL, NSURL *);
+static void (*DMOriginalTaskTerminate)(NSTask *, SEL);
 static void (*DMOriginalReplyToTerminate)(NSApplication *, SEL, BOOL);
 static BOOL DMQuitting;
 static BOOL DMFinishingQuit;
@@ -149,6 +150,21 @@ static void DMSetExecutableURL(NSTask *task, SEL selector, NSURL *url) {
     DMOriginalSetExecutableURL(task, selector, url);
 }
 
+// The retained host also calls NSTask.terminate; give its bundled client the
+// same SDL shutdown opportunity as the current Swift source.
+static void DMTerminateTask(NSTask *task, SEL selector) {
+    if (![task.executableURL.lastPathComponent isEqualToString:@"scrcpy"]) {
+        DMOriginalTaskTerminate(task, selector);
+        return;
+    }
+    if (!task.running) return;
+    [task interrupt];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 600 * NSEC_PER_MSEC),
+                   dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        if (task.running) DMOriginalTaskTerminate(task, selector);
+    });
+}
+
 __attribute__((constructor))
 static void DMInstallBundledScrcpyResolver(void) {
     // A helper launched by LaunchServices must never inherit host swizzles.
@@ -160,6 +176,9 @@ static void DMInstallBundledScrcpyResolver(void) {
 
     DMOriginalSetExecutableURL = (void *)method_getImplementation(method);
     method_setImplementation(method, (IMP)DMSetExecutableURL);
+    Method taskTerminate = class_getInstanceMethod(NSTask.class, @selector(terminate));
+    DMOriginalTaskTerminate = (void *)method_getImplementation(taskTerminate);
+    method_setImplementation(taskTerminate, (IMP)DMTerminateTask);
     Method terminate = class_getInstanceMethod(NSApplication.class, @selector(terminate:));
     method_setImplementation(terminate, (IMP)DMBeginQuit);
     Method reply = class_getInstanceMethod(NSApplication.class, @selector(replyToApplicationShouldTerminate:));

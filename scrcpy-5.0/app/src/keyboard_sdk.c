@@ -291,8 +291,36 @@ sc_key_processor_process_key(struct sc_key_processor *kp,
     if (convert_input_key(event, &msg, kb->key_inject_mode, kb->repeat)) {
         if (!sc_controller_push_msg(kb->controller, &msg)) {
             LOGW("Could not request 'inject keycode'");
+        } else if ((unsigned) msg.inject_keycode.keycode < 512) {
+            kb->pressed[msg.inject_keycode.keycode] =
+                event->action == SC_ACTION_DOWN;
         }
     }
+}
+
+static void
+sc_key_processor_release_all(struct sc_key_processor *kp) {
+    struct sc_keyboard_sdk *kb = DOWNCAST(kp);
+    for (unsigned key = 0; key < 512; ++key) {
+        if (!kb->pressed[key]) {
+            continue;
+        }
+        struct sc_control_msg msg = {
+            .type = SC_CONTROL_MSG_TYPE_INJECT_KEYCODE,
+            .inject_keycode = {
+                .action = AKEY_EVENT_ACTION_UP,
+                .keycode = key,
+                .repeat = 0,
+                .metastate = 0,
+            },
+        };
+        if (sc_controller_push_msg(kb->controller, &msg)) {
+            kb->pressed[key] = false;
+        } else {
+            LOGW("Could not release injected key %u", key);
+        }
+    }
+    kb->repeat = 0;
 }
 
 static void
@@ -337,8 +365,10 @@ sc_keyboard_sdk_init(struct sc_keyboard_sdk *kb,
     kb->forward_key_repeat = forward_key_repeat;
 
     kb->repeat = 0;
+    memset(kb->pressed, 0, sizeof(kb->pressed));
 
     static const struct sc_key_processor_ops ops = {
+        .release_all = sc_key_processor_release_all,
         .process_key = sc_key_processor_process_key,
         .process_text = sc_key_processor_process_text,
     };
