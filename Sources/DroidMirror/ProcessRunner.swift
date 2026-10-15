@@ -1,5 +1,30 @@
 import Foundation
 
+/// Continuously drain diagnostics so a noisy child cannot block on a full pipe.
+final class ProcessDiagnostics: @unchecked Sendable {
+    private let pipe = Pipe()
+    private let lock = NSLock()
+    private var bytes = Data()
+
+    func attach(to process: Process) {
+        process.standardError = pipe
+        pipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
+            let data = handle.availableData
+            guard let self, !data.isEmpty else { return }
+            self.lock.lock()
+            self.bytes.append(data)
+            if self.bytes.count > 8192 { self.bytes.removeFirst(self.bytes.count - 8192) }
+            self.lock.unlock()
+        }
+    }
+
+    func finish() -> String {
+        pipe.fileHandleForReading.readabilityHandler = nil
+        lock.lock(); defer { lock.unlock() }
+        return String(decoding: bytes, as: UTF8.self)
+    }
+}
+
 enum ToolLocator {
     static func find(_ name: String) -> String? {
         let candidates = [

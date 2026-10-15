@@ -248,9 +248,13 @@ are type 1 (one-byte PHONE_ON=1, SESSION_ENDED=2, PHONE_LOCAL_USE=3, STREAM_STAR
 CAPTURE_FAILED=5, ALIVE=6) or type 2 (scrcpy control replies), with four-byte lengths.
 The Mac keeps video and control on separate local sockets. Heartbeats/ACKs run at
 250 ms with a 24 KiB video window. Unsent cumulative ACKs coalesce to the newest
-count under CoreBluetooth backpressure; input bytes retain their exact order.
+count under CoreBluetooth backpressure. The newest ACK is prioritized between
+complete input envelopes, so sustained mouse traffic cannot keep it behind the
+whole input backlog. Input bytes retain their exact order.
 Mac BLE callbacks and GATT operations run on a dedicated serial queue, separate
-from the Classic receive loop. Return reads use a bounded worker queue and poll at 500 ms when idle, then drain
+from the Classic receive loop. Only one acknowledged GATT read or write is in
+flight at a time; due return reads get a turn during sustained input. Return
+reads use a bounded worker queue and poll at 500 ms when idle, then drain
 queued records immediately. Empty reads contain no application record. A return
 packet is retired after its GATT response is submitted; missing/reordered packets
 fail authentication/sequence checks. This avoids absent notification callbacks on

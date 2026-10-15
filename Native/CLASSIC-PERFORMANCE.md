@@ -73,3 +73,18 @@ The first 320 kbps live sample spent 2270 ms of a 5000 ms interval waiting on th
 identified the ACK window/feedback path as the immediate live-stream bottleneck;
 the normal sample was not saturating the raw 618 kbps transport. The window and
 coalescing changes address this measured wait rather than increasing bitrate alone.
+
+## Mouse activity disconnect investigation
+
+Retained Mac helper logs reported `BLE input transmission stalled`; Android then
+reported `Mac video acknowledgement stalled`. The old BLE sender only emitted a
+cumulative ACK after its entire input byte queue emptied. Continuous pointer
+traffic could therefore starve video credit. It also allowed a return read and
+an acknowledged write to be queued concurrently in CoreBluetooth.
+
+The sender now preserves complete outer input envelopes in a bounded queue,
+prioritizes the newest cumulative ACK at envelope boundaries, and permits only
+one GATT operation at a time. Due return reads are serviced between writes.
+Regression tests verify ACK progress under continuous input, fragmented envelope
+integrity, input ordering, coalescing and capacity bounds. The mirror menu also
+creates Quit DroidMirror / Command-Q when SDL has no existing Quit item.

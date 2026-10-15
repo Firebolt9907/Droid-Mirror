@@ -22,12 +22,12 @@ cp "$ROOT/Resources/Info.plist" "$APP/Contents/Info.plist"
 /usr/bin/clang -dynamiclib -fobjc-arc -fblocks -mmacosx-version-min=14.0 \
   -framework Cocoa -framework QuartzCore \
   "$ROOT/Native/KeyboardPassthroughShim.m" "$ROOT/Native/DeviceCorners.m" \
-  "$ROOT/Native/CornerResize.m" "$ROOT/Native/ScrollDirection.m" \
+  "$ROOT/Native/CornerResize.m" "$ROOT/Native/ScrollDirection.m" "$ROOT/Native/MirrorMenu.m" \
   -o "$APP/Contents/Frameworks/libDroidMirrorStyle.dylib"
 /usr/bin/clang -mmacosx-version-min=14.0 -c "$ROOT/Native/ClassicBluetoothWire.c" -o /tmp/droidmirror-classic-wire.o
 /usr/bin/clang -fobjc-arc -fblocks -mmacosx-version-min=14.0 \
   -framework Foundation -framework IOBluetooth -framework CoreBluetooth -framework Security \
-  "$ROOT/Native/ClassicBluetoothBridge.m" "$ROOT/Native/BleInputTransport.m" "$ROOT/Native/BleInputCrypto.c" /tmp/droidmirror-classic-wire.o -o "$APP/Contents/Helpers/DroidMirrorBluetooth"
+  "$ROOT/Native/ClassicBluetoothBridge.m" "$ROOT/Native/BleInputTransport.m" "$ROOT/Native/BleInputQueue.m" "$ROOT/Native/BleInputCrypto.c" /tmp/droidmirror-classic-wire.o -o "$APP/Contents/Helpers/DroidMirrorBluetooth"
 # Runtime-loaded Wi-Fi Aware SPI stays isolated from the main app's deployment target.
 /usr/bin/clang -fobjc-arc -fblocks -mmacosx-version-min=14.0 \
   -framework Foundation -framework Security "$ROOT/Native/WiFiAwareBridge.m" -o "$APP/Contents/Helpers/DroidMirrorWiFiAware"

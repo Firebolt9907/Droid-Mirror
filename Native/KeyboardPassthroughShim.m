@@ -7,6 +7,7 @@
 #import "DeviceCorners.h"
 #import "CornerResize.h"
 #import "ScrollDirection.h"
+#import "MirrorMenu.h"
 
 static id DMKeyboardMonitor;
 static id DMWindowCloseObserver;
@@ -169,20 +170,6 @@ static void DMSendEvent(NSApplication *app, SEL selector, NSEvent *event) {
     BOOL previousScrollContext = DMBeginScrollDirectionEvent(event);
     @try { DMOriginalSendEvent(app, selector, event); }
     @finally { DMEndScrollDirectionEvent(previousScrollContext); }
-}
-
-static void DMFixMirrorQuitMenu(NSMenu *menu) {
-    for (NSMenuItem *item in menu.itemArray) {
-        if (item.action == @selector(terminate:) ||
-            [item.keyEquivalent.lowercaseString isEqualToString:@"q"]) {
-            item.target = DMMirrorQuit;
-            item.action = @selector(quit:);
-            item.keyEquivalent = @"q";
-            item.keyEquivalentModifierMask = NSEventModifierFlagCommand;
-            item.enabled = YES;
-        }
-        if (item.submenu) DMFixMirrorQuitMenu(item.submenu);
-    }
 }
 
 static NSInteger DMPINButtonTagForEvent(NSEvent *event) {
@@ -393,8 +380,9 @@ static void DMObserveScrcpyTermination(void) {
     method_setImplementation(sendEvent, (IMP)DMSendEvent);
     dispatch_async(dispatch_get_main_queue(), ^{
         DMMirrorQuit = [DMMirrorQuitTarget new];
+        DMEnsureMirrorQuitMenu(NSApp, DMMirrorQuit);
         [NSTimer scheduledTimerWithTimeInterval:0.5 repeats:YES block:^(__unused NSTimer *timer) {
-            DMFixMirrorQuitMenu(NSApp.mainMenu);
+            DMEnsureMirrorQuitMenu(NSApp, DMMirrorQuit);
         }];
         [[NSNotificationCenter defaultCenter]
             addObserverForName:NSApplicationWillTerminateNotification

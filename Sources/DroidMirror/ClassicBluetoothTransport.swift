@@ -41,6 +41,11 @@ final class ClassicBluetoothTransport {
         return url.path
     }
 
+    var diagnostic: String {
+        guard let outputURL, let data = try? Data(contentsOf: outputURL), data.count <= 16_384 else { return "" }
+        return String(decoding: data, as: UTF8.self).split(separator: "\n").suffix(4).joined(separator: "\n")
+    }
+
     static func pairedDevices() async throws -> [AndroidDevice] {
         guard let helperPath else { throw RunnerError.failed("Bluetooth helper missing. Rebuild DroidMirror with build-app.sh.") }
         let text = try await ProcessRunner.output(helperPath, ["--list"], timeout: 5)

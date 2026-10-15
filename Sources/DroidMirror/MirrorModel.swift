@@ -282,10 +282,13 @@ final class MirrorModel: ObservableObject {
             configureMirrorUI(environment: &environment)
             process.environment = environment
             process.standardOutput = FileHandle.nullDevice
-            process.standardError = FileHandle.nullDevice
+            let diagnostics = ProcessDiagnostics()
+            diagnostics.attach(to: process)
             process.terminationHandler = { [weak self] child in
+                let clientOutput = diagnostics.finish()
                 Task { @MainActor in
                     guard let self else { return }
+                    let bridgeOutput = self.classicBluetooth.diagnostic
                     self.classicBluetooth.stop()
                     await SessionNotifications.shared.ended()
                     self.mirrorProcess = nil
@@ -293,7 +296,9 @@ final class MirrorModel: ObservableObject {
                     self.sessionIsBluetooth = false
                     self.status = "Bluetooth mirror closed"
                     if child.terminationStatus != 0 && !self.phoneTakenOver && !self.sessionEndedOnPhone && self.errorMessage == nil {
-                        self.errorMessage = "Bluetooth video stopped. Reconnect from your Mac. Keep Shizuku running and use the updated companion and bundled client."
+                        let details = (bridgeOutput + "\n" + clientOutput).trimmingCharacters(in: .whitespacesAndNewlines)
+                        self.log = details
+                        self.errorMessage = "Bluetooth video stopped (exit \(child.terminationStatus)).\n\n\(details)"
                     }
                 }
             }
