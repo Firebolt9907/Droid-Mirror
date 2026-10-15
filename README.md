@@ -6,7 +6,7 @@ Bluetooth Classic RFCOMM is the default source transport: after one-time Android
 setup (Shizuku authorization, a selected paired Mac and **Enable Mac connections**),
 press **Mirror on the Mac** to start privileged scrcpy capture. There is no
 per-session Android screen-share prompt and no ADB/LAN transport. The profile
-is approximately 480p, up to 30 fps and a 1 Mbps H.264 target.
+is approximately 480p, up to 8 fps and a 64 kbps H.264 target.
 
 The compiled test APK is `outputs/DroidMirror-Bluetooth-0.5-debug.apk`.
 Rebuild the Mac app for the matching event transport; checked-in Mac binaries are
@@ -14,8 +14,15 @@ unchanged. A phone power/screen-lock action ends the session, locks/restores the
 phone through Shizuku, and shows a separate **phone was used** popup on Mac.
 End-of-session audit notifications are posted on phone and Mac. Shell watchdog
 recovery covers app death and stale stream leases; physical-device behavior still
-needs validation. Audio and remote input remain available through ADB mode.
+needs validation. Mouse, keyboard, scrolling and navigation use the Bluetooth control channel through Shizuku. Audio remains available through ADB mode.
 See [setup, behavior and validation limits](Native/CLASSIC-BLUETOOTH.md).
+
+## Experimental Wi-Fi Aware
+
+Connection settings include a Wi-Fi Aware readiness check backed by the private
+macOS API. Direct mirroring is not implemented: this Mac rejects discovery for
+missing entitlements, and adding them to an ad hoc signature does not work.
+See [the investigation and remaining integration work](Native/WIFI-AWARE.md).
 
 ## ADB mode highlights
 

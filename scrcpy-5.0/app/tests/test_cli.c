@@ -159,6 +159,13 @@ static void test_external_video(void) {
     assert(!args.opts.control);
     assert(!args.opts.clipboard_autosync);
 
+    args = (struct scrcpy_cli_args) {.opts = scrcpy_options_default};
+    char *duplex[] = {"scrcpy", "--external-video-port=45678", "--external-control-port=45679"};
+    assert(scrcpy_parse_args(&args, ARRAY_LEN(duplex), duplex));
+    assert(args.opts.control && !args.opts.audio && args.opts.external_control_port == 45679);
+    args = (struct scrcpy_cli_args) {.opts = scrcpy_options_default};
+    char *orphan[] = {"scrcpy", "--external-control-port=45679"};
+    assert(!scrcpy_parse_args(&args, ARRAY_LEN(orphan), orphan));
     const char *bad[] = {"--external-video-port=0", "--external-video-port=65536",
                          "--external-video-port=-1", "--external-video-port=abc"};
     for (size_t i = 0; i < ARRAY_LEN(bad); ++i) {

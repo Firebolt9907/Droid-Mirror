@@ -29,7 +29,7 @@ public final class CaptureActivity extends Activity {
         super.onCreate(state);
         LinearLayout layout = new LinearLayout(this); layout.setOrientation(LinearLayout.VERTICAL); layout.setPadding(32, 48, 32, 32);
         status = new TextView(this);
-        status.setText("Set up once: pair your Mac, authorize Shizuku, select the Mac and enable connections. Then press Mirror on your Mac whenever needed. There is no Android screen-share prompt.\n\n480p · up to 30 fps · H.264 1 Mbps. Audio and remote input still require ADB mode. Protected content stays protected.");
+        status.setText("Set up once: pair your Mac, authorize Shizuku, select the Mac and enable connections. Then press Mirror on your Mac whenever needed. There is no Android screen-share prompt.\n\n480p · up to 8 fps · H.264 64 kbps target. Mouse, keyboard and navigation work over Bluetooth. Audio requires ADB mode. Protected content stays protected.");
         layout.addView(status);
         Button authorize = new Button(this); authorize.setText("Authorize Shizuku");
         authorize.setOnClickListener(v -> {

@@ -15,7 +15,7 @@ final class DroidMirrorAppDelegate: NSObject, NSApplicationDelegate {
             object: String(ProcessInfo.processInfo.processIdentifier)
         )
         MirrorModel.shared.refreshDevices()
-        if MirrorModel.shared.preferences.transport == .bluetoothClassic {
+        if MirrorModel.shared.preferences.transport != .adb {
             SettingsWindowController.shared.show(model: MirrorModel.shared)
         }
     }

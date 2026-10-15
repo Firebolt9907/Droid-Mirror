@@ -21,8 +21,8 @@ public final class DisplayLease {
             power.set(true);
             owner = token;
             restoreNeeded = true; // Record recovery intent before any partial OFF.
-            lastHeartbeat = clock.getAsLong();
             power.set(false);
+            lastHeartbeat = clock.getAsLong();
             error = "";
             return true;
         } catch (Exception failure) {

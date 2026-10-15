@@ -9,7 +9,7 @@ interface IDisplayGuard {
     boolean release(IBinder owner) = 3;
     boolean restoreDisplay() = 4;
     String getLastError() = 5;
-    boolean startCapture(IBinder owner, IStreamEvents observer, in ParcelFileDescriptor output) = 6;
+    boolean startCapture(IBinder owner, IStreamEvents observer, in ParcelFileDescriptor output, in ParcelFileDescriptor controls) = 6;
     void localUse(IBinder owner) = 7;
     void destroy() = 16777114;
 }

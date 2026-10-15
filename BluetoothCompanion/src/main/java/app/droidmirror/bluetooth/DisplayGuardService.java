@@ -45,8 +45,8 @@ public final class DisplayGuardService extends IDisplayGuard.Stub {
         }, "DisplayRecovery"));
     }
     public DisplayGuardService(Context context) { this(); }
-    @Override public synchronized boolean startCapture(IBinder token, IStreamEvents events, ParcelFileDescriptor output) {
-        if (token == null || owner != null || capture != null || output == null || lease.isRestoreNeeded()) {
+    @Override public synchronized boolean startCapture(IBinder token, IStreamEvents events, ParcelFileDescriptor output, ParcelFileDescriptor controls) {
+        if (token == null || owner != null || capture != null || output == null || controls == null || lease.isRestoreNeeded()) {
             if (output != null) try { output.close(); } catch (java.io.IOException ignored) {}
             return false;
         }
@@ -65,7 +65,7 @@ public final class DisplayGuardService extends IDisplayGuard.Stub {
             if (!session.begin(token, 10000)) throw new IllegalStateException("Remote session already active");
             Object generation = new Object(); captureGeneration = generation;
             captureStarted = SystemClock.elapsedRealtime(); captureError = "";
-            capture = new PrivilegedCapture(output, () -> watchdog.execute(() -> {
+            capture = new PrivilegedCapture(output, controls, () -> watchdog.execute(() -> {
                 synchronized (DisplayGuardService.this) {
                     if (captureGeneration == generation) {
                         session.finish(token, RemoteSession.STOP); closeCapture(); capture = null; unlinkOwner();
@@ -74,16 +74,17 @@ public final class DisplayGuardService extends IDisplayGuard.Stub {
             }));
             return true;
         } catch (Exception | LinkageError | AssertionError failure) {
+            android.util.Log.e("DroidMirrorCapture", "Privileged capture startup failed", failure);
             captureError = "Privileged capture unavailable (" + failure.getClass().getSimpleName() + ")";
             try { output.close(); } catch (java.io.IOException ignored) {}
             session.finish(token, RemoteSession.STOP); closeCapture(); unlinkOwner(); return false;
         }
     }
     @Override public synchronized boolean acquire(IBinder token, IStreamEvents events, boolean panelOff) {
-        if (owner != token || token == null || !session.heartbeat(token)) return false;
+        if (owner != token || token == null || !session.owns(token)) return false;
         observer = events;
         if (panelOff) lease.acquire(token);
-        return true;
+        return session.heartbeat(token);
     }
     private void closeCapture() { if (capture != null) capture.close(); }
     @Override public synchronized boolean heartbeat(IBinder token) {
@@ -107,15 +108,19 @@ public final class DisplayGuardService extends IDisplayGuard.Stub {
     }
     @Override public synchronized String getLastError() { return captureError.isEmpty() ? lease.getLastError() : captureError; }
     private boolean ended(Object token, int cause) {
+        android.util.Log.i("DroidMirrorLease", "Remote session ended, cause=" + cause);
         IStreamEvents events = observer;
         boolean awake = false;
         try {
+            logical.lock(); // End every remote session behind the keyguard before restoring the panel.
             if (cause == RemoteSession.LOCAL_USE) {
-                logical.lock(); // Never deliberately wake an unlocked phone.
                 if (!lease.recover()) throw new IllegalStateException("Panel restoration pending");
                 logical.wake(); awake = true;
             } else lease.release(token);
-        } catch (Exception failure) { lease.recover(); }
+        } catch (Exception failure) {
+            android.util.Log.e("DroidMirrorLease", "Lock or display recovery failed", failure);
+            lease.recover();
+        }
         // Recovery and event delivery precede the slower notification command.
         if (events != null) {
             try { events.onEnded(cause, awake); } catch (RemoteException ignored) {}

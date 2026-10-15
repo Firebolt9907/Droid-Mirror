@@ -17,6 +17,7 @@ import android.media.MediaCodec;
 import android.media.MediaCodecInfo;
 import android.media.MediaFormat;
 import android.os.Build;
+import android.os.Bundle;
 import android.os.Looper;
 import android.os.SystemClock;
 import android.view.Surface;
@@ -49,6 +50,10 @@ public class SurfaceEncoder implements AsyncProcessor {
 
     private boolean firstFrameSent;
     private int consecutiveErrors;
+    private long maxFrameAgeUs;
+
+    /** Opt in only for transports where queued historical frames are undesirable. */
+    public void setMaxFrameAgeUs(long value) { maxFrameAgeUs = value; }
 
     private Thread thread;
     private final AtomicBoolean stopped = new AtomicBoolean();
@@ -251,15 +256,33 @@ public class SurfaceEncoder implements AsyncProcessor {
 
     private void encode(MediaCodec codec, Streamer streamer) throws IOException {
         MediaCodec.BufferInfo bufferInfo = new MediaCodec.BufferInfo();
+        FrameFreshness freshness = maxFrameAgeUs > 0 ? new FrameFreshness(maxFrameAgeUs) : null;
+        int currentBitRate = videoBitRate;
 
         boolean eos;
         do {
             int outputBufferId = codec.dequeueOutputBuffer(bufferInfo, -1);
+            if (freshness != null && outputBufferId == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+                Ln.i("Bluetooth encoder output: " + codec.getOutputFormat());
+            }
             try {
                 eos = (bufferInfo.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0;
                 // On EOS, there might be data or not, depending on bufferInfo.size
                 if (outputBufferId >= 0 && bufferInfo.size > 0) {
                     boolean isConfig = (bufferInfo.flags & MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0;
+                    if (freshness != null) {
+                        boolean keyframe = (bufferInfo.flags & MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0;
+                        boolean send = freshness.shouldSend(bufferInfo.presentationTimeUs, System.nanoTime() / 1000, isConfig, keyframe);
+                        if (freshness.takeSyncRequest()) {
+                            currentBitRate = Math.max(32000, currentBitRate / 2);
+                            Bundle parameters = new Bundle();
+                            parameters.putInt(MediaCodec.PARAMETER_KEY_VIDEO_BITRATE, currentBitRate);
+                            parameters.putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0);
+                            codec.setParameters(parameters);
+                            Ln.i("Bluetooth video fell behind; requesting current keyframe at " + currentBitRate + " bit/s");
+                        }
+                        if (!send) continue;
+                    }
                     if (!isConfig) {
                         // If this is not a config packet, then it contains a frame
                         firstFrameSent = true;

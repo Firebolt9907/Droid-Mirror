@@ -22,7 +22,14 @@ struct SettingsView: View {
                     }
                     Text(model.status).font(.caption).foregroundStyle(.secondary)
                 }
-                Text("Bluetooth uses the Android companion at 480p, up to 30 fps, and 1 Mbps H.264. Authorize Shizuku and enable Mac connections once on Android; future streams start from the Mac. Audio and remote input require ADB. For screen-off, enable Shizuku recovery in the Android companion.")
+                if model.preferences.transport == .wifiAware {
+                    Text(model.wifiAwareStatus).font(.caption).foregroundStyle(.secondary)
+                    Button("Check Wi-Fi Aware support") { model.checkWiFiAware() }
+                        .disabled(model.isRefreshing || model.isMirroring || model.isStarting)
+                    Text("Experimental direct connection. Mirroring is unavailable in this build.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                Text("Bluetooth uses the Android companion at 480p, up to 8 fps, and 64 kbps target H.264. Authorize Shizuku and enable Mac connections once on Android; future streams start from the Mac. Mouse, keyboard and navigation use Bluetooth. Audio requires ADB. For screen-off, enable Shizuku recovery in the Android companion.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section("iPhone-like behavior") {
@@ -31,7 +38,7 @@ struct SettingsView: View {
                 Toggle("Keep the mirror above other windows", isOn: $model.preferences.alwaysOnTop)
                 Toggle("Forward audio when no media is already playing", isOn: $model.preferences.forwardAudio)
             }
-            .disabled(model.preferences.transport == .bluetoothClassic)
+            .disabled(model.preferences.transport != .adb)
             Section("Picture (ADB)") {
                 Picker("Codec", selection: $model.preferences.codec) {
                     ForEach(VideoCodec.allCases) { Text($0.label).tag($0) }
@@ -44,7 +51,7 @@ struct SettingsView: View {
                 }
                 Stepper("Bit rate: \(model.preferences.bitRateMbps) Mbps", value: $model.preferences.bitRateMbps, in: 4...32, step: 2)
             }
-            .disabled(model.preferences.transport == .bluetoothClassic)
+            .disabled(model.preferences.transport != .adb)
             Section("Input") {
                 Picker("Scrolling", selection: $model.preferences.scrollMode) {
                     ForEach(ScrollMode.allCases) { Text($0.label).tag($0) }
@@ -56,7 +63,7 @@ struct SettingsView: View {
                 Text("Touch-style scrolling is handled inside the mirror and does not require Accessibility permission. Smart text input gives the best clipboard behavior; UHID behaves like a physical keyboard.")
                     .font(.caption).foregroundStyle(.secondary)
             }
-            .disabled(model.preferences.transport == .bluetoothClassic)
+            .disabled(model.preferences.transport != .adb)
         }.formStyle(.grouped).padding(.vertical, 12)
         .alert("DroidMirror", isPresented: Binding(get: { model.errorMessage != nil }, set: { if !$0 { model.errorMessage = nil } })) {
             Button("OK") { model.errorMessage = nil }

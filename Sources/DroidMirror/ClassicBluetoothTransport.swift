@@ -50,7 +50,9 @@ final class ClassicBluetoothTransport {
         }
     }
 
-    func connect(address: String) async throws -> UInt16 {
+    struct Ports { let video: UInt16; let control: UInt16 }
+
+    func connect(address: String) async throws -> Ports {
         stop()
         guard let helper = Self.helperPath else { throw RunnerError.failed("Bluetooth helper missing. Rebuild DroidMirror with build-app.sh.") }
         let token = generation
@@ -72,7 +74,12 @@ final class ClassicBluetoothTransport {
                 guard data.count <= 16_384 else { throw RunnerError.failed("Bluetooth helper returned too much output") }
                 let text = String(decoding: data, as: UTF8.self)
                 if let line = text.split(separator: "\n").first(where: { $0.hasPrefix("READY ") }),
-                   let port = UInt16(line.dropFirst(6)), port != 0, child.isRunning { monitorEvents(); return port }
+                   child.isRunning {
+                    let fields = line.split(separator: " ")
+                    guard fields.count == 3, let video = UInt16(fields[1]), let control = UInt16(fields[2]),
+                          video != 0, control != 0 else { throw RunnerError.failed("Bluetooth input helper requires an updated app.") }
+                    monitorEvents(); return Ports(video: video, control: control)
+                }
                 if !child.isRunning {
                     if text.contains("EVENT CAPTURE_FAILED") {
                         throw RunnerError.failed("Privileged capture unavailable. Authorize Shizuku and enable Mac connections once on Android.")

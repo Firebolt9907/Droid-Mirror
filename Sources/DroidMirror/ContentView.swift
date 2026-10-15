@@ -131,8 +131,13 @@ struct ContentView: View {
                 ForEach(MirrorTransport.allCases) { Text($0.label).tag($0) }
             }.disabled(model.isMirroring || model.isStarting)
             if model.preferences.transport == .bluetoothClassic {
-                Text("Authorize Shizuku and enable Mac connections once on Android, then press Mirror on the Mac. 480p · up to 30 fps · 1 Mbps. Video only.")
+                Text("Authorize Shizuku and enable Mac connections once on Android, then press Mirror on the Mac. 480p · up to 8 fps · 64 kbps target. Mouse, keyboard and navigation work over Bluetooth.")
                     .font(.caption).foregroundStyle(.secondary)
+            }
+            if model.preferences.transport == .wifiAware {
+                Text(model.wifiAwareStatus).font(.caption).foregroundStyle(.secondary)
+                Button("Check Wi-Fi Aware support") { model.checkWiFiAware() }
+                    .disabled(model.isRefreshing)
             }
             Group {
             Toggle("Start mirroring automatically", isOn: $model.preferences.autoStart)
@@ -153,7 +158,7 @@ struct ContentView: View {
             Picker("Frame rate", selection: $model.preferences.maxFPS) {
                 Text("30 fps").tag(30); Text("60 fps").tag(60); Text("90 fps").tag(90)
             }
-            }.disabled(model.preferences.transport == .bluetoothClassic)
+            }.disabled(model.preferences.transport != .adb)
             Text("Changes apply the next time the mirror starts.")
                 .font(.caption).foregroundStyle(.secondary)
         }

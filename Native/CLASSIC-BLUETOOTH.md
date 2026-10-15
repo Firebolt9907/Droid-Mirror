@@ -161,9 +161,12 @@ notification helper's Keychain identity; the build script signs ad-hoc.
 
 ## Video and control events
 
-The fixed profile is H.264 at a 1,000,000 bit/s target, up to 30 fps and about a
+The Bluetooth profile starts with H.264 at a 64,000 bit/s target, up to 8 fps and about a
 480-pixel short edge, aligned down to 16 pixels while preserving aspect ratio.
-Encoder constraints and fallback may reduce the actual dimensions/rate. The
+The encoder uses constant bitrate without hard quantization limits, no B-frames,
+and gradual intra refresh when supported. Repeated idle frames refine settled text
+without forcing large periodic keyframes. Encoder constraints and
+fallback may reduce the actual dimensions/rate. The
 radio negotiates Classic/EDR itself; the app cannot force an EDR PHY rate.
 
 The secure RFCOMM UUID is `c356a44e-6f2b-4da9-85e5-397991b8a603`. Android owns the
@@ -173,20 +176,27 @@ No screen content is saved. The matching wire format is dummy byte, 64-byte devi
 name, codec ID, then scrcpy 5 session/frame packets, preserving decoder/renderer
 compatibility, rotation metadata, and protected-content restrictions.
 
-Version 0.3 wraps that stream with `DMBT0003` followed by records comprising a
-one-byte type, a four-byte big-endian length, and payload. Type 0 is video in chunks
-of at most 16 KiB. Type 1 is a one-byte event: PHONE_ON (1), SESSION_ENDED (2),
-PHONE_LOCAL_USE (3), STREAM_STARTED (4), CAPTURE_FAILED (5). The Mac's incremental C
-parser removes envelopes/events before forwarding only video to scrcpy's existing
-`--external-video-port` loopback mode. Events go to the host through bounded helper
-status output. Malformed lengths/types/events close the connection.
+The current stream begins with `DMBT0004`, followed by records comprising a
+one-byte type, a four-byte big-endian length, and payload. Type 0 carries video
+in chunks of at most 1 KiB. Type 1 is a one-byte event: PHONE_ON (1), SESSION_ENDED
+(2), PHONE_LOCAL_USE (3), STREAM_STARTED (4), CAPTURE_FAILED (5), ALIVE (6).
+Type 2 carries scrcpy control replies. The Mac parser routes video and control
+to separate loopback sockets. Mac-to-Android records carry raw scrcpy control
+bytes (type 0) or a heartbeat carrying an eight-byte cumulative video byte count
+(type 1); Shizuku injects the controls. Acknowledgements run every 100 ms and
+limit unacknowledged video to 12 KiB so radio queues cannot grow ahead of input.
+The Android reader also recognizes the older empty heartbeat.
+Heartbeat replies use a separate worker so video backpressure cannot block the
+input reader. Malformed lengths/types/events close the connection.
 
 The loopback listener accepts one client and is not authenticated local IPC; a
 local process can race to connect. Radio access relies on secure system Bluetooth
 bonding and the saved peer address, independent of the older BLE notification
 bridge. The relay rejects encoded packets over 128 KiB and closes Bluetooth writes
-blocked for one second. The Mac bounds pending video to 128 KiB with a one-second
-pending deadline. No arbitrary reference frames are discarded.
+blocked for five seconds when peer heartbeats have also expired. Live peer input
+keeps ordinary radio backpressure from being mistaken for a dead connection.
+The Mac bounds pending video to 128 KiB with a one-second
+pending deadline. The encoder discards stale frames only with keyframe recovery, reducing bitrate when the stream falls behind. The capture pipe is capped at 4 KiB on Android 11 and newer.
 
 ## Panel-off and recovery
 
@@ -197,9 +207,13 @@ commands, or persistent system settings. It tests NORMAL before OFF and records
 recovery intent before partial multi-display OFF operations.
 
 App death, session stop, Bluetooth/encoder failure, manual recovery, and normal
-guard shutdown restore the panel. A shell watchdog checks every 100 ms. Startup
+guard shutdown lock the phone before restoring the panel. Lock failures are
+logged; panel restoration still runs so recovery cannot leave it inaccessible.
+A shell watchdog checks every 100 ms. Startup
 has a ten-second grace period; after video starts, the app renews a two-second
-session/display lease every 250 ms while frames keep transmitting. Failed NORMAL
+session/display lease every 250 ms after the first media frame while Mac control
+heartbeats remain current. Bluetooth congestion has a five-second peer grace
+period; loss of Shizuku authorization ends the lease immediately. Failed NORMAL
 operations are retried; new OFF requests are refused while recovery is pending.
 Retired/folded display tokens are refreshed after restoration failures.
 

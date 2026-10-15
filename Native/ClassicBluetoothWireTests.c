@@ -2,12 +2,16 @@
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
-typedef struct { uint8_t video[32768], events[16]; size_t video_size, event_count; } Output;
+typedef struct { uint8_t video[32768], controls[32768], events[16]; size_t video_size, control_size, event_count; } Output;
 static bool video(void *context, const uint8_t *bytes, size_t length) {
     Output *out = context; assert(out->video_size + length <= sizeof(out->video));
     memcpy(out->video + out->video_size, bytes, length); out->video_size += length; return true;
 }
 static void event(void *context, uint8_t value) { Output *out = context; out->events[out->event_count++] = value; }
+static bool control_video(void *context, const uint8_t *bytes, size_t length) {
+    Output *out = context; assert(out->control_size + length <= sizeof(out->controls));
+    memcpy(out->controls + out->control_size, bytes, length); out->control_size += length; return true;
+}
 int main(int argc, char **argv) {
     const uint8_t stream[] = {'D','M','B','T','0','0','0','3', 0,0,0,0,3, 0,42,43,
                             1,0,0,0,1,4, 0,0,0,0,2,44,45, 1,0,0,0,1,1};
@@ -21,6 +25,19 @@ int main(int argc, char **argv) {
         assert(out.video_size == sizeof(expected) && !memcmp(out.video, expected, sizeof(expected)));
         assert(out.event_count == 2 && out.events[0] == 4 && out.events[1] == 1);
         assert(dm_classic_wire_complete(&wire));
+    }
+    const uint8_t duplex[] = {'D','M','B','T','0','0','0','4', 2,0,0,0,3, 91,92,93, 1,0,0,0,1,6, 0,0,0,0,1,42};
+    for (size_t chunk = 1; chunk <= sizeof(duplex); chunk++) {
+        DMClassicWire state; dm_classic_wire_init(&state); Output out = {0};
+        // Separate sinks must never forward control replies to the video decoder.
+        for (size_t offset = 0; offset < sizeof(duplex); offset += chunk) {
+            size_t n = sizeof(duplex) - offset; if (n > chunk) n = chunk;
+            assert(dm_classic_wire_feed_control(&state, duplex + offset, n, video, event, control_video, &out));
+        }
+        assert(out.video_size == 1 && out.video[0] == 42);
+        assert(out.control_size == 3 && !memcmp(out.controls, "\x5b\x5c\x5d", 3));
+        assert(out.event_count == 1 && out.events[0] == 6);
+        assert(dm_classic_wire_complete(&state));
     }
     const uint8_t legacy[] = {0,1,2,3,4,5,6,7,8,9};
     DMClassicWire wire; Output out = {0}; dm_classic_wire_init(&wire);

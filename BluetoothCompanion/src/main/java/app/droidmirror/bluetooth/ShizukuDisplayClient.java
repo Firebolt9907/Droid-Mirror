@@ -39,8 +39,10 @@ final class ShizukuDisplayClient implements AutoCloseable {
     private volatile IDisplayGuard guard;
     private volatile boolean closed;
     private volatile long lastVideo;
+    private volatile long lastPeerHeartbeat;
     private boolean attempted;
     private boolean armed;
+    private boolean peerDelayReported;
     private final long started = SystemClock.elapsedRealtime();
 
     static boolean authorized() {
@@ -49,7 +51,7 @@ final class ShizukuDisplayClient implements AutoCloseable {
     }
     private static Shizuku.UserServiceArgs arguments(Context context) {
         return new Shizuku.UserServiceArgs(new ComponentName(context.getPackageName(), DisplayGuardService.class.getName()))
-            .daemon(true).processNameSuffix("display_guard").debuggable(false).version(3);
+            .daemon(true).processNameSuffix("display_guard").debuggable(false).version(17);
     }
     private final ServiceConnection connection = new ServiceConnection() {
         @Override public void onServiceConnected(ComponentName name, IBinder binder) {
@@ -76,9 +78,9 @@ final class ShizukuDisplayClient implements AutoCloseable {
             ready.completeExceptionally(new IllegalStateException("Shizuku unavailable")); status.accept("Shizuku guard could not start; phone display stays on."); return; }
         heartbeats.scheduleWithFixedDelay(this::update, 250, 250, TimeUnit.MILLISECONDS);
     }
-    void startVideo(ParcelFileDescriptor output) throws Exception {
+    void startVideo(ParcelFileDescriptor output, ParcelFileDescriptor controls) throws Exception {
         IDisplayGuard remote = ready.get(10, TimeUnit.SECONDS);
-        if (closed || !remote.startCapture(owner, observer, output)) throw new IllegalStateException(remote.getLastError());
+        if (closed || !remote.startCapture(owner, observer, output, controls)) throw new IllegalStateException(remote.getLastError());
     }
     void localUse() {
         if (closed) return;
@@ -87,7 +89,11 @@ final class ShizukuDisplayClient implements AutoCloseable {
             catch (RemoteException | RuntimeException ignored) {}
         }); } catch (java.util.concurrent.RejectedExecutionException ignored) {}
     }
-    void frameSent() { lastVideo = SystemClock.elapsedRealtime(); }
+    void frameSent() {
+        if (lastVideo == 0) android.util.Log.i("DroidMirrorLease", "First video frame transmitted");
+        lastVideo = SystemClock.elapsedRealtime();
+    }
+    void peerAlive() { lastPeerHeartbeat = SystemClock.elapsedRealtime(); }
     private void update() {
         if (closed) return;
         IDisplayGuard remote = guard;
@@ -100,10 +106,24 @@ final class ShizukuDisplayClient implements AutoCloseable {
             }
             long progress = lastVideo;
             if (progress == 0) return; // Never OFF before an actual media frame was sent.
-            if (SystemClock.elapsedRealtime() - progress > 1500 || !authorized()) {
-                status.accept("Video or Shizuku access stalled; restoring phone display."); close(); return;
+            if (lastPeerHeartbeat == 0) return;
+            long peerAge = SystemClock.elapsedRealtime() - lastPeerHeartbeat;
+            boolean access = authorized();
+            if (peerAge <= 2000) peerDelayReported = false;
+            if (peerAge > 2000 && !peerDelayReported) {
+                peerDelayReported = true;
+                android.util.Log.w("DroidMirrorLease", "Peer heartbeat age=" + peerAge + "ms; Shizuku authorized=" + access);
+                for (java.util.Map.Entry<Thread, StackTraceElement[]> entry : Thread.getAllStackTraces().entrySet()) {
+                    if (!entry.getKey().getName().startsWith("Bluetooth")) continue;
+                    android.util.Log.w("DroidMirrorLease", entry.getKey().getName() + " " + entry.getKey().getState()
+                        + " " + java.util.Arrays.toString(entry.getValue()));
+                }
+            }
+            if (peerAge > 5000 || !access) {
+                status.accept("Mac connection or Shizuku access stalled; restoring phone display."); close(); return;
             }
             if (!attempted) {
+                android.util.Log.i("DroidMirrorLease", "Acquiring session lease");
                 attempted = true;
                 armed = remote.acquire(owner, observer, panelOff);
                 registered = armed;
@@ -118,6 +138,7 @@ final class ShizukuDisplayClient implements AutoCloseable {
                 status.accept("Screen-off lease ended; phone display restored or recovery is retrying."); close();
             }
         } catch (RemoteException | RuntimeException error) {
+            android.util.Log.e("DroidMirrorLease", "Session heartbeat failed", error);
             status.accept("Display guard unavailable; the shell watchdog must restore the panel."); close();
         }
     }

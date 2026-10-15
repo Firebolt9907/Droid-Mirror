@@ -41,9 +41,15 @@ enum ScrollMode: String, CaseIterable, Identifiable, Codable {
 }
 
 enum MirrorTransport: String, CaseIterable, Identifiable, Codable {
-    case bluetoothClassic, adb
+    case bluetoothClassic, adb, wifiAware
     var id: String { rawValue }
-    var label: String { self == .bluetoothClassic ? "Bluetooth Classic (video only)" : "USB / wireless ADB" }
+    var label: String {
+        switch self {
+        case .bluetoothClassic: "Bluetooth Classic"
+        case .adb: "USB / wireless ADB"
+        case .wifiAware: "Wi-Fi Aware (experimental)"
+        }
+    }
 }
 
 struct MirrorPreferences: Codable {

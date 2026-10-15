@@ -77,7 +77,34 @@ final class MirrorModel: ObservableObject {
         UserDefaults.standard.set(data, forKey: Self.preferencesKey)
     }
 
+    @Published private(set) var wifiAwareStatus = "Check this Mac for Wi-Fi Aware support."
+    private var wifiAwareChecked = false
+
+    func checkWiFiAware() {
+        guard !isRefreshing, !isMirroring, !isStarting else { return }
+        isRefreshing = true
+        wifiAwareChecked = true
+        wifiAwareStatus = "Checking Wi-Fi Aware…"
+        Task {
+            defer { isRefreshing = false }
+            do {
+                let readiness = try await WiFiAwareTransport.probe()
+                wifiAwareStatus = readiness.message
+            } catch {
+                wifiAwareStatus = error.localizedDescription
+            }
+            if preferences.transport == .wifiAware { status = wifiAwareStatus }
+        }
+    }
+
     func refreshDevices(silently: Bool = false) {
+        if preferences.transport == .wifiAware {
+            devices = []
+            selectedID = nil
+            status = wifiAwareStatus
+            if !silently || !wifiAwareChecked { checkWiFiAware() }
+            return
+        }
         if preferences.transport == .bluetoothClassic {
             refreshBluetoothDevices(silently: silently)
             return
@@ -152,6 +179,10 @@ final class MirrorModel: ObservableObject {
 
     func start() {
         guard mirrorProcess == nil, !isStarting else { return }
+        if preferences.transport == .wifiAware {
+            errorMessage = "Wi-Fi Aware direct mirroring is not available yet. Check support in connection settings."
+            return
+        }
         if preferences.transport == .bluetoothClassic {
             isStarting = true
             Task {
@@ -193,16 +224,16 @@ final class MirrorModel: ObservableObject {
             }
         }
         do {
-            let port = try await classicBluetooth.connect(address: device.id)
+            let ports = try await classicBluetooth.connect(address: device.id)
             guard preferences.transport == .bluetoothClassic, !isTerminatingApplication else {
                 classicBluetooth.stop()
                 return
             }
             let process = Process()
             process.executableURL = URL(fileURLWithPath: scrcpyPath)
-            process.arguments = ["--external-video-port=\(port)", "--window-title=DroidMirror — \(device.displayName)",
+            process.arguments = ["--external-video-port=\(ports.video)", "--external-control-port=\(ports.control)", "--window-title=DroidMirror — \(device.displayName)",
                                  "--window-borderless", "--window-width=430", "--video-buffer=0",
-                                 "--no-audio", "--no-control", "--pause-on-exit=false"]
+                                 "--no-audio", "--pause-on-exit=false"]
             if preferences.alwaysOnTop { process.arguments?.append("--always-on-top") }
             // No serial, ADB environment, injected ADB toolbar, or shell cleanup.
             var environment = ProcessInfo.processInfo.environment
@@ -230,7 +261,7 @@ final class MirrorModel: ObservableObject {
             mirrorProcess = process
             sessionIsBluetooth = true
             isMirroring = true
-            status = "Bluetooth · 480p · up to 30 fps · 1 Mbps"
+            status = "Bluetooth · 480p · up to 8 fps · 64 kbps target"
         } catch is CancellationError {
             status = "Bluetooth connection cancelled"
         } catch {

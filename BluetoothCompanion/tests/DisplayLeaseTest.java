@@ -57,6 +57,13 @@ public final class DisplayLeaseTest {
         require(!lease.heartbeat(owner) && power.on); // Late heartbeat does not extend an expired lease.
         require(lease.acquire(stranger)); require(lease.recover() && power.on);
         require(!lease.heartbeat(stranger)); // Manual recovery also invalidates the session.
+        DisplayLease slow = new DisplayLease(value -> {
+            if (!value) clock.addAndGet(3000); // A slow display preparation exceeds the lease duration.
+        }, clock::get);
+        require(slow.acquire(owner));
+        require(slow.heartbeat(owner)); // Preparation time must not consume the active lease.
+        clock.addAndGet(DisplayLease.TIMEOUT_MS);
+        require(!slow.heartbeat(owner)); // The ordinary recovery deadline still applies afterward.
         System.out.println("DisplayLease: death/stop, timeout, stale tokens, late heartbeat, OFF rollback, ON retries and preflight passed");
     }
 }

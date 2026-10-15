@@ -439,6 +439,7 @@ scrcpy(struct scrcpy_options *options) {
         .tunnel_host = options->tunnel_host,
         .tunnel_port = options->tunnel_port,
         .external_video_port = options->external_video_port,
+        .external_control_port = options->external_control_port,
         .min_size_alignment = options->min_size_alignment,
         .max_size = options->max_size,
         .video_bit_rate = options->video_bit_rate,
@@ -582,7 +583,7 @@ scrcpy(struct scrcpy_options *options) {
 
     struct sc_file_pusher *fp = NULL;
 
-    if (options->window && options->control) {
+    if (options->window && options->control && !options->external_video_port) {
         if (!sc_file_pusher_init(&s->file_pusher, &s->controller, serial,
                                  options->push_target)) {
             goto end;

@@ -113,6 +113,7 @@ enum {
     OPT_NO_TERMINAL_TITLE,
     OPT_HWDEC,
     OPT_EXTERNAL_VIDEO_PORT,
+    OPT_EXTERNAL_CONTROL_PORT,
 };
 
 struct sc_option {
@@ -149,13 +150,15 @@ struct sc_getopt_adapter {
 };
 
 static const struct sc_option options[] = {
+    { .longopt_id = OPT_EXTERNAL_CONTROL_PORT, .longopt = "external-control-port",
+      .argdesc = "port", .text = "Use a loopback scrcpy control bridge with external video, without ADB." },
     {
         .longopt_id = OPT_EXTERNAL_VIDEO_PORT,
         .longopt = "external-video-port",
         .argdesc = "port",
         .text = "Read a scrcpy 5 video stream from a loopback transport bridge "
-                "without starting ADB. Video only; capture settings are owned "
-                "by the companion app. No audio, input, or file transfer.",
+                "without starting ADB. Capture settings are owned by the "
+                "companion app. Use --external-control-port for input.",
     },
     {
         .longopt_id = OPT_ALWAYS_ON_TOP,
@@ -2802,12 +2805,14 @@ parse_args_with_getopt(struct scrcpy_cli_args *args, int argc, char *argv[],
             case OPT_NO_CLIPBOARD_AUTOSYNC:
                 opts->clipboard_autosync = false;
                 break;
-            case OPT_EXTERNAL_VIDEO_PORT: {
+            case OPT_EXTERNAL_VIDEO_PORT:
+            case OPT_EXTERNAL_CONTROL_PORT: {
                 long port;
                 if (!parse_integer_arg(optarg, &port, false, 1, 65535, "port")) {
                     return false;
                 }
-                opts->external_video_port = (uint16_t) port;
+                if (c == OPT_EXTERNAL_CONTROL_PORT) opts->external_control_port = (uint16_t) port;
+                else opts->external_video_port = (uint16_t) port;
                 break;
             }
             case OPT_TCPIP:
@@ -3055,6 +3060,9 @@ parse_args_with_getopt(struct scrcpy_cli_args *args, int argc, char *argv[],
         return false;
     }
 
+    if (opts->external_control_port && !opts->external_video_port) {
+        LOGE("External control requires external video"); return false;
+    }
     if (opts->external_video_port) {
         if (selectors || opts->list || opts->start_app || opts->kill_adb_on_close
                 || opts->tcpip || opts->tunnel_host || opts->tunnel_port) {
@@ -3068,7 +3076,7 @@ parse_args_with_getopt(struct scrcpy_cli_args *args, int argc, char *argv[],
         }
 #endif
         opts->audio = false;
-        opts->control = false;
+        opts->control = opts->control && opts->external_control_port != 0;
         opts->turn_screen_off = false;
         opts->stay_awake = false;
         opts->power_off_on_close = false;
