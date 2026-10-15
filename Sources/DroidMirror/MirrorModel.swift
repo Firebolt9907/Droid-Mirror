@@ -7,7 +7,15 @@ final class MirrorModel: ObservableObject {
     static let shared = MirrorModel()
 
     @Published var devices: [AndroidDevice] = []
-    @Published var selectedID: String?
+    @Published var selectedID: String? {
+        didSet {
+            if !restoringBluetoothSelection, preferences.transport == .bluetoothClassic,
+               let device = selectedDevice, device.isBluetooth,
+               preferences.bluetoothDeviceID != device.id {
+                preferences.bluetoothDeviceID = device.id
+            }
+        }
+    }
     @Published var isRefreshing = false
     @Published var isMirroring = false
     @Published var isDeviceLocked = false
@@ -18,8 +26,8 @@ final class MirrorModel: ObservableObject {
         didSet {
             savePreferences()
             if preferences.transport != oldValue.transport, !isMirroring, !isStarting {
-                selectedID = nil
                 devices = []
+                selectedID = preferences.transport == .bluetoothClassic ? preferences.bluetoothDeviceID : nil
                 autoStartAttemptedFor = nil
                 refreshDevices()
             }
@@ -40,6 +48,7 @@ final class MirrorModel: ObservableObject {
     private var toolbarPositionTimer: Timer?
     private var isCheckingLock = false
     private var autoStartAttemptedFor: String?
+    private var restoringBluetoothSelection = false
     private var originalAutoRotate: String?
     private var originalUserRotation: String?
     private var originalAODSettings: [String: String] = [:]
@@ -57,6 +66,7 @@ final class MirrorModel: ObservableObject {
 
     init() {
         preferences = Self.loadPreferences()
+        selectedID = preferences.transport == .bluetoothClassic ? preferences.bluetoothDeviceID : nil
         refreshTimer = .scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 guard self?.isMirroring == false else { return }
@@ -166,10 +176,22 @@ final class MirrorModel: ObservableObject {
                 let paired = try await ClassicBluetoothTransport.pairedDevices()
                 guard preferences.transport == .bluetoothClassic else { return }
                 devices = paired
+                restoringBluetoothSelection = true
                 if selectedID == nil || !paired.contains(where: { $0.id == selectedID }) {
-                    selectedID = paired.first?.id
+                    if let remembered = preferences.bluetoothDeviceID {
+                        selectedID = paired.first(where: { $0.id == remembered })?.id
+                    } else {
+                        selectedID = paired.first?.id
+                    }
                 }
+                restoringBluetoothSelection = false
                 status = paired.isEmpty ? "Pair your phone in Bluetooth settings" : "Ready to mirror via Bluetooth"
+                if preferences.autoStart, let device = selectedDevice,
+                   device.id == preferences.bluetoothDeviceID,
+                   autoStartAttemptedFor != device.id {
+                    autoStartAttemptedFor = device.id
+                    start()
+                }
             } catch {
                 status = error.localizedDescription
                 if !silently { errorMessage = error.localizedDescription }
@@ -204,6 +226,8 @@ final class MirrorModel: ObservableObject {
             errorMessage = "Select a paired Bluetooth phone and install the bundled scrcpy client."
             return
         }
+        preferences.bluetoothDeviceID = device.id
+        autoStartAttemptedFor = device.id
         status = "Connecting over Bluetooth Classic…"
         phoneTakenOver = false
         sessionEndedOnPhone = false

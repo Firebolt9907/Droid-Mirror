@@ -1,0 +1,15 @@
+{
+  "authorizationStatus": "missingEntitlement",
+  "capabilitiesAvailable": false,
+  "discoveryError": 1,
+  "discoveryStatus": "rejected",
+  "frameworkPresent": true,
+  "maxDatapaths": 0,
+  "maxPublishers": 0,
+  "maxSubscribers": 0,
+  "message": "Native Wi-Fi Aware discovery was rejected (error 1). The native helper lacks the required Subscribe entitlement; authorized signing/provisioning is required.",
+  "privateFrameworkPresent": true,
+  "processPlatform": "macOS",
+  "streamImplemented": false,
+  "supportsDataTransfer": false
+}

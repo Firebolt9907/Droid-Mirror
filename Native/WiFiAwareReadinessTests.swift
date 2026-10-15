@@ -7,6 +7,13 @@ struct WiFiAwareReadinessTests {
         let report = try JSONDecoder().decode(WiFiAwareTransport.Readiness.self, from: data)
         precondition(!report.streamImplemented, "A capability probe must never enable streaming")
         precondition(!report.message.isEmpty)
+        if report.discoveryStatus == "rejected" {
+            precondition(report.discoveryError != nil)
+            precondition(report.message.contains("rejected"))
+        }
+        if report.authorizationStatus == "missingEntitlement" {
+            precondition(report.message.contains("entitlement"))
+        }
         if !report.capabilitiesAvailable {
             precondition(!report.supportsDataTransfer && report.maxDatapaths == 0)
         }

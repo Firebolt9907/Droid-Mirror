@@ -2,15 +2,24 @@
 
 A native SwiftUI control center for scrcpy that makes Android mirroring on macOS feel closer to Apple's iPhone Mirroring.
 
-Bluetooth Classic RFCOMM is the default source transport: after one-time Android
+Direct Bluetooth Classic L2CAP is the default source transport: after one-time Android
 setup (Shizuku authorization, a selected paired Mac and **Enable Mac connections**),
 press **Mirror on the Mac** to start privileged scrcpy capture. There is no
 per-session Android screen-share prompt and no ADB/LAN transport. The profile
-is approximately 480p, up to 8 fps and a 64 kbps H.264 target.
+is approximately 480p, up to 8 fps and a 64 kbps H.264 target. The Mac opens
+fixed PSM `0x1001`; a Shizuku shell service owns Android’s authenticated Classic
+L2CAP listener. This uses a hidden Android API and requires the matching Mac
+and Android builds; it does not silently fall back to RFCOMM. Video and control
+replies travel phone-to-Mac over Classic L2CAP. Mac input, video acknowledgements
+and heartbeats travel over a separate BLE GATT connection, authenticated and
+encrypted using a fresh key shared over the bonded Classic connection.
 
-The compiled test APK is `outputs/DroidMirror-Bluetooth-0.5-debug.apk`.
-Rebuild the Mac app for the matching event transport; checked-in Mac binaries are
-unchanged. A phone power/screen-lock action ends the session, locks/restores the
+Bluetooth remembers the phone selected in DroidMirror. With auto-start enabled,
+launching the app starts that phone once; closing the mirror does not continually
+reopen it. An unavailable saved pairing does not select another device.
+
+The compiled test APK is `outputs/DroidMirror-Bluetooth-0.6-debug.apk`.
+Install the matching Mac and Android builds together. A phone power/screen-lock action ends the session, locks/restores the
 phone through Shizuku, and shows a separate **phone was used** popup on Mac.
 End-of-session audit notifications are posted on phone and Mac. Shell watchdog
 recovery covers app death and stale stream leases; physical-device behavior still
@@ -19,9 +28,10 @@ See [setup, behavior and validation limits](Native/CLASSIC-BLUETOOTH.md).
 
 ## Experimental Wi-Fi Aware
 
-Connection settings include a Wi-Fi Aware readiness check backed by the private
-macOS API. Direct mirroring is not implemented: this Mac rejects discovery for
-missing entitlements, and adding them to an ad hoc signature does not work.
+Connection settings check access by attempting discovery through the native
+private macOS API. The Catalyst experiment has been removed. Direct mirroring
+remains blocked by authorization: this Mac rejects discovery, and a development
+certificate with the Subscribe entitlement alone does not make the helper runnable.
 See [the investigation and remaining integration work](Native/WIFI-AWARE.md).
 
 ## ADB mode highlights

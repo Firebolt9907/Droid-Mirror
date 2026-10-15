@@ -11,14 +11,17 @@ enum WiFiAwareTransport {
         let maxDatapaths: Int
         let streamImplemented: Bool
         let message: String
+        let authorizationStatus: String?
+        let discoveryStatus: String?
+        let discoveryError: Int?
     }
 
     static func probe() async throws -> Readiness {
         let helper = Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/DroidMirrorWiFiAware")
         guard FileManager.default.isExecutableFile(atPath: helper.path) else {
-            throw RunnerError.failed("Wi-Fi Aware helper missing. Rebuild DroidMirror with build-app.sh.")
+            throw RunnerError.failed("Native Wi-Fi Aware helper missing. Rebuild DroidMirror with build-app.sh.")
         }
-        let output = try await ProcessRunner.output(helper.path, ["--probe"], timeout: 8)
+        let output = try await ProcessRunner.output(helper.path, ["--check"], timeout: 8)
         return try JSONDecoder().decode(Readiness.self, from: Data(output.utf8))
     }
 }

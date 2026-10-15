@@ -8,7 +8,7 @@ typedef struct {
     size_t magic_used, header_used;
     uint32_t remaining;
     uint8_t type;
-    bool decided, legacy, control;
+    bool decided, legacy, control, ble;
 } DMClassicWire;
 typedef bool (*DMWireVideo)(void *, const uint8_t *, size_t);
 typedef void (*DMWireEvent)(void *, uint8_t);
@@ -17,5 +17,7 @@ bool dm_classic_wire_feed(DMClassicWire *wire, const uint8_t *bytes, size_t leng
                           DMWireVideo video, DMWireEvent event, void *context);
 bool dm_classic_wire_feed_control(DMClassicWire *wire, const uint8_t *bytes, size_t length,
     DMWireVideo video, DMWireEvent event, DMWireVideo control, void *context);
+bool dm_classic_wire_feed_ble(DMClassicWire *wire, const uint8_t *bytes, size_t length,
+    DMWireVideo video, DMWireEvent event, DMWireVideo control, DMWireVideo setup, void *context);
 bool dm_classic_wire_complete(const DMClassicWire *wire);
 #endif

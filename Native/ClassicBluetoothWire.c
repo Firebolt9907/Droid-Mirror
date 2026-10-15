@@ -1,8 +1,8 @@
 #include "ClassicBluetoothWire.h"
 #include <string.h>
 void dm_classic_wire_init(DMClassicWire *wire) { memset(wire, 0, sizeof(*wire)); }
-bool dm_classic_wire_feed_control(DMClassicWire *wire, const uint8_t *bytes, size_t length,
-                          DMWireVideo video, DMWireEvent event, DMWireVideo control, void *context) {
+bool dm_classic_wire_feed_ble(DMClassicWire *wire, const uint8_t *bytes, size_t length,
+                          DMWireVideo video, DMWireEvent event, DMWireVideo control, DMWireVideo setup, void *context) {
     while (length) {
         if (!wire->decided) {
             size_t take = 8 - wire->magic_used;
@@ -11,7 +11,8 @@ bool dm_classic_wire_feed_control(DMClassicWire *wire, const uint8_t *bytes, siz
             wire->magic_used += take; bytes += take; length -= take;
             if (wire->magic_used < 8) continue;
             wire->decided = true;
-            wire->control = !memcmp(wire->magic, "DMBT0004", 8);
+            wire->ble = !memcmp(wire->magic, "DMBT0005", 8);
+            wire->control = wire->ble || !memcmp(wire->magic, "DMBT0004", 8);
             if (!wire->control && memcmp(wire->magic, "DMBT0003", 8)) {
                 if (wire->magic[0] != 0) return false;
                 wire->legacy = true;
@@ -31,13 +32,15 @@ bool dm_classic_wire_feed_control(DMClassicWire *wire, const uint8_t *bytes, siz
             if ((wire->type == 0 && (!wire->remaining || wire->remaining > 16384))
                     || (wire->type == 1 && wire->remaining != 1)
                     || (wire->type == 2 && (!wire->control || !control || !wire->remaining || wire->remaining > 16384))
-                    || wire->type > 2) return false;
+                    || (wire->type == 3 && (!wire->ble || !setup || wire->remaining != 32))
+                    || wire->type > 3) return false;
         }
         size_t take = wire->remaining;
         if (take > length) take = length;
         if (!take) continue;
         if (wire->type == 0) { if (!video(context, bytes, take)) return false; }
         else if (wire->type == 2) { if (!control(context, bytes, take)) return false; }
+        else if (wire->type == 3) { if (!setup(context, bytes, take)) return false; }
         else {
             if (bytes[0] < 1 || bytes[0] > (wire->control ? 6 : 5)) return false;
             event(context, bytes[0]);
@@ -45,6 +48,10 @@ bool dm_classic_wire_feed_control(DMClassicWire *wire, const uint8_t *bytes, siz
         wire->remaining -= (uint32_t)take; bytes += take; length -= take;
     }
     return true;
+}
+bool dm_classic_wire_feed_control(DMClassicWire *wire, const uint8_t *bytes, size_t length,
+        DMWireVideo video, DMWireEvent event, DMWireVideo control, void *context) {
+    return dm_classic_wire_feed_ble(wire, bytes, length, video, event, control, NULL, context);
 }
 bool dm_classic_wire_complete(const DMClassicWire *wire) {
     return wire->decided && (wire->legacy || (!wire->remaining && !wire->header_used));

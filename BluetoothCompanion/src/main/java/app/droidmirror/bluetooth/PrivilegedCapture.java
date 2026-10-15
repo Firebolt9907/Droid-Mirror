@@ -17,7 +17,7 @@ final class PrivilegedCapture implements AutoCloseable {
     private final ParcelFileDescriptor controls;
     private boolean closed;
     private static boolean initialized;
-    private static synchronized void initialize() throws Exception {
+    static synchronized void initialize() throws Exception {
         if (!initialized) {
             // scrcpy constructs ActivityThread, whose Handler needs a prepared Looper.
             // Capture requests arrive on Shizuku Binder threads without one.

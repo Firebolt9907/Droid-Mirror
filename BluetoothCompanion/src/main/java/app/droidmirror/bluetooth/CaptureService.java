@@ -14,10 +14,10 @@ import java.util.concurrent.atomic.*;
 
 /** Persistent, paired-Mac listener. Capture begins when the Mac connects, never from a phone share prompt. */
 public final class CaptureService extends Service {
-    private static final UUID SERVICE = UUID.fromString("c356a44e-6f2b-4da9-85e5-397991b8a603");
     private volatile boolean shutdown;
-    private volatile BluetoothServerSocket listener;
-    private volatile BluetoothSocket socket;
+    private volatile ClassicL2capClient listener;
+    private volatile String listenerPeer;
+    private volatile ParcelFileDescriptor socket;
     private static final class SessionState {
         final String token = UUID.randomUUID().toString();
         String peerName;
@@ -26,6 +26,7 @@ public final class CaptureService extends Service {
         volatile ParcelFileDescriptor inputPipe;
         volatile ParcelFileDescriptor controlPipe;
         volatile BluetoothWire wire;
+        volatile BleInputServer ble;
         volatile ShizukuDisplayClient guard;
         volatile boolean stopped;
         volatile boolean hasGuard;
@@ -61,7 +62,8 @@ public final class CaptureService extends Service {
     static ReadyResult enableIfConfigured(Context context) {
         android.content.SharedPreferences settings = context.getSharedPreferences("ready", MODE_PRIVATE);
         if (!settings.getBoolean("enabled", false) || settings.getString("peer", "").isEmpty()) return ReadyResult.NOT_CONFIGURED;
-        if (Build.VERSION.SDK_INT >= 31 && context.checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) return ReadyResult.PERMISSION_REQUIRED;
+        if (Build.VERSION.SDK_INT >= 31 && (context.checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED
+                || context.checkSelfPermission(Manifest.permission.BLUETOOTH_ADVERTISE) != PackageManager.PERMISSION_GRANTED)) return ReadyResult.PERMISSION_REQUIRED;
         try {
             context.startForegroundService(new Intent(context, CaptureService.class));
             return ReadyResult.START_REQUESTED;
@@ -109,7 +111,10 @@ public final class CaptureService extends Service {
             if (Build.VERSION.SDK_INT >= 29) startForeground(1, notification("Ready for your paired Mac"), ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE);
             else startForeground(1, notification("Ready for your paired Mac"));
         }
-        if (server != null) return START_STICKY;
+        if (server != null) {
+            if (listener != null && !getSharedPreferences("ready", MODE_PRIVATE).getString("peer", "").equals(listenerPeer)) listener.close();
+            return START_STICKY;
+        }
         watchdog = Executors.newSingleThreadScheduledExecutor();
         watchdog.scheduleWithFixedDelay(() -> {
             SessionState state = current;
@@ -152,22 +157,20 @@ public final class CaptureService extends Service {
                 if (Build.VERSION.SDK_INT >= 31 && checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) throw new SecurityException();
                 BluetoothAdapter adapter = getSystemService(BluetoothManager.class).getAdapter();
                 if (adapter == null || !adapter.isEnabled()) { status("Enable Bluetooth to connect your Mac"); Thread.sleep(2000); continue; }
+                if (!ShizukuDisplayClient.authorized()) { status("Authorize Shizuku to enable Classic L2CAP"); Thread.sleep(2000); continue; }
                 if (listener == null) {
-                    listener = adapter.listenUsingRfcommWithServiceRecord("DroidMirror video", SERVICE);
-                    android.util.Log.i("DroidMirrorBluetooth", "RFCOMM listener ready: " + listener);
+                    listener = new ClassicL2capClient(this);
+                    listenerPeer=getSharedPreferences("ready", MODE_PRIVATE).getString("peer", "");
+                    listener.listen(listenerPeer);
+                    status("Ready for your paired Mac · Classic L2CAP");
                 }
-                BluetoothSocket candidate = listener.accept();
-                String peer = getSharedPreferences("ready", MODE_PRIVATE).getString("peer", "");
-                android.util.Log.i("DroidMirrorBluetooth", "RFCOMM connection from " + candidate.getRemoteDevice().getAddress());
-                if (!peer.equals(candidate.getRemoteDevice().getAddress()) || candidate.getRemoteDevice().getBondState() != BluetoothDevice.BOND_BONDED) {
-                    candidate.close(); continue;
-                }
-                // Keep the advertised channel stable across sessions. Closing and
-                // recreating it leaves macOS with a cached, obsolete SDP channel.
-                socket = candidate;
+                // Shell enforces authentication, bonding and the selected Mac before
+                // passing this duplex descriptor. The fixed PSM remains stable.
+                socket = listener.accept();
+                if (!getSharedPreferences("ready", MODE_PRIVATE).getString("peer", "").equals(listenerPeer)) throw new IOException("Selected Mac changed");
                 serve();
-            } catch (IOException | InterruptedException | RuntimeException error) {
-                try { if (listener != null) listener.close(); } catch (IOException ignored) {}
+            } catch (Exception error) {
+                if (listener != null) listener.close();
                 listener = null;
                 if (!shutdown) {
                     android.util.Log.w("DroidMirrorBluetooth", "Bluetooth listener failed", error);
@@ -185,9 +188,10 @@ public final class CaptureService extends Service {
         try {
             if (Build.VERSION.SDK_INT >= 31 && checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED)
                 throw new SecurityException("Nearby Devices permission was revoked");
-            String name = socket.getRemoteDevice().getName();
+            String peer = getSharedPreferences("ready", MODE_PRIVATE).getString("peer", "");
+            String name = getSystemService(BluetoothManager.class).getAdapter().getRemoteDevice(peer).getName();
             state.peerName = name == null || name.trim().isEmpty() ? getString(R.string.stream_peer_fallback) : name;
-            wire = new BluetoothWire(socket.getOutputStream(), SystemClock::elapsedRealtime); state.wire = wire;
+            wire = new BluetoothWire(new FileOutputStream(socket.getFileDescriptor()), SystemClock::elapsedRealtime); state.wire = wire;
             wire.setVideoWindow(state.videoWindow);
             if (!ShizukuDisplayClient.authorized()) { wire.event(BluetoothWire.CAPTURE_FAILED); status("Authorize Shizuku on the phone once to enable Mac-initiated capture"); return; }
             state.hasGuard = true;
@@ -202,9 +206,16 @@ public final class CaptureService extends Service {
             ParcelFileDescriptor[] pipe = ParcelFileDescriptor.createPipe(); state.inputPipe = pipe[0];
             ParcelFileDescriptor[] controls = ParcelFileDescriptor.createSocketPair(); state.controlPipe = controls[0];
             try (ParcelFileDescriptor output = pipe[1]; ParcelFileDescriptor remoteControls = controls[1]) {
+                byte[] key=new byte[32]; new java.security.SecureRandom().nextBytes(key);
+                state.ble=new BleInputServer(this,key,() -> {
+                    synchronized(CaptureService.this) { if(current==state) stopSession(); }
+                });
+                state.ble.start(); wire.bleSetup(key); java.util.Arrays.fill(key,(byte)0);
+                startControls(state,state.ble.input(),wire);
+                status("Waiting for authenticated BLE input");
+                if (!state.ble.awaitInput()) throw new IOException("BLE input connection timed out");
                 state.guard.startVideo(output, remoteControls);
             }
-            startControls(state, socket, wire);
             ByteArrayOutputStream header = new ByteArrayOutputStream();
             VideoWire.deviceHeader(new DataOutputStream(header), Build.MODEL);
             sendVideo(wire, header.toByteArray());
@@ -241,15 +252,15 @@ public final class CaptureService extends Service {
                 try { wire.event(BluetoothWire.CAPTURE_FAILED); Thread.sleep(100); }
                 catch (IOException | InterruptedException ignored) {}
             }
-            status("Capture unavailable. Keep Shizuku running and authorize it in setup.");
+            status("Bluetooth session unavailable: " + error.getMessage());
         } finally {
             stopSession(); status("Ready for your paired Mac");
         }
     }
-    private void startControls(SessionState state, BluetoothSocket peer, BluetoothWire wire) {
+    private void startControls(SessionState state, InputStream peer, BluetoothWire wire) {
         ParcelFileDescriptor descriptor = state.controlPipe;
         new Thread(() -> {
-            try (DataInputStream input = new DataInputStream(peer.getInputStream()); OutputStream output = new FileOutputStream(descriptor.getFileDescriptor())) {
+            try (DataInputStream input = new DataInputStream(peer); OutputStream output = new FileOutputStream(descriptor.getFileDescriptor())) {
                 byte[] bytes = new byte[4096];
                 while (!state.stopped) {
                     int type = input.readUnsignedByte(); int count = input.readInt();
@@ -302,6 +313,7 @@ public final class CaptureService extends Service {
             boolean wasStreaming = state.streamStarted.get() && !state.stopped;
             state.stopped = true;
             state.videoWindow.close();
+            if (state.ble != null) state.ble.close();
             ShizukuDisplayClient active = state.guard; state.guard = null;
             if (active != null) active.close(); else if (!state.hasGuard && state.streamStarted.get()) auditEnd(state, false);
             try { if (state.inputPipe != null) state.inputPipe.close(); } catch (IOException ignored) {}
@@ -312,6 +324,7 @@ public final class CaptureService extends Service {
         }
         try { if (socket != null) socket.close(); } catch (IOException ignored) {}
         socket = null;
+        if (listener != null) listener.disconnect();
     }
     private void auditEnd(SessionState state, boolean shellPosted) {
         if (!state.streamStarted.get() || !state.auditPosted.compareAndSet(false, true)) return;
@@ -320,7 +333,7 @@ public final class CaptureService extends Service {
     @Override public void onDestroy() {
         shutdown = true;
         stopSession();
-        try { if (listener != null) listener.close(); } catch (IOException ignored) {}
+        if (listener != null) listener.close();
         if (watchdog != null) watchdog.shutdownNow();
         unregisterReceiver(screenActions);
         super.onDestroy();

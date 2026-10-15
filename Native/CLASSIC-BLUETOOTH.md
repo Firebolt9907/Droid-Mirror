@@ -5,11 +5,12 @@ phone setup, pressing **Mirror on the Mac** opens the secure Bluetooth connectio
 and starts the embedded scrcpy 5 capture engine in a Shizuku shell user service.
 There is no Android-managed screen-share prompt and no ADB or LAN connection in
 the streaming path. Shizuku must be running and authorized; this is not a bypass
-of Android's ordinary app permissions. Remote input and audio remain ADB-only.
+of Android's ordinary app permissions. Remote mouse, keyboard and navigation input use the same Bluetooth connection;
+audio remains ADB-only.
 
 ## Install and set up once
 
-The compiled Android test APK is `outputs/DroidMirror-Bluetooth-0.5-debug.apk`,
+The compiled Android test APK is `outputs/DroidMirror-Bluetooth-0.6-debug.apk`,
 with a SHA-256 checksum beside it. It uses the same signing certificate as 0.1/0.2/0.3/0.4
 and can be installed over them. It is a debug build, not a store release.
 
@@ -77,7 +78,7 @@ Android killing the process, and background restrictions still apply. Explicit
 activity launch is preferred for force-stop recovery. Ordinary Bluetooth events
 alone do not restart a force-stopped package. Tasker needs an actual Bluetooth
 connection/profile event: pairing and discovery are not connections, and a dead
-RFCOMM listener cannot accept the Mac's stream attempt. Use an independently
+Classic L2CAP listener cannot accept the Mac's stream attempt. Use an independently
 available Bluetooth connection event or another Tasker trigger if the Mac profile
 does not fire.
 
@@ -153,9 +154,9 @@ brew install meson ninja pkg-config sdl3 ffmpeg libusb
 open outputs/DroidMirror.app
 ```
 
-Rebuild the Mac for the 0.3 framed transport and events. The new helper also accepts
-old raw 0.1/0.2 video streams, but those APKs retain their old capture prompts and
-cannot report the new events. Checked-in Mac binaries are not updated here.
+Build and install both matching 0.6 endpoints for Classic L2CAP video and BLE input.
+Older APKs do not implement the BLE input handshake. The parser retains legacy
+fixtures for protocol tests; the current app requires the matching transport.
 Use the documented development-signing workflow if preserving the existing BLE
 notification helper's Keychain identity; the build script signs ad-hoc.
 
@@ -169,25 +170,56 @@ without forcing large periodic keyframes. Encoder constraints and
 fallback may reduce the actual dimensions/rate. The
 radio negotiates Classic/EDR itself; the app cannot force an EDR PHY rate.
 
-The secure RFCOMM UUID is `c356a44e-6f2b-4da9-85e5-397991b8a603`. Android owns the
-bonded-peer listener; the Shizuku daemon owns capture and recovery. A file-descriptor
+Direct Classic BR/EDR L2CAP uses fixed private PSM `0x1001`. The Mac opens it
+without SDP discovery. `ClassicL2capService` owns Android's authenticated,
+encrypted socket through the hidden `BluetoothAdapter.listenUsingL2capOn(int)`
+API, invoked in the Shizuku shell process. The public `listenUsingL2capChannel()`
+API is LE-only and is not used. Only the selected bonded Mac is accepted.
+The app's Binder death closes the listener and active socket; normal session
+shutdown closes the connection while retaining the listener for the next session.
+If the hidden API is unavailable, readiness reports the failure rather than
+falling back to RFCOMM. The Shizuku display daemon still owns capture and recovery.
+A duplex socket pair bridges the L2CAP connection to the app's existing framed
+video/control transport. A file-descriptor
 pipe transfers scrcpy video from the shell service to the app's Bluetooth relay.
 No screen content is saved. The matching wire format is dummy byte, 64-byte device
 name, codec ID, then scrcpy 5 session/frame packets, preserving decoder/renderer
 compatibility, rotation metadata, and protected-content restrictions.
 
-The current stream begins with `DMBT0004`, followed by records comprising a
+The current stream begins with `DMBT0005`, followed by records comprising a
 one-byte type, a four-byte big-endian length, and payload. Type 0 carries video
 in chunks of at most 1 KiB. Type 1 is a one-byte event: PHONE_ON (1), SESSION_ENDED
 (2), PHONE_LOCAL_USE (3), STREAM_STARTED (4), CAPTURE_FAILED (5), ALIVE (6).
 Type 2 carries scrcpy control replies. The Mac parser routes video and control
-to separate loopback sockets. Mac-to-Android records carry raw scrcpy control
+to separate loopback sockets. Type 3 carries a fresh 32-byte session key over the
+authenticated, encrypted Classic link. Mac-to-Android records carry raw scrcpy control
 bytes (type 0) or a heartbeat carrying an eight-byte cumulative video byte count
-(type 1); Shizuku injects the controls. Acknowledgements run every 100 ms and
+(type 1); these records travel exclusively over BLE GATT. Shizuku injects the controls. Acknowledgements run every 100 ms and
 limit unacknowledged video to 12 KiB so radio queues cannot grow ahead of input.
 The Android reader also recognizes the older empty heartbeat.
 Heartbeat replies use a separate worker so video backpressure cannot block the
 input reader. Malformed lengths/types/events close the connection.
+
+BLE input advertises service `c356a44e-6f2b-4da9-85e5-397991b8a610` only during
+a Classic session. Characteristic `...a611` accepts write-without-response input;
+`...a612` accepts a 16-byte random Mac challenge and returns HMAC-SHA256 proof.
+The root session key is never advertised or stored. HMAC-SHA256 derives separate
+AES-256-CTR and authentication keys using the labels `DroidMirror BLE encryption v1`
+and `DroidMirror BLE authentication v1`. Proof uses the authentication key over
+`DroidMirror BLE proof v1` followed by the challenge. Each input record is an
+8-byte big-endian sequence (starting at one), ciphertext, and a 16-byte truncated
+HMAC-SHA256 over sequence+ciphertext. The CTR IV is ASCII `DMINPUT1` followed by
+the sequence. The receiver verifies the MAC before decrypting, requires contiguous
+sequences, and rejects replays. Plain input chunks are bounded by negotiated ATT
+size minus 24 bytes; queues and stalls are bounded. BLE failure ends the Classic
+session and invokes the existing lock/recovery path. No Mac application payload
+is sent over Classic L2CAP. Both transports still share radio hardware.
+
+macOS 26's legacy IOBluetooth opening shim loses its pending channel on this
+machine. The helper uses runtime-checked Classic-peer completion selectors to
+retain the actual CBL2CAPChannel and wrap it for the existing stream delegate;
+older implementations retain the public IOBluetooth path. This is an experimental
+compatibility dependency, alongside Android's hidden Classic listener API.
 
 The loopback listener accepts one client and is not authenticated local IPC; a
 local process can race to connect. Radio access relies on secure system Bluetooth

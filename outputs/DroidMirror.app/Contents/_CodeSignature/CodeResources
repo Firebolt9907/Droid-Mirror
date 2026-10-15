@@ -55,19 +55,19 @@
 		<dict>
 			<key>cdhash</key>
 			<data>
-			KK+dsMQGdYB7bZv22n20HPWF/F8=
+			ajXKlLmD+Wztt+UzJXfjPC92Oks=
 			</data>
 			<key>requirement</key>
-			<string>cdhash H"28af9db0c40675807b6d9bf6da7db41cf585fc5f"</string>
+			<string>cdhash H"6a35ca94b983f96cedb7e5332577e33c2f763a4b"</string>
 		</dict>
 		<key>Helpers/DroidMirrorWiFiAware</key>
 		<dict>
 			<key>cdhash</key>
 			<data>
-			Td+X8iiQ0ctNZVd2JnnIOYbZRQY=
+			QI486uFSuQTUG1AzVxLv0oTUaFc=
 			</data>
 			<key>requirement</key>
-			<string>cdhash H"4ddf97f22890d1cb4d6557762679c83986d94506"</string>
+			<string>cdhash H"408e3ceae152b904d41b50335712efd284d46857"</string>
 		</dict>
 		<key>Helpers/disconnected.png</key>
 		<dict>

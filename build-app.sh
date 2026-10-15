@@ -19,11 +19,13 @@ cp "$ROOT/Resources/Info.plist" "$APP/Contents/Info.plist"
   -o "$APP/Contents/Frameworks/libDroidMirrorStyle.dylib"
 /usr/bin/clang -mmacosx-version-min=14.0 -c "$ROOT/Native/ClassicBluetoothWire.c" -o /tmp/droidmirror-classic-wire.o
 /usr/bin/clang -fobjc-arc -fblocks -mmacosx-version-min=14.0 \
-  -framework Foundation -framework IOBluetooth \
-  "$ROOT/Native/ClassicBluetoothBridge.m" /tmp/droidmirror-classic-wire.o -o "$APP/Contents/Helpers/DroidMirrorBluetooth"
+  -framework Foundation -framework IOBluetooth -framework CoreBluetooth \
+  "$ROOT/Native/ClassicBluetoothBridge.m" "$ROOT/Native/BleInputTransport.m" "$ROOT/Native/BleInputCrypto.c" /tmp/droidmirror-classic-wire.o -o "$APP/Contents/Helpers/DroidMirrorBluetooth"
 # Runtime-loaded Wi-Fi Aware SPI stays isolated from the main app's deployment target.
 /usr/bin/clang -fobjc-arc -fblocks -mmacosx-version-min=14.0 \
-  -framework Foundation "$ROOT/Native/WiFiAwareBridge.m" -o "$APP/Contents/Helpers/DroidMirrorWiFiAware"
+  -framework Foundation -framework Security "$ROOT/Native/WiFiAwareBridge.m" -o "$APP/Contents/Helpers/DroidMirrorWiFiAware"
+# Remove the retired experiment from existing app bundles before signing.
+rm -f "$APP/Contents/Helpers/DroidMirrorWiFiAwareCatalyst"
 # Build the customized client: upstream/Homebrew scrcpy lacks the ADB-free mode.
 if [[ ! -f "$ROOT/scrcpy-5.0/build/build.ninja" ]]; then
   meson setup "$ROOT/scrcpy-5.0/build" "$ROOT/scrcpy-5.0" --buildtype=release -Dcompile_server=false -Dportable=true -Dvideotoolbox=true

@@ -2,7 +2,12 @@
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
-typedef struct { uint8_t video[32768], controls[32768], events[16]; size_t video_size, control_size, event_count; } Output;
+typedef struct { uint8_t video[32768], controls[32768], events[16], setup[32]; size_t video_size, control_size, event_count, setup_size; } Output;
+static bool setup(void *context,const uint8_t *bytes,size_t length) {
+    Output *out=context;
+    if(length>sizeof(out->setup)-out->setup_size) return false;
+    memcpy(out->setup+out->setup_size,bytes,length);out->setup_size+=length;return true;
+}
 static bool video(void *context, const uint8_t *bytes, size_t length) {
     Output *out = context; assert(out->video_size + length <= sizeof(out->video));
     memcpy(out->video + out->video_size, bytes, length); out->video_size += length; return true;
@@ -13,6 +18,26 @@ static bool control_video(void *context, const uint8_t *bytes, size_t length) {
     memcpy(out->controls + out->control_size, bytes, length); out->control_size += length; return true;
 }
 int main(int argc, char **argv) {
+    uint8_t ble[52]={'D','M','B','T','0','0','0','5',3,0,0,0,32};
+    for(size_t i=0;i<32;++i) ble[13+i]=(uint8_t)i;
+    const uint8_t end[]={0,0,0,0,2,50,51}; memcpy(ble+45,end,sizeof(end));
+    for(size_t chunk=1;chunk<=sizeof(ble);++chunk) {
+        DMClassicWire test;dm_classic_wire_init(&test);Output received={0};
+        for(size_t offset=0;offset<sizeof(ble);offset+=chunk) {
+            size_t take=sizeof(ble)-offset;if(take>chunk) take=chunk;
+            assert(dm_classic_wire_feed_ble(&test,ble+offset,take,video,event,control_video,setup,&received));
+        }
+        assert(dm_classic_wire_complete(&test) && received.setup_size==32 && received.video_size==2);
+        for(size_t i=0;i<32;++i) assert(received.setup[i]==i);
+        assert(received.video[0]==50 && received.video[1]==51 && !received.control_size);
+    }
+    for(size_t size=31;size<=33;size+=2) {
+        DMClassicWire test;dm_classic_wire_init(&test);Output received={0};ble[12]=(uint8_t)size;
+        assert(!dm_classic_wire_feed_ble(&test,ble,13,video,event,control_video,setup,&received));
+    }
+    ble[12]=32;ble[7]='4';
+    DMClassicWire test;dm_classic_wire_init(&test);Output received={0};
+    assert(!dm_classic_wire_feed_ble(&test,ble,13,video,event,control_video,setup,&received));
     const uint8_t stream[] = {'D','M','B','T','0','0','0','3', 0,0,0,0,3, 0,42,43,
                             1,0,0,0,1,4, 0,0,0,0,2,44,45, 1,0,0,0,1,1};
     for (size_t chunk = 1; chunk <= sizeof(stream); chunk++) {

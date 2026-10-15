@@ -55,6 +55,7 @@ enum MirrorTransport: String, CaseIterable, Identifiable, Codable {
 struct MirrorPreferences: Codable {
     var transport: MirrorTransport = .bluetoothClassic
     var autoStart = true
+    var bluetoothDeviceID: String?
     var turnDeviceScreenOff = true
     var powerOffOnClose = false
     var stayAwake = true
@@ -69,7 +70,7 @@ struct MirrorPreferences: Codable {
     var showTouches = false
 
     private enum CodingKeys: String, CodingKey {
-        case transport, autoStart, turnDeviceScreenOff, powerOffOnClose, stayAwake
+        case transport, autoStart, bluetoothDeviceID, turnDeviceScreenOff, powerOffOnClose, stayAwake
         case alwaysOnTop, forwardAudio, maxFPS, bitRateMbps, maxSize
         case codec, keyboard, scrollMode, showTouches
     }
@@ -81,6 +82,7 @@ struct MirrorPreferences: Codable {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         transport = try values.decodeIfPresent(MirrorTransport.self, forKey: .transport) ?? transport
         autoStart = try values.decodeIfPresent(Bool.self, forKey: .autoStart) ?? autoStart
+        bluetoothDeviceID = try values.decodeIfPresent(String.self, forKey: .bluetoothDeviceID)
         turnDeviceScreenOff = try values.decodeIfPresent(Bool.self, forKey: .turnDeviceScreenOff) ?? turnDeviceScreenOff
         powerOffOnClose = try values.decodeIfPresent(Bool.self, forKey: .powerOffOnClose) ?? powerOffOnClose
         stayAwake = try values.decodeIfPresent(Bool.self, forKey: .stayAwake) ?? stayAwake

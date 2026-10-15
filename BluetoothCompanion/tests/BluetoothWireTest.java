@@ -27,6 +27,13 @@ public final class BluetoothWireTest {
             }
         }
         Packets packets = new Packets(); BluetoothWire packetWire = new BluetoothWire(packets);
+        ByteArrayOutputStream bleBytes=new ByteArrayOutputStream(); BluetoothWire bleWire=new BluetoothWire(bleBytes);
+        byte[] key=new byte[32]; for(int i=0;i<key.length;++i) key[i]=(byte)i;
+        bleWire.bleSetup(key);
+        DataInputStream setup=new DataInputStream(new ByteArrayInputStream(bleBytes.toByteArray()));
+        setup.skipBytes(8);require(setup.readByte()==3 && setup.readInt()==32);
+        byte[] deliveredKey=new byte[32];setup.readFully(deliveredKey);require(Arrays.equals(key,deliveredKey));
+        try { bleWire.bleSetup(new byte[31]);throw new AssertionError(); } catch(IOException expected) {}
         packetWire.video(new byte[20000]); packetWire.event(BluetoothWire.ALIVE);
         packetWire.control(new byte[]{1,2}, 2);
         require(packets.writes == 3 + (20000 + BluetoothWire.VIDEO_CHUNK - 1) / BluetoothWire.VIDEO_CHUNK);

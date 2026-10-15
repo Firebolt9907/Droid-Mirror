@@ -64,6 +64,7 @@ public final class CaptureActivity extends Activity {
         Shizuku.addRequestPermissionResultListener(permissionResult); updateShizuku();
         List<String> permissions = new ArrayList<>();
         if (Build.VERSION.SDK_INT >= 31 && checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) permissions.add(Manifest.permission.BLUETOOTH_CONNECT);
+        if (Build.VERSION.SDK_INT >= 31 && checkSelfPermission(Manifest.permission.BLUETOOTH_ADVERTISE) != PackageManager.PERMISSION_GRANTED) permissions.add(Manifest.permission.BLUETOOTH_ADVERTISE);
         if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) permissions.add(Manifest.permission.POST_NOTIFICATIONS);
         if (!permissions.isEmpty()) requestPermissions(permissions.toArray(new String[0]), 2); else { refresh(); CaptureService.enableIfConfigured(this); }
     }
