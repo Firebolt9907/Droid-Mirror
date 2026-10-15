@@ -55,7 +55,7 @@
 		<dict>
 			<key>cdhash</key>
 			<data>
-			/Ig6uj4uM4n6ASZUQmyAdZI8GF8=
+			N4PfUVMUWQCKp7RlyjgmY00CXYQ=
 			</data>
 			<key>requirement</key>
 			<string>identifier DroidMirrorBluetooth and anchor apple generic and certificate leaf[subject.CN] = "Apple Development: rishushar99@gmail.com (ZPFJS288H9)" and certificate 1[field.1.2.840.113635.100.6.2.1] /* exists */</string>
@@ -82,7 +82,7 @@
 		<dict>
 			<key>cdhash</key>
 			<data>
-			nzsZNDuaBb5R/mcozKo10/LzfHo=
+			Yqc0n2+JXlNqRgt6q6WyeQpaJwo=
 			</data>
 			<key>requirement</key>
 			<string>identifier scrcpy and anchor apple generic and certificate leaf[subject.CN] = "Apple Development: rishushar99@gmail.com (ZPFJS288H9)" and certificate 1[field.1.2.840.113635.100.6.2.1] /* exists */</string>
@@ -91,7 +91,7 @@
 		<dict>
 			<key>cdhash</key>
 			<data>
-			Q2wC13bndxOoORIMnfzG/soIuOc=
+			h7ldYv/l5PCa5mE4GYID8i2vwAo=
 			</data>
 			<key>requirement</key>
 			<string>identifier "scrcpy-server" and anchor apple generic and certificate leaf[subject.CN] = "Apple Development: rishushar99@gmail.com (ZPFJS288H9)" and certificate 1[field.1.2.840.113635.100.6.2.1] /* exists */</string>

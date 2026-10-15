@@ -29,6 +29,11 @@ public class ControlMessageReader {
                 return parseInjectKeycode();
             case ControlMessage.TYPE_INJECT_TEXT:
                 return parseInjectText();
+            case 23: { // Bluetooth timestamped touch: otherwise identical to type 2.
+                ControlMessage message = parseInjectTouchEvent();
+                message.setEventTime(dis.readLong());
+                return message;
+            }
             case ControlMessage.TYPE_INJECT_TOUCH_EVENT:
                 return parseInjectTouchEvent();
             case ControlMessage.TYPE_INJECT_SCROLL_EVENT:

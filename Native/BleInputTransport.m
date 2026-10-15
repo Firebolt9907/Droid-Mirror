@@ -2,11 +2,13 @@
 #import "BleInputCrypto.h"
 #import "BleInputQueue.h"
 #import <CoreBluetooth/CoreBluetooth.h>
+#include <time.h>
 
 static NSString *const DMInputService=@"c356a44e-6f2b-4da9-85e5-397991b8a610";
 static NSString *const DMInputCharacteristic=@"c356a44e-6f2b-4da9-85e5-397991b8a611";
 static NSString *const DMInputReturn=@"c356a44e-6f2b-4da9-85e5-397991b8a613";
 static NSString *const DMInputKey=@"c356a44e-6f2b-4da9-85e5-397991b8a614";
+static NSString *const DMInputClock=@"c356a44e-6f2b-4da9-85e5-397991b8a615";
 static NSString *const DMInputProof=@"c356a44e-6f2b-4da9-85e5-397991b8a612";
 @interface DMBleInputTransport () <CBCentralManagerDelegate, CBPeripheralDelegate> {
     DMBleInputKeys _keys, _returnKeys;
@@ -16,11 +18,13 @@ static NSString *const DMInputProof=@"c356a44e-6f2b-4da9-85e5-397991b8a612";
 @property(nonatomic, strong) CBCharacteristic *input;
 @property(nonatomic, strong) CBCharacteristic *returning;
 @property(nonatomic, strong) CBCharacteristic *proof;
+@property(nonatomic, strong) CBCharacteristic *clockCharacteristic;
 @property(nonatomic, strong) NSData *pairingKey;
 @property(nonatomic) uint64_t receiveSequence;
 @property(nonatomic) BOOL proofVerified;
 @property(nonatomic) BOOL readPending;
 @property(nonatomic) BOOL writePending;
+@property(nonatomic) BOOL motionWakePending;
 @property(nonatomic) NSTimeInterval nextRead;
 @property(nonatomic, strong) NSData *challenge;
 @property(nonatomic, strong) DMBleInputQueue *pending;
@@ -89,7 +93,7 @@ static NSString *const DMInputProof=@"c356a44e-6f2b-4da9-85e5-397991b8a612";
     if (error || !peripheral.services.count) { [self reject]; return; }
     for (CBService *service in peripheral.services)
         [peripheral discoverCharacteristics:@[[CBUUID UUIDWithString:DMInputCharacteristic],[CBUUID UUIDWithString:DMInputProof],
-            [CBUUID UUIDWithString:DMInputReturn],[CBUUID UUIDWithString:DMInputKey]] forService:service];
+            [CBUUID UUIDWithString:DMInputReturn],[CBUUID UUIDWithString:DMInputKey],[CBUUID UUIDWithString:DMInputClock]] forService:service];
 }
 - (void)peripheral:(CBPeripheral *)peripheral didDiscoverCharacteristicsForService:(CBService *)service error:(NSError *)error {
     if (self.closed) return;
@@ -99,8 +103,9 @@ static NSString *const DMInputProof=@"c356a44e-6f2b-4da9-85e5-397991b8a612";
         if ([characteristic.UUID isEqual:[CBUUID UUIDWithString:DMInputProof]]) _proof=characteristic;
         if ([characteristic.UUID isEqual:[CBUUID UUIDWithString:DMInputReturn]]) _returning=characteristic;
         if ([characteristic.UUID isEqual:[CBUUID UUIDWithString:DMInputKey]]) key=characteristic;
+        if ([characteristic.UUID isEqual:[CBUUID UUIDWithString:DMInputClock]]) _clockCharacteristic=characteristic;
     }
-    if (error || !key || !(_returning.properties & CBCharacteristicPropertyRead)
+    if (error || !key || !(_clockCharacteristic.properties & CBCharacteristicPropertyRead) || !(_returning.properties & CBCharacteristicPropertyRead)
             || !(_proof.properties & CBCharacteristicPropertyRead) || !(_proof.properties & CBCharacteristicPropertyWrite)
             || !(_input.properties & CBCharacteristicPropertyWrite)) { [self reject]; return; }
     // The public nonce derives session keys from the one-time, privately paired root.
@@ -140,6 +145,20 @@ static NSString *const DMInputProof=@"c356a44e-6f2b-4da9-85e5-397991b8a612";
         return;
     }
     if (self.ready) return;
+    if ([characteristic.UUID isEqual:[CBUUID UUIDWithString:DMInputClock]] && _proofVerified) {
+        NSData *value=characteristic.value;
+        if (error || value.length != 40) { [self reportFailure:@"BLE clock synchronization failed. Update the Android companion."]; return; }
+        uint8_t expected[32], difference=0; const uint8_t *bytes=value.bytes;
+        dm_ble_clock_proof(&_keys,bytes,expected);
+        for (NSUInteger i=0;i<32;++i) difference |= expected[i]^bytes[8+i];
+        if (difference) { [self reportFailure:@"Invalid authenticated phone clock."]; return; }
+        struct timespec now; clock_gettime(CLOCK_MONOTONIC,&now);
+        uint64_t mac=(uint64_t)now.tv_sec*1000+(uint64_t)now.tv_nsec/1000000, phone;
+        memcpy(&phone,bytes,8); phone=CFSwapInt64BigToHost(phone);
+        [_pending synchronizePhoneClock:phone macClock:mac];
+        self.ready=YES; _nextRead=NSDate.timeIntervalSinceReferenceDate+0.5;
+        [self reportReady]; [self drain]; return;
+    }
     if ([characteristic.UUID isEqual:[CBUUID UUIDWithString:DMInputKey]]) {
         if (error || characteristic.value.length != 32) { [self reject]; return; }
         uint8_t session[32]; dm_ble_session_key(_pairingKey.bytes,characteristic.value.bytes,session);
@@ -157,8 +176,7 @@ static NSString *const DMInputProof=@"c356a44e-6f2b-4da9-85e5-397991b8a612";
     if ([peripheral maximumWriteValueLengthForType:CBCharacteristicWriteWithResponse] <= 24) {
         [self reportFailure:@"BLE input MTU is too small for authenticated commands."]; return;
     }
-    _proofVerified=YES; self.ready=YES; _nextRead=NSDate.timeIntervalSinceReferenceDate+0.5;
-    [self reportReady]; [self drain];
+    _proofVerified=YES; [peripheral readValueForCharacteristic:_clockCharacteristic];
 }
 - (void)reportReady {
     id<DMBleInputDelegate> delegate=self.delegate;
@@ -201,7 +219,16 @@ static NSString *const DMInputProof=@"c356a44e-6f2b-4da9-85e5-397991b8a612";
     if (NSDate.timeIntervalSinceReferenceDate >= _nextRead) { [self readReturn]; return; }
     NSUInteger mtu=MIN((NSUInteger)512,[_peripheral maximumWriteValueLengthForType:CBCharacteristicWriteWithResponse]);
     NSData *plain=[_pending takePacket:mtu-24];
-    if (!plain.length) return;
+    if (!plain.length) {
+        NSTimeInterval delay = _pending.motionDelay;
+        if (delay > 0 && !_motionWakePending) {
+            _motionWakePending=YES;
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(delay*NSEC_PER_SEC)),_queue,^{
+                self.motionWakePending=NO; [self drain];
+            });
+        }
+        return;
+    }
     NSMutableData *packet=[NSMutableData dataWithLength:plain.length+24];
     if (!dm_ble_input_seal(&_keys,_sequence,plain.bytes,plain.length,packet.mutableBytes)) {
         [self reportFailure:@"BLE input encryption failed."]; return;

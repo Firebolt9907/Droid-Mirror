@@ -33,6 +33,13 @@ cp "$ROOT/Resources/Info.plist" "$APP/Contents/Info.plist"
   -framework Foundation -framework Security "$ROOT/Native/WiFiAwareBridge.m" -o "$APP/Contents/Helpers/DroidMirrorWiFiAware"
 # Remove the retired experiment from existing app bundles before signing.
 rm -f "$APP/Contents/Helpers/DroidMirrorWiFiAwareCatalyst"
+# Build the shared Android controller too: gesture-pill shortcuts run on the phone
+# for both ADB and the Bluetooth companion (which compiles these same sources).
+export ANDROID_HOME="${ANDROID_HOME:-$HOME/Library/Android/sdk}"
+SERVER_BUILD_DIR="$(mktemp -d /tmp/droidmirror-server.XXXXXX)"
+BUILD_DIR="$SERVER_BUILD_DIR" bash "$ROOT/scrcpy-5.0/server/build_without_gradle.sh"
+cp "$SERVER_BUILD_DIR/scrcpy-server" "$APP/Contents/Helpers/scrcpy-server"
+rm -rf "$SERVER_BUILD_DIR"
 # Build the customized client: upstream/Homebrew scrcpy lacks the ADB-free mode.
 if [[ ! -f "$ROOT/scrcpy-5.0/build/build.ninja" ]]; then
   meson setup "$ROOT/scrcpy-5.0/build" "$ROOT/scrcpy-5.0" --buildtype=release -Dcompile_server=false -Dportable=true -Dvideotoolbox=true

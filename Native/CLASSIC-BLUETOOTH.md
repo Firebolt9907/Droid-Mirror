@@ -27,7 +27,7 @@ the phone's full display size when alignment needs correction (1080×2400 on Pix
 
 ## Install and set up once
 
-The compiled Android test APK is `outputs/DroidMirror-Bluetooth-0.8-debug.apk`,
+The compiled Android test APK is `outputs/DroidMirror-Bluetooth-0.9-debug.apk`,
 with a SHA-256 checksum beside it. It uses the same signing certificate as 0.1/0.2/0.3/0.4
 and can be installed over them. It is a debug build, not a store release.
 
@@ -171,7 +171,7 @@ brew install meson ninja pkg-config sdl3 ffmpeg libusb
 open outputs/DroidMirror.app
 ```
 
-Build and install both matching 0.8 endpoints. Open **Show BLE pairing code** on
+Build and install both matching 0.9 endpoints. Open **Show BLE pairing code** on
 Android, then paste that private code into **Settings → Connection → Pair BLE**
 on the selected Mac once. Older endpoints cannot use the video-only protocol. The parser retains legacy
 fixtures for protocol tests; the current app requires the matching transport.
@@ -223,6 +223,7 @@ BLE service `c356a44e-6f2b-4da9-85e5-397991b8a610` carries every non-video messa
 - `...a613`: encrypted control replies and status events, pulled with GATT reads
   and fragmented to ATT size.
 - `...a614`: a public 32-byte random per-session nonce, never a pairing/session key.
+- `...a615`: one authenticated Android uptime sample during connection setup.
 
 A private 32-byte pairing code is stored per selected bonded Mac in Android's
 app-private preferences (backup disabled), and per phone in the Mac helper's
@@ -250,7 +251,12 @@ The Mac keeps video and control on separate local sockets. Heartbeats/ACKs run a
 250 ms with a 24 KiB video window. Unsent cumulative ACKs coalesce to the newest
 count under CoreBluetooth backpressure. The newest ACK is prioritized between
 complete input envelopes, so sustained mouse traffic cannot keep it behind the
-whole input backlog. Input bytes retain their exact order.
+whole input backlog. Sustained mouse MOVE/hover positions are limited to 60 Hz, keeping the newest unsent
+position for the same pointer and button state. Clicks, releases, keys, scrolling
+and pointer/state changes are ordering barriers; a final position flushes before
+a barrier. Other input retains its exact order. Complete scrcpy messages are
+reassembled across arbitrary TCP fragments before applying this policy. Ready
+envelopes share full ATT payloads, without a timer that waits to fill a packet.
 Mac BLE callbacks and GATT operations run on a dedicated serial queue, separate
 from the Classic receive loop. Only one acknowledged GATT read or write is in
 flight at a time; due return reads get a turn during sustained input. Return
@@ -262,6 +268,19 @@ the tested macOS path. Phone heartbeat echoes run at one second, reducing BLE
 airtime. Waiting for a video ACK never holds the BLE control writer. BLE failure closes
 the Classic session and invokes the existing recovery path. Both transports share
 the same radio, so extra BLE traffic is not free bandwidth.
+
+Bluetooth touch messages use private scrcpy type 23: the standard 32-byte touch
+record followed by the original 64-bit event time in milliseconds. The client
+captures SDL event time before its controller queue. The authenticated uptime
+read maps Mac CLOCK_MONOTONIC to Android uptime once per connection using the
+Mac receive time, so mapping is conservatively in the past. The helper converts
+source times before BLE transmission; Android uses them for MotionEvent eventTime
+and downTime. Coalescing retains the newest sample's timestamp. Thus network
+queueing changes delivery latency, not the gesture's measured duration/velocity.
+No fast-swipe-to-Home classifier or phone-side smoothing is used. Standard ADB
+type-2 touch messages retain their existing behavior. Matching endpoints are
+required. Invalid future or over-ten-second-old timestamps are rejected.
+
 
 macOS 26's legacy IOBluetooth opening shim loses its pending channel on this
 machine. The helper uses runtime-checked Classic-peer completion selectors to

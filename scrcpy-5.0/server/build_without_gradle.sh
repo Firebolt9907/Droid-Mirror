@@ -87,6 +87,11 @@ javac -encoding UTF-8 -bootclasspath "$ANDROID_JAR" \
 
 echo "Dexing..."
 cd "$CLASSES_DIR"
+# Include nested classes (including delayed input callbacks), not only top-level sources.
+CLASSES=()
+while IFS= read -r compiled_class; do
+    CLASSES+=("$compiled_class")
+done < <(find com -name '*.class' -type f)
 
 if [[ "${PLATFORM%%.*}" -lt 31 ]]
 then

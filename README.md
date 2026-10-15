@@ -19,13 +19,20 @@ Bluetooth remembers the phone selected in DroidMirror. With auto-start enabled,
 launching the app starts that phone once; closing the mirror does not continually
 reopen it. An unavailable saved pairing does not select another device.
 
-The compiled test APK is `outputs/DroidMirror-Bluetooth-0.8-debug.apk`.
+The compiled test APK is `outputs/DroidMirror-Bluetooth-0.9-debug.apk`.
 Install the matching Mac and Android builds together. A phone power/screen-lock action ends the session, locks/restores the
 phone through Shizuku, and shows a separate **phone was used** popup on Mac.
 End-of-session audit notifications are posted on phone and Mac. Shell watchdog
 recovery covers app death and stale stream leases; physical-device behavior still
 needs validation. Mouse, keyboard, scrolling and navigation use the Bluetooth control channel through Shizuku. Audio remains available through ADB mode.
 See [setup, behavior and validation limits](Native/CLASSIC-BLUETOOTH.md).
+
+With Android gesture navigation enabled, clicking the bottom pill once goes Home,
+twice opens Recents, and three times sends a long Home press for Circle to Search
+(on supported phones). The centered hit area is 20 Android dp high, capped by the
+system navigation-bar height; dragging still sends a normal swipe. These shortcuts
+are disabled with two-button or three-button navigation. Bluetooth requires the
+updated companion APK. See [gesture-pill behavior and tests](Native/GESTURE-PILL.md).
 
 ## Experimental Wi-Fi Aware
 
@@ -47,7 +54,7 @@ See [the investigation and remaining integration work](Native/WIFI-AWARE.md).
 
 ## Build and run
 
-Requirements: macOS 14+, Xcode command-line tools, and the client dependencies (`brew install meson ninja pkg-config sdl3 ffmpeg libusb`). Bluetooth setup also requires the Android companion; see the linked guide.
+Requirements: macOS 14+, Xcode command-line tools, and the client dependencies (`brew install meson ninja pkg-config sdl3 ffmpeg libusb`). Building the customized Android server also requires JDK 17+ and Android SDK platform/build-tools 36 (`ANDROID_HOME`, default `~/Library/Android/sdk`). Bluetooth setup also requires the Android companion; see the linked guide.
 
 ```sh
 chmod +x build-app.sh

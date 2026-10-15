@@ -75,6 +75,7 @@ struct sc_control_msg {
             enum android_motionevent_buttons action_button;
             enum android_motionevent_buttons buttons;
             uint64_t pointer_id;
+            uint64_t capture_time_ms; // Used by the Bluetooth timestamped wire extension.
             struct sc_position position;
             float pressure;
         } inject_touch_event;

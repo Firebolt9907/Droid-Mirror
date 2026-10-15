@@ -4,6 +4,7 @@ import SwiftUI
 @MainActor
 final class DroidMirrorAppDelegate: NSObject, NSApplicationDelegate {
     private var terminationInProgress = false
+    private var terminationCleanupComplete = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         installMainMenu()
@@ -42,13 +43,17 @@ final class DroidMirrorAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        guard !terminationInProgress else { return .terminateNow }
+        if terminationCleanupComplete { return .terminateNow }
+        guard !terminationInProgress else { return .terminateCancel }
         terminationInProgress = true
         Task { @MainActor in
             await MirrorModel.shared.shutdownForApplicationTermination()
-            sender.reply(toApplicationShouldTerminate: true)
+            terminationCleanupComplete = true
+            sender.terminate(nil)
         }
-        return .terminateLater
+        // Keep the ordinary run loop alive while Swift's main-actor cleanup
+        // runs. AppKit's deferred termination loop can starve that work.
+        return .terminateCancel
     }
 
     private func installMainMenu() {

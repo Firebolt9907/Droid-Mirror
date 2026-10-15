@@ -20,6 +20,7 @@ struct sc_controller {
     sc_mutex mutex;
     sc_cond msg_cond;
     bool stopped;
+    bool timed_touch;
 
     struct sc_control_msg_queue queue;
 

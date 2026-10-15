@@ -13,6 +13,14 @@
 #include "shortcut_mod.h"
 #include "util/log.h"
 #include "util/sdl.h"
+#include "util/tick.h"
+
+static uint64_t sc_source_event_time_ms(uint64_t timestamp) {
+    uint64_t sdl_now = SDL_GetTicksNS();
+    sc_tick now = sc_tick_now();
+    uint64_t age = timestamp && timestamp <= sdl_now ? sdl_now - timestamp : 0;
+    return (uint64_t)((now - SC_TICK_FROM_NS(age)) / SC_TICK_FROM_MS(1));
+}
 #ifdef __APPLE__
 #include "droidmirror_keymap.h"
 #endif
@@ -385,6 +393,7 @@ simulate_virtual_finger(struct sc_input_manager *im,
 
     struct sc_control_msg msg;
     msg.type = SC_CONTROL_MSG_TYPE_INJECT_TOUCH_EVENT;
+    msg.inject_touch_event.capture_time_ms = 0;
     msg.inject_touch_event.action = action;
     msg.inject_touch_event.position.screen_size = im->screen->frame_size;
     msg.inject_touch_event.position.point = point;
@@ -776,6 +785,7 @@ sc_input_manager_process_mouse_motion(struct sc_input_manager *im,
     }
 
     struct sc_mouse_motion_event evt = {
+        .capture_time_ms = sc_source_event_time_ms(event->timestamp),
         .position = sc_input_manager_get_position(im, event->x, event->y),
         .pointer_id = im->vfinger_down ? SC_POINTER_ID_GENERIC_FINGER
                                        : SC_POINTER_ID_MOUSE,
@@ -821,6 +831,7 @@ sc_input_manager_process_touch(struct sc_input_manager *im,
     int32_t y = event->y * (int32_t) window_size.height;
 
     struct sc_touch_event evt = {
+        .capture_time_ms = sc_source_event_time_ms(event->timestamp),
         .position = {
             .screen_size = im->screen->frame_size,
             .point =
@@ -962,6 +973,7 @@ sc_input_manager_process_mouse_button(struct sc_input_manager *im,
     bool use_finger = im->vfinger_down || change_vfinger;
 
     struct sc_mouse_click_event evt = {
+        .capture_time_ms = sc_source_event_time_ms(event->timestamp),
         .position = sc_input_manager_get_position(im, event->x, event->y),
         .action = sc_action_from_sdl_mousebutton_type(event->type),
         .button = button,

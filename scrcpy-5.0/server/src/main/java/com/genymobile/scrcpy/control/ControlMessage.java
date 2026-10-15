@@ -45,6 +45,7 @@ public final class ControlMessage {
     private int actionButton; // MotionEvent.BUTTON_*
     private int buttons; // MotionEvent.BUTTON_*
     private long pointerId;
+    private long eventTime = -1;
     private float pressure;
     private Position position;
     private float hScroll;
@@ -222,6 +223,9 @@ public final class ControlMessage {
     public int getButtons() {
         return buttons;
     }
+
+    public long getEventTime() { return eventTime; }
+    public void setEventTime(long value) { eventTime = value; }
 
     public long getPointerId() {
         return pointerId;

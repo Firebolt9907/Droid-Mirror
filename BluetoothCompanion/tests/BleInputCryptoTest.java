@@ -20,6 +20,9 @@ public final class BleInputCryptoTest {
         byte[] proof=crypto.proof(challenge); StringBuilder hex=new StringBuilder();
         for(byte b:proof) hex.append(String.format("%02x",b));
         if(!hex.toString().equals("eaa36a8dcfebabd9da451687a4e0091f469c869592241b5ea604cef6a99ccd8d")) throw new AssertionError();
+        byte[] clockProof=crypto.clockProof(java.nio.ByteBuffer.allocate(8).putLong(123456789).array());
+        StringBuilder clockHex=new StringBuilder(); for(byte b:clockProof) clockHex.append(String.format("%02x",b));
+        if(!clockHex.toString().equals("1161d2415df57690a9d16aef9a8cb69b0fe65629616d147120b08bb6d300af21")) throw new AssertionError();
         List<byte[]> records=new ArrayList<>();
         try(DataInputStream in=new DataInputStream(Files.newInputStream(Paths.get(args[0])))) {
             while(in.available()>0) { byte[] record=new byte[in.readUnsignedShort()]; in.readFully(record); records.add(record); }

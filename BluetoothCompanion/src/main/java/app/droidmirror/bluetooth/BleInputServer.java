@@ -19,6 +19,7 @@ final class BleInputServer implements AutoCloseable {
     static final UUID INPUT = UUID.fromString("c356a44e-6f2b-4da9-85e5-397991b8a611");
     static final UUID PROOF = UUID.fromString("c356a44e-6f2b-4da9-85e5-397991b8a612");
     static final UUID OUTPUT = UUID.fromString("c356a44e-6f2b-4da9-85e5-397991b8a613");
+    static final UUID CLOCK = UUID.fromString("c356a44e-6f2b-4da9-85e5-397991b8a615");
     static final UUID KEY = UUID.fromString("c356a44e-6f2b-4da9-85e5-397991b8a614");
     private final String selectedPeer;
     private final byte[] sessionNonce;
@@ -44,6 +45,7 @@ final class BleInputServer implements AutoCloseable {
     private BluetoothLeAdvertiser advertiser;
     private volatile BluetoothDevice authenticatedPeer;
     private final ConcurrentHashMap<String,byte[]> challenges=new ConcurrentHashMap<>();
+    private byte[] clockValue;
     private byte[] current;
     private int offset;
     private final InputStream input = new InputStream() {
@@ -148,6 +150,16 @@ final class BleInputServer implements AutoCloseable {
                 if (!selected(device)) {
                     server.sendResponse(device, request, BluetoothGatt.GATT_INSUFFICIENT_AUTHENTICATION, 0, null); return;
                 }
+                if (CLOCK.equals(characteristic.getUuid())) {
+                    if (offset == 0) {
+                        byte[] time = java.nio.ByteBuffer.allocate(8).putLong(SystemClock.uptimeMillis()).array();
+                        clockValue = java.nio.ByteBuffer.allocate(40).put(time).put(crypto.clockProof(time)).array();
+                    }
+                    if (clockValue == null || offset < 0 || offset > 40) {
+                        server.sendResponse(device, request, BluetoothGatt.GATT_INVALID_OFFSET, offset, null); return;
+                    }
+                    server.sendResponse(device, request, BluetoothGatt.GATT_SUCCESS, offset, Arrays.copyOfRange(clockValue,offset,40)); return;
+                }
                 if (OUTPUT.equals(characteristic.getUuid()) && offset == 0 && device.equals(authenticatedPeer)) {
                     synchronized (returnLock) {
                         server.sendResponse(device, request, BluetoothGatt.GATT_SUCCESS, 0,
@@ -222,6 +234,8 @@ final class BleInputServer implements AutoCloseable {
             BluetoothGattCharacteristic.PROPERTY_READ | BluetoothGattCharacteristic.PROPERTY_WRITE,
             BluetoothGattCharacteristic.PERMISSION_READ | BluetoothGattCharacteristic.PERMISSION_WRITE));
         service.addCharacteristic(new BluetoothGattCharacteristic(KEY,
+            BluetoothGattCharacteristic.PROPERTY_READ, BluetoothGattCharacteristic.PERMISSION_READ));
+        service.addCharacteristic(new BluetoothGattCharacteristic(CLOCK,
             BluetoothGattCharacteristic.PROPERTY_READ, BluetoothGattCharacteristic.PERMISSION_READ));
         output = new BluetoothGattCharacteristic(OUTPUT, BluetoothGattCharacteristic.PROPERTY_READ, BluetoothGattCharacteristic.PERMISSION_READ);
         service.addCharacteristic(output);

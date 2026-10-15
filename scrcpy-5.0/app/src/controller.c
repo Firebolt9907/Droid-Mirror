@@ -1,6 +1,10 @@
 #include "controller.h"
 
 #include <assert.h>
+#include <stdlib.h>
+#include <string.h>
+#include "util/binary.h"
+#include "util/tick.h"
 
 #include "util/log.h"
 
@@ -58,6 +62,8 @@ sc_controller_init(struct sc_controller *controller, sc_socket control_socket,
 
     controller->control_socket = control_socket;
     controller->stopped = false;
+    const char *transport = getenv("DROIDMIRROR_TRANSPORT");
+    controller->timed_touch = transport && !strcmp(transport, "bluetooth-classic");
 
     controller->resize_display.width = 0;
     controller->resize_display.height = 0;
@@ -98,6 +104,11 @@ sc_controller_push_msg(struct sc_controller *controller,
     // RESIZE_DISPLAY messages are handled separately
     assert(msg->type != SC_CONTROL_MSG_TYPE_RESIZE_DISPLAY);
 
+    struct sc_control_msg timed = *msg;
+    if (controller->timed_touch && msg->type == SC_CONTROL_MSG_TYPE_INJECT_TOUCH_EVENT && !timed.inject_touch_event.capture_time_ms) {
+        timed.inject_touch_event.capture_time_ms = (uint64_t)(sc_tick_now() / SC_TICK_FROM_MS(1));
+        msg = &timed;
+    }
     bool pushed = false;
 
     sc_mutex_lock(&controller->mutex);
@@ -144,6 +155,11 @@ process_msg(struct sc_controller *controller,
             const struct sc_control_msg *msg, bool *eos) {
     static uint8_t serialized_msg[SC_CONTROL_MSG_MAX_SIZE];
     size_t length = sc_control_msg_serialize(msg, serialized_msg);
+    if (controller->timed_touch && msg->type == SC_CONTROL_MSG_TYPE_INJECT_TOUCH_EVENT) {
+        serialized_msg[0] = 23; // Matching Android companion: touch plus source event time.
+        sc_write64be(serialized_msg + length, msg->inject_touch_event.capture_time_ms);
+        length += 8;
+    }
     if (!length) {
         *eos = false;
         return false;
