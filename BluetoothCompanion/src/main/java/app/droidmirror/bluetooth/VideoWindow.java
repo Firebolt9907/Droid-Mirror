@@ -7,6 +7,7 @@ public final class VideoWindow {
     private final int capacity;
     private final long timeoutMillis;
     private long sent, acknowledged;
+    private long waitNanos;
     private boolean closed;
     public VideoWindow(int capacity, long timeoutMillis) {
         if (capacity <= 0 || timeoutMillis <= 0) throw new IllegalArgumentException();
@@ -18,8 +19,10 @@ public final class VideoWindow {
         while (!closed && sent - acknowledged + count > capacity) {
             long remaining = deadline - System.nanoTime();
             if (remaining <= 0) throw new IOException("Mac video acknowledgement stalled");
+            long started = System.nanoTime();
             try { wait(Math.max(1, remaining / 1_000_000)); }
             catch (InterruptedException error) { Thread.currentThread().interrupt(); throw new IOException(error); }
+            finally { waitNanos += System.nanoTime() - started; }
         }
         if (closed) throw new IOException("Video window closed");
         sent += count;
@@ -29,4 +32,6 @@ public final class VideoWindow {
         acknowledged = count; notifyAll();
     }
     public synchronized void close() { closed = true; notifyAll(); }
+    public synchronized long takeWaitMillis() { long value = waitNanos / 1000000; waitNanos = 0; return value; }
+    public synchronized long inFlightBytes() { return sent - acknowledged; }
 }

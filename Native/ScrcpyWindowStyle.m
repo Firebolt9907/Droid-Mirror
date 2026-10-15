@@ -67,6 +67,7 @@ static inline CGFloat DMScreenCornerRadius(CGFloat width) {
 @property(nonatomic) CGFloat touchY;
 @property(nonatomic) NSInteger androidWidth;
 @property(nonatomic) NSInteger androidHeight;
+@property(nonatomic) BOOL bluetoothStream;
 - (instancetype)initWithWindow:(NSWindow *)window;
 @end
 
@@ -74,6 +75,7 @@ static inline CGFloat DMScreenCornerRadius(CGFloat width) {
 - (instancetype)initWithWindow:(NSWindow *)window {
     if (!(self = [super init])) return nil;
     _window = window;
+    _bluetoothStream = [NSProcessInfo.processInfo.environment[@"DROIDMIRROR_TRANSPORT"] isEqualToString:@"bluetooth-classic"];
     int sdlWindowCount = 0;
     SDL_Window **sdlWindows = SDL_GetWindows(&sdlWindowCount);
     for (int i = 0; i < sdlWindowCount; i++) {
@@ -100,7 +102,9 @@ static inline CGFloat DMScreenCornerRadius(CGFloat width) {
     __weak typeof(self) weakSelf = self;
     _resizeObserver = [[NSNotificationCenter defaultCenter] addObserverForName:NSWindowDidResizeNotification object:window queue:NSOperationQueue.mainQueue usingBlock:^(__unused NSNotification *note) { [weakSelf positionToolbar]; }];
     _moveObserver = [[NSNotificationCenter defaultCenter] addObserverForName:NSWindowDidMoveNotification object:window queue:NSOperationQueue.mainQueue usingBlock:^(__unused NSNotification *note) { [weakSelf positionToolbar]; }];
-    _pinDetectionTimer = [NSTimer scheduledTimerWithTimeInterval:1.5 repeats:YES block:^(__unused NSTimer *timer) { [weakSelf detectPINPrompt]; }];
+    if (!_bluetoothStream) {
+        _pinDetectionTimer = [NSTimer scheduledTimerWithTimeInterval:1.5 repeats:YES block:^(__unused NSTimer *timer) { [weakSelf detectPINPrompt]; }];
+    }
     if ([NSProcessInfo.processInfo.environment[@"DROIDMIRROR_SWIPE_SCROLL"] isEqualToString:@"1"]) {
         [self setupSwipeScrolling];
     }
@@ -356,18 +360,20 @@ static inline CGFloat DMScreenCornerRadius(CGFloat width) {
     self.androidHeight = 2400;
     NSString *adb = NSProcessInfo.processInfo.environment[@"ADB"] ?: @"/opt/homebrew/bin/adb";
     NSString *serial = NSProcessInfo.processInfo.environment[@"DROIDMIRROR_SERIAL"];
-    if (!serial.length) return;
+    if (!self.bluetoothStream) {
+        if (!serial.length) return;
 
-    NSTask *shell = [NSTask new];
-    NSPipe *input = [NSPipe pipe];
-    shell.executableURL = [NSURL fileURLWithPath:adb];
-    shell.arguments = @[@"-s", serial, @"shell"];
-    shell.standardInput = input;
-    shell.standardOutput = NSFileHandle.fileHandleWithNullDevice;
-    shell.standardError = NSFileHandle.fileHandleWithNullDevice;
-    if (![shell launchAndReturnError:nil]) return;
-    self.adbShell = shell;
-    self.adbShellInput = input.fileHandleForWriting;
+        NSTask *shell = [NSTask new];
+        NSPipe *input = [NSPipe pipe];
+        shell.executableURL = [NSURL fileURLWithPath:adb];
+        shell.arguments = @[@"-s", serial, @"shell"];
+        shell.standardInput = input;
+        shell.standardOutput = NSFileHandle.fileHandleWithNullDevice;
+        shell.standardError = NSFileHandle.fileHandleWithNullDevice;
+        if (![shell launchAndReturnError:nil]) return;
+        self.adbShell = shell;
+        self.adbShellInput = input.fileHandleForWriting;
+    }
 
     __weak typeof(self) weakSelf = self;
     self.scrollMonitor = [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskScrollWheel handler:^NSEvent *(NSEvent *event) {
@@ -400,6 +406,7 @@ static inline CGFloat DMScreenCornerRadius(CGFloat width) {
         return nil;
     }];
 
+    if (self.bluetoothStream) return;
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
         NSTask *sizeTask = [NSTask new];
         NSPipe *output = [NSPipe pipe];
@@ -420,13 +427,13 @@ static inline CGFloat DMScreenCornerRadius(CGFloat width) {
 }
 
 - (void)stopSwipeScrolling {
+    if (self.touchActive) [self endTrackpadTouch];
     if (self.scrollMonitor) [NSEvent removeMonitor:self.scrollMonitor];
     self.scrollMonitor = nil;
     [self.adbShellInput closeFile];
     self.adbShellInput = nil;
     [self.adbShell terminate];
     self.adbShell = nil;
-    if (self.touchActive) [self endTrackpadTouch];
     self.pendingScrollX = 0;
     self.pendingScrollY = 0;
     self.swipeScheduled = NO;
@@ -495,6 +502,14 @@ static inline CGFloat DMScreenCornerRadius(CGFloat width) {
     self.pendingScrollX = 0;
     self.pendingScrollY = 0;
     self.swipeScheduled = NO;
+    if (self.bluetoothStream) {
+        if (fabs(dx) < 0.01 && fabs(dy) < 0.01) return;
+        NSRect bounds = self.screenView.bounds;
+        [self beginTrackpadTouchAt:NSMakePoint(NSMidX(bounds), NSMidY(bounds))];
+        [self moveTrackpadTouchX:dx * 16 y:dy * 16];
+        [self endTrackpadTouch];
+        return;
+    }
     if ((fabs(dx) < 0.01 && fabs(dy) < 0.01) || !self.adbShellInput) return;
     NSInteger width = MAX(1, self.androidWidth), height = MAX(1, self.androidHeight);
     CGFloat scaleX = width / MAX(1, self.screenView.bounds.size.width);
@@ -592,10 +607,18 @@ static inline CGFloat DMScreenCornerRadius(CGFloat width) {
     label.font = [NSFont systemFontOfSize:13 weight:NSFontWeightSemibold];
     label.lineBreakMode = NSLineBreakByTruncatingTail;
     [label.widthAnchor constraintLessThanOrEqualToConstant:100].active = YES;
+    NSString *connection = NSProcessInfo.processInfo.environment[@"DROIDMIRROR_CONNECTION_LABEL"];
+    if (!connection.length) connection = self.bluetoothStream ? @"Bluetooth" : @"ADB";
+    NSTextField *connectionLabel = [NSTextField labelWithString:connection];
+    connectionLabel.font = [NSFont systemFontOfSize:11 weight:NSFontWeightMedium];
+    connectionLabel.textColor = NSColor.secondaryLabelColor;
+    connectionLabel.toolTip = [NSString stringWithFormat:@"Connected via %@", connection];
+    [connectionLabel setAccessibilityLabel:connectionLabel.toolTip];
+    [connectionLabel setContentCompressionResistancePriority:NSLayoutPriorityRequired forOrientation:NSLayoutConstraintOrientationHorizontal];
     NSButton *power = [self symbolButton:@"power" help:@"Power" action:@selector(power:)];
     _pinButtonControl = [self symbolButton:@"lock" help:@"PIN keypad" action:@selector(showPIN:)];
     NSButton *close = [self symbolButton:@"xmark.circle.fill" help:@"Close mirror" action:@selector(close:)];
-    NSStackView *stack = [NSStackView stackViewWithViews:@[label, power, _pinButtonControl, close]];
+    NSStackView *stack = [NSStackView stackViewWithViews:@[label, connectionLabel, power, _pinButtonControl, close]];
     stack.orientation = NSUserInterfaceLayoutOrientationHorizontal;
     stack.alignment = NSLayoutAttributeCenterY;
     stack.spacing = 4;
@@ -609,6 +632,28 @@ static inline CGFloat DMScreenCornerRadius(CGFloat width) {
 }
 
 - (void)runAndroidKey:(NSString *)key {
+    if (self.bluetoothStream) {
+        // SDL shortcuts use the existing scrcpy controller and BLE transport.
+        NSDictionary<NSString *, NSNumber *> *shortcuts = @{
+            @"KEYCODE_BACK": @(SDLK_B), @"KEYCODE_HOME": @(SDLK_H),
+            @"KEYCODE_APP_SWITCH": @(SDLK_S), @"KEYCODE_POWER": @(SDLK_P),
+            @"KEYCODE_VOLUME_DOWN": @(SDLK_DOWN), @"KEYCODE_VOLUME_UP": @(SDLK_UP)
+        };
+        NSNumber *shortcut = shortcuts[key];
+        if (!self.sdlWindow || !shortcut) return;
+        for (int i = 0; i < 2; ++i) {
+            SDL_Event event;
+            SDL_zero(event);
+            event.type = i == 0 ? SDL_EVENT_KEY_DOWN : SDL_EVENT_KEY_UP;
+            event.key.timestamp = SDL_GetTicksNS();
+            event.key.windowID = SDL_GetWindowID(self.sdlWindow);
+            event.key.key = shortcut.unsignedIntValue;
+            event.key.mod = SDL_KMOD_LALT;
+            event.key.down = i == 0;
+            SDL_PushEvent(&event);
+        }
+        return;
+    }
     NSString *adb = NSProcessInfo.processInfo.environment[@"ADB"] ?: @"/opt/homebrew/bin/adb";
     NSString *serial = NSProcessInfo.processInfo.environment[@"DROIDMIRROR_SERIAL"];
     if (!serial.length) return;
@@ -736,6 +781,7 @@ static inline CGFloat DMScreenCornerRadius(CGFloat width) {
 }
 
 - (void)detectPINPrompt {
+    if (self.bluetoothStream) return;
     if (self.pinPopover.shown) return;
     NSString *adb = NSProcessInfo.processInfo.environment[@"ADB"] ?: @"/opt/homebrew/bin/adb";
     NSString *serial = NSProcessInfo.processInfo.environment[@"DROIDMIRROR_SERIAL"];

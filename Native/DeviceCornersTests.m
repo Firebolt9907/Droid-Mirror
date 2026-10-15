@@ -13,7 +13,7 @@ int main(void) {
             CGFloat bottom = DMPixelCornerRadius(width, NO);
             assert(fabs(top / width - DMCornerExtentForRadius(104) / 1080.0) < 1e-12);
             assert(fabs(bottom / width - DMCornerExtentForRadius(102) / 1080.0) < 1e-12);
-            assert(fabs(DMSuperellipseCornerPoint(top, .5).x - width * 104.0 / 1080.0 * (1 - M_SQRT1_2)) < 1e-10);
+            assert(fabs(DMSuperellipseCornerPoint(top, .5).x - .92 * width * 104.0 / 1080.0 * (1 - M_SQRT1_2)) < 1e-10);
             for (NSNumber *direction in @[@NO, @YES]) {
                 BOOL flipped = direction.boolValue;
                 CGPathRef path = DMCreatePixelScreenPath(CGSizeMake(width, height), flipped);

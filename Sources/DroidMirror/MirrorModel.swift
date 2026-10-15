@@ -36,6 +36,19 @@ final class MirrorModel: ObservableObject {
     @Published var pairingAddress = ""
     @Published var pairingCode = ""
     @Published var connectAddress = ""
+    @Published var bluetoothPairingCode = ""
+
+    func pairBluetooth() {
+        guard let device = selectedDevice, device.isBluetooth, !isStarting, !isMirroring else { return }
+        let code = bluetoothPairingCode
+        Task {
+            do {
+                try await ClassicBluetoothTransport.pair(address: device.id, code: code)
+                bluetoothPairingCode = ""
+                status = "BLE paired. Ready to mirror."
+            } catch { errorMessage = error.localizedDescription }
+        }
+    }
 
     private var mirrorProcess: Process?
     private let classicBluetooth = ClassicBluetoothTransport()
@@ -259,11 +272,14 @@ final class MirrorModel: ObservableObject {
                                  "--window-borderless", "--window-width=430", "--video-buffer=0",
                                  "--no-audio", "--pause-on-exit=false"]
             if preferences.alwaysOnTop { process.arguments?.append("--always-on-top") }
-            // No serial, ADB environment, injected ADB toolbar, or shell cleanup.
+            // Share the native chrome, with controls sent through scrcpy/BLE.
             var environment = ProcessInfo.processInfo.environment
             for key in ["ADB", "ANDROID_SERIAL", "DROIDMIRROR_SERIAL", "DYLD_INSERT_LIBRARIES"] {
                 environment.removeValue(forKey: key)
             }
+            environment["DROIDMIRROR_TRANSPORT"] = "bluetooth-classic"
+            environment["DROIDMIRROR_CONNECTION_LABEL"] = "Bluetooth"
+            configureMirrorUI(environment: &environment)
             process.environment = environment
             process.standardOutput = FileHandle.nullDevice
             process.standardError = FileHandle.nullDevice
@@ -285,7 +301,7 @@ final class MirrorModel: ObservableObject {
             mirrorProcess = process
             sessionIsBluetooth = true
             isMirroring = true
-            status = "Bluetooth · 480p · up to 8 fps · 64 kbps target"
+            status = "Bluetooth · 480p · up to 16 fps · 256 kbps target"
         } catch is CancellationError {
             status = "Bluetooth connection cancelled"
         } catch {
@@ -347,12 +363,9 @@ final class MirrorModel: ObservableObject {
         environment["PATH"] = (toolDirectories + inheritedPath).joined(separator: ":")
         environment["ADB"] = adbPath
         environment["DROIDMIRROR_SERIAL"] = device.id
-        environment["DROIDMIRROR_HOST_PID"] = String(ProcessInfo.processInfo.processIdentifier)
-        environment["DROIDMIRROR_SWIPE_SCROLL"] = preferences.scrollMode == .touchSwipe ? "1" : "0"
-        if let library = Bundle.main.privateFrameworksURL?.appendingPathComponent("libDroidMirrorStyle.dylib"),
-           FileManager.default.fileExists(atPath: library.path) {
-            environment["DYLD_INSERT_LIBRARIES"] = library.path
-        }
+        environment["DROIDMIRROR_TRANSPORT"] = "adb"
+        environment["DROIDMIRROR_CONNECTION_LABEL"] = device.isWireless ? "Wi-Fi" : "USB"
+        configureMirrorUI(environment: &environment)
         process.environment = environment
         process.standardOutput = pipe
         process.standardError = pipe
@@ -661,6 +674,15 @@ final class MirrorModel: ObservableObject {
         return sessions.split(separator: "\n").contains { line in
             line.contains("playbackstate") &&
             (line.contains("state=3,") || line.contains("state=3 ") || line.hasSuffix("state=3"))
+        }
+    }
+
+    private func configureMirrorUI(environment: inout [String: String]) {
+        environment["DROIDMIRROR_HOST_PID"] = String(ProcessInfo.processInfo.processIdentifier)
+        environment["DROIDMIRROR_SWIPE_SCROLL"] = preferences.scrollMode == .touchSwipe ? "1" : "0"
+        if let library = Bundle.main.privateFrameworksURL?.appendingPathComponent("libDroidMirrorStyle.dylib"),
+           FileManager.default.fileExists(atPath: library.path) {
+            environment["DYLD_INSERT_LIBRARIES"] = library.path
         }
     }
 

@@ -7,7 +7,9 @@ Each radius is converted to an exponent-3 superellipse extent by matching the
 45-degree corner inset of Android's quarter-circle approximation:
 `extent = radius × (1 - 1/√2) / (1 - 2^(-1/3))` (approximately 1.42×radius).
 On this Pixel that gives roughly 148 pixels at the top and 145 at the bottom,
-about 12% rounder than the previous padding-based version. This conversion scales
+about 12% rounder than the previous padding-based version. The resulting extent
+is now reduced by 8% to tighten the visible silhouette, including its shadow and
+corner-resize hit areas. This conversion scales
 with each reported radius: tiny corners stay tiny and zero-radius corners stay square.
 
 At stream attachment, a background `adb -s <active serial> shell dumpsys display`

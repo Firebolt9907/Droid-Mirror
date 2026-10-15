@@ -8,6 +8,8 @@ static void hex(const uint8_t *bytes,size_t length,char *output) {
 int main(int argc,char **argv) {
     uint8_t session[32],challenge[16],plain[488]={1,0,0,0,8},packet[512],proof[32]; char output[1025];
     for(int i=0;i<32;++i) session[i]=(uint8_t)i;
+    uint8_t derived[32]; dm_ble_session_key(session,session,derived); hex(derived,32,output);
+    assert(!strcmp(output,"7b06af8f972ce57eea27ba74bbdf6d1f6114e67d71b6eb05a17459f282840200"));
     DMBleInputKeys keys; dm_ble_input_keys(session,&keys); for(int i=0;i<16;++i) challenge[i]=(uint8_t)i; dm_ble_input_proof(&keys,challenge,proof);
     hex(proof,32,output); assert(!strcmp(output,"eaa36a8dcfebabd9da451687a4e0091f469c869592241b5ea604cef6a99ccd8d"));
     assert(dm_ble_input_seal(&keys,1,plain,13,packet)); hex(packet,37,output);
@@ -26,6 +28,26 @@ int main(int argc,char **argv) {
             assert(fwrite(packet,1,size,file)==size);
         }
         fclose(file);
+    }
+    if(argc==3) {
+        FILE *file=fopen(argv[2],"rb"); assert(file);
+        DMBleInputKeys returning; dm_ble_output_keys(session,&returning);
+        uint64_t sequence=1;
+        while (true) {
+            int high=fgetc(file); if (high==EOF) break;
+            int low=fgetc(file); assert(low!=EOF);
+            size_t length=(size_t)(high*256+low); assert(length>24 && length<=sizeof(packet));
+            assert(fread(packet,1,length,file)==length);
+            uint8_t decoded[488];
+            assert(!dm_ble_input_open(&keys,sequence,packet,length,decoded));
+            assert(!dm_ble_input_open(&returning,sequence+1,packet,length,decoded));
+            packet[length-1]^=1; assert(!dm_ble_input_open(&returning,sequence,packet,length,decoded)); packet[length-1]^=1;
+            assert(dm_ble_input_open(&returning,sequence,packet,length,decoded));
+            for (size_t i=0;i<length-24;++i) assert(decoded[i]==(uint8_t)i);
+            ++sequence;
+        }
+        assert(sequence==4); fclose(file);
+        puts("Java-to-Mac return crypto: directional isolation, tamper, ordering and payloads passed");
     }
     puts("BLE input crypto: independent vector, proof and record bounds passed");
 }

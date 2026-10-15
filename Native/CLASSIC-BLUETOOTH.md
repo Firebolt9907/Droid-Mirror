@@ -8,9 +8,26 @@ the streaming path. Shizuku must be running and authorized; this is not a bypass
 of Android's ordinary app permissions. Remote mouse, keyboard and navigation input use the same Bluetooth connection;
 audio remains ADB-only.
 
+Bluetooth uses the same native rounded mirror window, floating draggable toolbar,
+manual PIN keypad, keyboard shortcuts and optional touch-style scrolling as ADB.
+Toolbar power/navigation and scroll gestures enter scrcpy's existing input path
+and travel over BLE; they do not invoke ADB. Automatic PIN-prompt detection remains
+ADB-only, so open the keypad with the toolbar's lock button when needed.
+The Mac build includes both the shared toolbar controller and the device-corner
+styling layer. The 0.7 APK also scales the full phone image through GL
+when encoder alignment changes the aspect ratio, avoiding virtual-display black
+bands at the top/bottom (or sides after rotation). Install both refreshed builds
+for the corner and padding fixes; the APK retains the existing signing certificate.
+Version 0.7 also increments the Shizuku capture-service version. The daemon is
+deliberately persistent and can survive APK replacement; keeping its old version
+would reuse old capture code even after installing the corrected APK. A new
+session now replaces that daemon automatically. The internal capture surface is
+the phone's full display size when alignment needs correction (1080×2400 on Pixel
+8), while the video sent over Bluetooth remains at the low-resolution profile.
+
 ## Install and set up once
 
-The compiled Android test APK is `outputs/DroidMirror-Bluetooth-0.6-debug.apk`,
+The compiled Android test APK is `outputs/DroidMirror-Bluetooth-0.8-debug.apk`,
 with a SHA-256 checksum beside it. It uses the same signing certificate as 0.1/0.2/0.3/0.4
 and can be installed over them. It is a debug build, not a store release.
 
@@ -154,20 +171,22 @@ brew install meson ninja pkg-config sdl3 ffmpeg libusb
 open outputs/DroidMirror.app
 ```
 
-Build and install both matching 0.6 endpoints for Classic L2CAP video and BLE input.
-Older APKs do not implement the BLE input handshake. The parser retains legacy
+Build and install both matching 0.8 endpoints. Open **Show BLE pairing code** on
+Android, then paste that private code into **Settings → Connection → Pair BLE**
+on the selected Mac once. Older endpoints cannot use the video-only protocol. The parser retains legacy
 fixtures for protocol tests; the current app requires the matching transport.
 Use the documented development-signing workflow if preserving the existing BLE
 notification helper's Keychain identity; the build script signs ad-hoc.
 
 ## Video and control events
 
-The Bluetooth profile starts with H.264 at a 64,000 bit/s target, up to 8 fps and about a
+The Bluetooth profile starts with H.264 at a 256,000 bit/s target, up to 16 fps and about a
 480-pixel short edge, aligned down to 16 pixels while preserving aspect ratio.
 The encoder uses constant bitrate without hard quantization limits, no B-frames,
 and gradual intra refresh when supported. Repeated idle frames refine settled text
-without forcing large periodic keyframes. Encoder constraints and
-fallback may reduce the actual dimensions/rate. The
+without forcing large periodic keyframes. The actual frame rate may be lower
+on a constrained link. Automatic downsizing on encoder errors is
+disabled so recovery cannot lower the configured resolution. The
 radio negotiates Classic/EDR itself; the app cannot force an EDR PHY rate.
 
 Direct Classic BR/EDR L2CAP uses fixed private PSM `0x1001`. The Mac opens it
@@ -179,41 +198,66 @@ The app's Binder death closes the listener and active socket; normal session
 shutdown closes the connection while retaining the listener for the next session.
 If the hidden API is unavailable, readiness reports the failure rather than
 falling back to RFCOMM. The Shizuku display daemon still owns capture and recovery.
-A duplex socket pair bridges the L2CAP connection to the app's existing framed
-video/control transport. A file-descriptor
+A one-way pipe bridges the app to the shell-owned L2CAP video writer. A reverse
+Classic payload closes the connection; there is no Classic input/control relay. A file-descriptor
 pipe transfers scrcpy video from the shell service to the app's Bluetooth relay.
 No screen content is saved. The matching wire format is dummy byte, 64-byte device
 name, codec ID, then scrcpy 5 session/frame packets, preserving decoder/renderer
 compatibility, rotation metadata, and protected-content restrictions.
 
-The current stream begins with `DMBT0005`, followed by records comprising a
-one-byte type, a four-byte big-endian length, and payload. Type 0 carries video
-in chunks of at most 1 KiB. Type 1 is a one-byte event: PHONE_ON (1), SESSION_ENDED
-(2), PHONE_LOCAL_USE (3), STREAM_STARTED (4), CAPTURE_FAILED (5), ALIVE (6).
-Type 2 carries scrcpy control replies. The Mac parser routes video and control
-to separate loopback sockets. Type 3 carries a fresh 32-byte session key over the
-authenticated, encrypted Classic link. Mac-to-Android records carry raw scrcpy control
-bytes (type 0) or a heartbeat carrying an eight-byte cumulative video byte count
-(type 1); these records travel exclusively over BLE GATT. Shizuku injects the controls. Acknowledgements run every 100 ms and
-limit unacknowledged video to 12 KiB so radio queues cannot grow ahead of input.
-The Android reader also recognizes the older empty heartbeat.
-Heartbeat replies use a separate worker so video backpressure cannot block the
-input reader. Malformed lengths/types/events close the connection.
+The Classic stream begins with `DMBT0006`, then type-0 records (one-byte type,
+four-byte big-endian length, video payload), with payload chunks sized to four negotiated transmit MTUs minus the five-byte
+envelope header (2683 bytes at MTU 672), bounded by the video window. Small frames
+and final tails are sent immediately. The shell relay reads up to six MTUs at a
+time without waiting to fill its buffer. The MTU is fetched once per connection
+over Binder, never per video packet. The live
+Mac receiver requires this version and rejects all other record types, including
+control, events and session keys. Legacy formats remain only for parser fixtures.
+Bluetooth's own connection signalling and link acknowledgements still run in both
+directions under OS control; the one-way rule concerns application payloads.
 
-BLE input advertises service `c356a44e-6f2b-4da9-85e5-397991b8a610` only during
-a Classic session. Characteristic `...a611` accepts write-without-response input;
-`...a612` accepts a 16-byte random Mac challenge and returns HMAC-SHA256 proof.
-The root session key is never advertised or stored. HMAC-SHA256 derives separate
-AES-256-CTR and authentication keys using the labels `DroidMirror BLE encryption v1`
-and `DroidMirror BLE authentication v1`. Proof uses the authentication key over
-`DroidMirror BLE proof v1` followed by the challenge. Each input record is an
-8-byte big-endian sequence (starting at one), ciphertext, and a 16-byte truncated
-HMAC-SHA256 over sequence+ciphertext. The CTR IV is ASCII `DMINPUT1` followed by
-the sequence. The receiver verifies the MAC before decrypting, requires contiguous
-sequences, and rejects replays. Plain input chunks are bounded by negotiated ATT
-size minus 24 bytes; queues and stalls are bounded. BLE failure ends the Classic
-session and invokes the existing lock/recovery path. No Mac application payload
-is sent over Classic L2CAP. Both transports still share radio hardware.
+BLE service `c356a44e-6f2b-4da9-85e5-397991b8a610` carries every non-video message:
+
+- `...a611`: acknowledged GATT writes for input, cumulative video ACKs and heartbeats.
+- `...a612`: a random 16-byte Mac challenge and phone HMAC proof.
+- `...a613`: encrypted control replies and status events, pulled with GATT reads
+  and fragmented to ATT size.
+- `...a614`: a public 32-byte random per-session nonce, never a pairing/session key.
+
+A private 32-byte pairing code is stored per selected bonded Mac in Android's
+app-private preferences (backup disabled), and per phone in the Mac helper's
+Keychain. It is provisioned once through the setup UI. Session keys are HMAC-SHA256
+of `DroidMirror BLE session v1` plus the nonce using this pairing key. Mac verifies
+the phone's proof before sending input. The server also requires the selected,
+bonded Mac's resolved Bluetooth address. Classic and BLE CoreBluetooth identifiers
+are different on the tested Mac, so they are not used as interchangeable identities.
+The pairing code is never exchanged over Classic, BLE advertising, or logs.
+
+Input encryption/authentication keys use the labels `DroidMirror BLE encryption v1`
+and `DroidMirror BLE authentication v1`; return keys use `DroidMirror BLE return
+encryption v1` and `DroidMirror BLE return authentication v1`. Separate directions
+have independent sequence counters, preventing reflection and IV/key reuse. The
+phone proof is HMAC of `DroidMirror BLE proof v1` plus the challenge. Each record
+contains an eight-byte big-endian sequence, AES-256-CTR ciphertext, and a 16-byte
+truncated HMAC-SHA256. The CTR IV is `DMINPUT1` plus the sequence. Authentication
+precedes decryption; missing/replayed/reordered records terminate the session.
+
+Mac-to-phone plaintext records are type 0 (raw scrcpy control) or type 1 (eight-byte
+cumulative video count; legacy empty heartbeat also recognized). Return records
+are type 1 (one-byte PHONE_ON=1, SESSION_ENDED=2, PHONE_LOCAL_USE=3, STREAM_STARTED=4,
+CAPTURE_FAILED=5, ALIVE=6) or type 2 (scrcpy control replies), with four-byte lengths.
+The Mac keeps video and control on separate local sockets. Heartbeats/ACKs run at
+250 ms with a 24 KiB video window. Unsent cumulative ACKs coalesce to the newest
+count under CoreBluetooth backpressure; input bytes retain their exact order.
+Mac BLE callbacks and GATT operations run on a dedicated serial queue, separate
+from the Classic receive loop. Return reads use a bounded worker queue and poll at 500 ms when idle, then drain
+queued records immediately. Empty reads contain no application record. A return
+packet is retired after its GATT response is submitted; missing/reordered packets
+fail authentication/sequence checks. This avoids absent notification callbacks on
+the tested macOS path. Phone heartbeat echoes run at one second, reducing BLE
+airtime. Waiting for a video ACK never holds the BLE control writer. BLE failure closes
+the Classic session and invokes the existing recovery path. Both transports share
+the same radio, so extra BLE traffic is not free bandwidth.
 
 macOS 26's legacy IOBluetooth opening shim loses its pending channel on this
 machine. The helper uses runtime-checked Classic-peer completion selectors to
@@ -228,7 +272,13 @@ bridge. The relay rejects encoded packets over 128 KiB and closes Bluetooth writ
 blocked for five seconds when peer heartbeats have also expired. Live peer input
 keeps ordinary radio backpressure from being mistaken for a dead connection.
 The Mac bounds pending video to 128 KiB with a one-second
-pending deadline. The encoder discards stale frames only with keyframe recovery, reducing bitrate when the stream falls behind. The capture pipe is capped at 4 KiB on Android 11 and newer.
+pending deadline. The encoder discards frames more than two seconds old only with keyframe recovery,
+reducing bitrate when the stream falls behind. After ten seconds of continuous
+healthy output, bitrate grows by 25% toward the configured target; idle gaps do
+not count as healthy throughput. `DroidMirrorPerformance` logs relay FPS, encoded
+kbps and time spent sending every five seconds, without saving video.
+This is a recovery threshold, not
+an end-to-end latency guarantee: transport and decoder time are additional. The capture pipe is capped at 4 KiB on Android 11 and newer.
 
 ## Panel-off and recovery
 
@@ -317,9 +367,35 @@ sleeping/locked startup before relying on unattended mirroring.
 
 ## Adaptive quality
 
-Adaptive bitrate and static-screen resolution tiers remain follow-on work. Add
-measured receive-rate/queue-delay feedback first, then adjust MediaCodec bitrate
-with fast decreases and slow increases. Fixed higher resolution with fewer static
-frames is less visually disruptive than toggling resolution after every scroll.
-If resolution tiers are used, require sustained motion/stillness, preserve the
-viewport, and send new session metadata/configuration/keyframes at each switch.
+Capture dimensions stay fixed. When an encoded frame is more than 400 ms old,
+MediaCodec bitrate decreases by 25%, at most once a second, with a floor of half
+the configured target (128 kbps for this profile). Ten seconds of continuous
+healthy output raises it by 25% toward the target. Idle gaps do not count as healthy
+throughput. Frames older than two seconds trigger safe keyframe recovery instead
+of forwarding a stale inter-frame chain. Repeated recovery also respects the
+quality floor. These bounds prevent the earlier repeated collapse to 32 kbps;
+they cannot guarantee latency when available live throughput is below the floor.
+
+## Encoder-independent Classic throughput test
+
+With the matching debug APK installed and wireless debugging or USB connected:
+
+```sh
+python3 tools/benchmark-classic.py PHONE_CLASSIC_ADDRESS
+```
+
+This explicitly starts a shell-only generated-data listener on separate PSM
+`0x1003`, accepting only the saved bonded Mac. It runs three ten-second samples:
+672-byte direct writes, 256-byte direct writes, and 672-byte producer writes through
+a persistent pipe with a 4 KiB relay buffer. There is no encoder, decoder, BLE
+application window or per-packet Binder call. The diagnostic payload is a checked
+byte sequence, never screen content. It is available only via the explicit shell
+benchmark entry point; ordinary mirrors still require video-only records on `0x1001`.
+The Mac checks the full sequence, reports actual received bytes/rate, and the script
+rejects a result unless sender and receiver byte totals agree. An interrupted
+connection is an invalid sample. The receiver duration spans first to last data,
+including queue drain, while sender timing includes any blocked writes.
+
+These measurements characterize transport capacity without concurrent BLE input;
+leave headroom for BLE, retransmissions and encoded keyframe bursts before choosing
+a video bitrate. A configured 64 kbps encoder target is not a measured radio limit.

@@ -4,127 +4,227 @@
 
 static NSString *const DMInputService=@"c356a44e-6f2b-4da9-85e5-397991b8a610";
 static NSString *const DMInputCharacteristic=@"c356a44e-6f2b-4da9-85e5-397991b8a611";
+static NSString *const DMInputReturn=@"c356a44e-6f2b-4da9-85e5-397991b8a613";
+static NSString *const DMInputKey=@"c356a44e-6f2b-4da9-85e5-397991b8a614";
 static NSString *const DMInputProof=@"c356a44e-6f2b-4da9-85e5-397991b8a612";
 @interface DMBleInputTransport () <CBCentralManagerDelegate, CBPeripheralDelegate> {
-    DMBleInputKeys _keys;
+    DMBleInputKeys _keys, _returnKeys;
 }
 @property(nonatomic, strong) CBCentralManager *manager;
 @property(nonatomic, strong) CBPeripheral *peripheral;
 @property(nonatomic, strong) CBCharacteristic *input;
+@property(nonatomic, strong) CBCharacteristic *returning;
+@property(nonatomic, strong) CBCharacteristic *proof;
+@property(nonatomic, strong) NSData *pairingKey;
+@property(nonatomic) uint64_t receiveSequence;
+@property(nonatomic) BOOL proofVerified;
+@property(nonatomic) BOOL readPending;
+@property(nonatomic) BOOL writePending;
+@property(nonatomic) NSTimeInterval nextRead;
+@property(nonatomic) BOOL heartbeatPending;
+@property(nonatomic) uint64_t latestVideoAck;
 @property(nonatomic, strong) NSData *challenge;
 @property(nonatomic, strong) NSMutableData *pending;
 @property(nonatomic, strong) NSMutableSet<NSUUID *> *rejected;
 @property(nonatomic) uint64_t sequence;
-@property(nonatomic) BOOL ready;
-@property(nonatomic) BOOL closed;
+@property(atomic) BOOL ready;
+@property(atomic) BOOL closed;
 @property(nonatomic) NSTimeInterval progress;
-@property(nonatomic, strong) NSTimer *watchdog;
+@property(nonatomic, strong) dispatch_source_t watchdog;
+@property(nonatomic, strong) dispatch_queue_t queue;
 @end
 @implementation DMBleInputTransport
-- (instancetype)initWithSessionKey:(NSData *)key {
+- (instancetype)initWithPairingKey:(NSData *)key {
     if (key.length != 32 || !(self=[super init])) return nil;
-    dm_ble_input_keys(key.bytes, &_keys); _sequence=1;
+    _pairingKey=[key copy]; _sequence=1; _receiveSequence=1;
     _pending=[NSMutableData data]; _rejected=[NSMutableSet set];
-    _manager=[[CBCentralManager alloc] initWithDelegate:self queue:dispatch_get_main_queue()];
+    _queue=dispatch_queue_create("app.droidmirror.ble-control",DISPATCH_QUEUE_SERIAL);
+    _manager=[[CBCentralManager alloc] initWithDelegate:self queue:_queue];
     __weak DMBleInputTransport *weakSelf=self;
-    _watchdog=[NSTimer scheduledTimerWithTimeInterval:0.2 repeats:YES block:^(NSTimer *timer) {
+    _watchdog=dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER,0,0,_queue);
+    dispatch_source_set_timer(_watchdog,dispatch_time(DISPATCH_TIME_NOW,200*NSEC_PER_MSEC),200*NSEC_PER_MSEC,20*NSEC_PER_MSEC);
+    dispatch_source_set_event_handler(_watchdog,^{
         DMBleInputTransport *strongSelf=weakSelf;
-        if (!strongSelf || strongSelf.closed) { [timer invalidate]; return; }
-        if (strongSelf.pending.length && NSDate.timeIntervalSinceReferenceDate-strongSelf.progress > 2.0)
-            [strongSelf.delegate bleInputFailed:@"BLE input transmission stalled."];
-    }];
+        if (!strongSelf || strongSelf.closed) return;
+        if (strongSelf.ready && !strongSelf.readPending && NSDate.timeIntervalSinceReferenceDate >= strongSelf.nextRead)
+            [strongSelf readReturn];
+        if ((strongSelf.pending.length || strongSelf.heartbeatPending || strongSelf.writePending) && NSDate.timeIntervalSinceReferenceDate-strongSelf.progress > 2.0)
+            [strongSelf reportFailure:@"BLE input transmission stalled."];
+    });
+    dispatch_resume(_watchdog);
     return self;
 }
 - (void)scan {
-    if (!_closed && _manager.state == CBManagerStatePoweredOn)
+    if (!self.closed && _manager.state == CBManagerStatePoweredOn)
         [_manager scanForPeripheralsWithServices:@[[CBUUID UUIDWithString:DMInputService]] options:nil];
 }
 - (void)centralManagerDidUpdateState:(CBCentralManager *)central {
-    if (_closed) return;
+    if (self.closed) return;
     if (central.state == CBManagerStatePoweredOn) [self scan];
     else if (central.state != CBManagerStateUnknown && central.state != CBManagerStateResetting)
-        [_delegate bleInputFailed:@"BLE input unavailable. Enable Bluetooth and allow DroidMirror Bluetooth access."];
+        [self reportFailure:@"BLE input unavailable. Enable Bluetooth and allow DroidMirror Bluetooth access."];
 }
 - (void)centralManager:(CBCentralManager *)central didDiscoverPeripheral:(CBPeripheral *)peripheral
         advertisementData:(NSDictionary *)advertisement RSSI:(NSNumber *)rssi {
-    if (_closed || _peripheral || [_rejected containsObject:peripheral.identifier]) return;
+    if (self.closed || _peripheral || [_rejected containsObject:peripheral.identifier]) return;
     _peripheral=peripheral; peripheral.delegate=self;
     [central stopScan]; [central connectPeripheral:peripheral options:nil];
 }
 - (void)centralManager:(CBCentralManager *)central didConnectPeripheral:(CBPeripheral *)peripheral {
-    if (!_closed) [peripheral discoverServices:@[[CBUUID UUIDWithString:DMInputService]]];
+    if (!self.closed) [peripheral discoverServices:@[[CBUUID UUIDWithString:DMInputService]]];
 }
 - (void)reject {
     if (_peripheral) { [_rejected addObject:_peripheral.identifier]; [_manager cancelPeripheralConnection:_peripheral]; }
 }
 - (void)centralManager:(CBCentralManager *)central didFailToConnectPeripheral:(CBPeripheral *)peripheral error:(NSError *)error {
-    if (_closed) return;
-    [_rejected addObject:peripheral.identifier]; _peripheral=nil; _input=nil; [self scan];
+    if (self.closed) return;
+    [_rejected addObject:peripheral.identifier]; _peripheral=nil; _input=nil; _proof=nil; _returning=nil; _proofVerified=NO; [self scan];
 }
 - (void)centralManager:(CBCentralManager *)central didDisconnectPeripheral:(CBPeripheral *)peripheral error:(NSError *)error {
-    if (_closed) return;
-    if (_ready) { [_delegate bleInputFailed:@"BLE input disconnected; ending the mirror session."]; return; }
-    _peripheral=nil; _input=nil; [self scan];
+    if (self.closed) return;
+    if (self.ready) { [self reportFailure:@"BLE input disconnected; ending the mirror session."]; return; }
+    _peripheral=nil; _input=nil; _proof=nil; _returning=nil; _proofVerified=NO; [self scan];
 }
 - (void)peripheral:(CBPeripheral *)peripheral didDiscoverServices:(NSError *)error {
-    if (_closed) return;
+    if (self.closed) return;
     if (error || !peripheral.services.count) { [self reject]; return; }
     for (CBService *service in peripheral.services)
-        [peripheral discoverCharacteristics:@[[CBUUID UUIDWithString:DMInputCharacteristic],[CBUUID UUIDWithString:DMInputProof]] forService:service];
+        [peripheral discoverCharacteristics:@[[CBUUID UUIDWithString:DMInputCharacteristic],[CBUUID UUIDWithString:DMInputProof],
+            [CBUUID UUIDWithString:DMInputReturn],[CBUUID UUIDWithString:DMInputKey]] forService:service];
 }
 - (void)peripheral:(CBPeripheral *)peripheral didDiscoverCharacteristicsForService:(CBService *)service error:(NSError *)error {
-    if (_closed) return;
-    CBCharacteristic *proof=nil;
+    if (self.closed) return;
+    CBCharacteristic *key=nil;
     for (CBCharacteristic *characteristic in service.characteristics) {
         if ([characteristic.UUID isEqual:[CBUUID UUIDWithString:DMInputCharacteristic]]) _input=characteristic;
-        if ([characteristic.UUID isEqual:[CBUUID UUIDWithString:DMInputProof]]) proof=characteristic;
+        if ([characteristic.UUID isEqual:[CBUUID UUIDWithString:DMInputProof]]) _proof=characteristic;
+        if ([characteristic.UUID isEqual:[CBUUID UUIDWithString:DMInputReturn]]) _returning=characteristic;
+        if ([characteristic.UUID isEqual:[CBUUID UUIDWithString:DMInputKey]]) key=characteristic;
     }
-    if (error || !proof || !(proof.properties & CBCharacteristicPropertyRead) || !(proof.properties & CBCharacteristicPropertyWrite) || !(_input.properties & CBCharacteristicPropertyWriteWithoutResponse)) { [self reject]; return; }
-    NSMutableData *challenge=[NSMutableData dataWithLength:16];arc4random_buf(challenge.mutableBytes,16);_challenge=challenge;
-    [peripheral writeValue:challenge forCharacteristic:proof type:CBCharacteristicWriteWithResponse];
+    if (error || !key || !(_returning.properties & CBCharacteristicPropertyRead)
+            || !(_proof.properties & CBCharacteristicPropertyRead) || !(_proof.properties & CBCharacteristicPropertyWrite)
+            || !(_input.properties & CBCharacteristicPropertyWrite)) { [self reject]; return; }
+    // The public nonce derives session keys from the one-time, privately paired root.
+    // Proof authenticates the chosen phone before any input is sent.
+    [peripheral readValueForCharacteristic:key];
 }
 - (void)peripheral:(CBPeripheral *)peripheral didWriteValueForCharacteristic:(CBCharacteristic *)characteristic error:(NSError *)error {
-    if (_closed || ![characteristic.UUID isEqual:[CBUUID UUIDWithString:DMInputProof]]) return;
+    if (self.closed) return;
+    if ([characteristic.UUID isEqual:[CBUUID UUIDWithString:DMInputCharacteristic]]) {
+        _writePending=NO;
+        if (error) { [self reportFailure:@"BLE input write failed."]; return; }
+        _progress=NSDate.timeIntervalSinceReferenceDate; [self drain]; return;
+    }
+    if (![characteristic.UUID isEqual:[CBUUID UUIDWithString:DMInputProof]]) return;
     if (error) { [self reject]; return; }
     [peripheral readValueForCharacteristic:characteristic];
 }
+- (void)readReturn {
+    if (self.closed || !self.ready || _readPending) return;
+    _readPending=YES; [_peripheral readValueForCharacteristic:_returning];
+}
 - (void)peripheral:(CBPeripheral *)peripheral didUpdateValueForCharacteristic:(CBCharacteristic *)characteristic error:(NSError *)error {
-    if (_closed || _ready || ![characteristic.UUID isEqual:[CBUUID UUIDWithString:DMInputProof]]) return;
-    if (_challenge.length != 16) { [self reject]; return; }
-    uint8_t expected[32], difference=0; dm_ble_input_proof(&_keys, _challenge.bytes, expected);
+    if (self.closed) return;
+    if (getenv("DROIDMIRROR_BLE_DEBUG")) fprintf(stderr,"BLE RX %s bytes=%lu ready=%d error=%ld\n",characteristic.UUID.UUIDString.UTF8String,(unsigned long)characteristic.value.length,self.ready,(long)error.code);
+    if (self.ready && [characteristic.UUID isEqual:[CBUUID UUIDWithString:DMInputReturn]]) {
+        _readPending=NO;
+        NSData *packet=characteristic.value;
+        if (!error && !packet.length) { _nextRead=NSDate.timeIntervalSinceReferenceDate+0.5; return; }
+        uint8_t plain[488];
+        if (error || !dm_ble_input_open(&_returnKeys,_receiveSequence,packet.bytes,packet.length,plain)) {
+            [self reportFailure:@"Invalid BLE return record."]; return;
+        }
+        ++_receiveSequence;
+        [self deliver:[NSData dataWithBytes:plain length:packet.length-24]];
+        _nextRead=0; [self readReturn];
+        return;
+    }
+    if (self.ready) return;
+    if ([characteristic.UUID isEqual:[CBUUID UUIDWithString:DMInputKey]]) {
+        if (error || characteristic.value.length != 32) { [self reject]; return; }
+        uint8_t session[32]; dm_ble_session_key(_pairingKey.bytes,characteristic.value.bytes,session);
+        dm_ble_input_keys(session,&_keys); dm_ble_output_keys(session,&_returnKeys); memset(session,0,sizeof(session));
+        NSMutableData *challenge=[NSMutableData dataWithLength:16]; arc4random_buf(challenge.mutableBytes,16); _challenge=challenge;
+        [peripheral writeValue:challenge forCharacteristic:_proof type:CBCharacteristicWriteWithResponse];
+        return;
+    }
+    if (![characteristic.UUID isEqual:[CBUUID UUIDWithString:DMInputProof]] || _challenge.length != 16) { [self reject]; return; }
+    uint8_t expected[32], difference=0; dm_ble_input_proof(&_keys,_challenge.bytes,expected);
     if (error || characteristic.value.length != sizeof(expected)) { [self reject]; return; }
     const uint8_t *actual=characteristic.value.bytes;
-    for(NSUInteger i=0;i<sizeof(expected);++i) difference |= expected[i]^actual[i];
+    for (NSUInteger i=0;i<sizeof(expected);++i) difference |= expected[i]^actual[i];
     if (difference) { [self reject]; return; }
-    if ([peripheral maximumWriteValueLengthForType:CBCharacteristicWriteWithoutResponse] <= 24) {
-        [_delegate bleInputFailed:@"BLE input MTU is too small for authenticated commands."]; return;
+    if ([peripheral maximumWriteValueLengthForType:CBCharacteristicWriteWithResponse] <= 24) {
+        [self reportFailure:@"BLE input MTU is too small for authenticated commands."]; return;
     }
-    _ready=YES; [_delegate bleInputReady]; [self drain];
+    _proofVerified=YES; self.ready=YES; _nextRead=NSDate.timeIntervalSinceReferenceDate+0.5;
+    [self reportReady]; [self drain];
+}
+- (void)reportReady {
+    id<DMBleInputDelegate> delegate=self.delegate;
+    dispatch_async(dispatch_get_main_queue(),^{ [delegate bleInputReady]; });
+}
+- (void)reportFailure:(NSString *)reason {
+    id<DMBleInputDelegate> delegate=self.delegate;
+    dispatch_async(dispatch_get_main_queue(),^{ [delegate bleInputFailed:reason]; });
+}
+- (void)deliver:(NSData *)bytes {
+    id<DMBleInputDelegate> delegate=self.delegate;
+    dispatch_async(dispatch_get_main_queue(),^{
+        if (![delegate bleInputReceived:bytes]) [delegate bleInputFailed:@"Invalid BLE control or event stream."];
+    });
 }
 - (BOOL)send:(NSData *)bytes {
-    if (_closed || !_ready || bytes.length > 128*1024-_pending.length) return NO;
-    if (!_pending.length) _progress=NSDate.timeIntervalSinceReferenceDate;
-    [_pending appendData:bytes]; [self drain]; return YES;
+    if (self.closed || !self.ready || bytes.length > 128*1024) return NO;
+    NSData *copy=[bytes copy];
+    dispatch_async(_queue,^{
+        if (self.closed) return;
+        if (copy.length > 128*1024-self.pending.length) { [self reportFailure:@"BLE input backlog exceeded"]; return; }
+        if (!self.pending.length && !self.heartbeatPending && !self.writePending) self.progress=NSDate.timeIntervalSinceReferenceDate;
+        [self.pending appendData:copy]; [self drain];
+    });
+    return YES;
+}
+- (BOOL)acknowledgeVideo:(uint64_t)count {
+    if (self.closed || !self.ready) return NO;
+    dispatch_async(_queue,^{
+        if (self.closed) return;
+        if (!self.pending.length && !self.heartbeatPending && !self.writePending) self.progress=NSDate.timeIntervalSinceReferenceDate;
+        self.latestVideoAck=count; self.heartbeatPending=YES; [self drain];
+    });
+    return YES;
 }
 - (void)drain {
-    while (!_closed && _ready && _pending.length && _peripheral.canSendWriteWithoutResponse) {
-        NSUInteger mtu=MIN((NSUInteger)512,[_peripheral maximumWriteValueLengthForType:CBCharacteristicWriteWithoutResponse]);
+    if (!self.closed && self.ready && !_writePending && (_pending.length || _heartbeatPending)) {
+        // Never queue obsolete cumulative ACKs while CoreBluetooth is backpressured.
+        // Input records keep their original order and are never coalesced.
+        if (!_pending.length && _heartbeatPending) {
+            const uint8_t header[]={1,0,0,0,8}; uint64_t count=CFSwapInt64HostToBig(_latestVideoAck);
+            [_pending appendBytes:header length:5]; [_pending appendBytes:&count length:8]; _heartbeatPending=NO;
+        }
+        NSUInteger mtu=MIN((NSUInteger)512,[_peripheral maximumWriteValueLengthForType:CBCharacteristicWriteWithResponse]);
         NSUInteger count=MIN(_pending.length,mtu-24);
         NSMutableData *packet=[NSMutableData dataWithLength:count+24];
         if (!dm_ble_input_seal(&_keys,_sequence,_pending.bytes,count,packet.mutableBytes)) {
-            [_delegate bleInputFailed:@"BLE input encryption failed."]; return;
+            [self reportFailure:@"BLE input encryption failed."]; return;
         }
         ++_sequence; [_pending replaceBytesInRange:NSMakeRange(0,count) withBytes:NULL length:0];
-        [_peripheral writeValue:packet forCharacteristic:_input type:CBCharacteristicWriteWithoutResponse];
+        _writePending=YES;
+        [_peripheral writeValue:packet forCharacteristic:_input type:CBCharacteristicWriteWithResponse];
         _progress=NSDate.timeIntervalSinceReferenceDate;
     }
 }
 - (void)peripheralIsReadyToSendWriteWithoutResponse:(CBPeripheral *)peripheral { [self drain]; }
 - (void)close {
-    if (_closed) return; _closed=YES; _ready=NO;
-    [_watchdog invalidate]; _watchdog=nil;
-    [_manager stopScan]; if (_peripheral) [_manager cancelPeripheralConnection:_peripheral];
-    _manager.delegate=nil; _peripheral.delegate=nil; [_pending setLength:0];
-    memset(&_keys,0,sizeof(_keys));
+    @synchronized (self) {
+        if (self.closed) return;
+        self.closed=YES; self.ready=NO;
+    }
+    dispatch_async(_queue,^{
+        if (self.watchdog) { dispatch_source_cancel(self.watchdog); self.watchdog=nil; }
+        [self.manager stopScan]; if (self.peripheral) [self.manager cancelPeripheralConnection:self.peripheral];
+        self.manager.delegate=nil; self.peripheral.delegate=nil; [self.pending setLength:0];
+        self.pairingKey=nil; memset(&self->_keys,0,sizeof(self->_keys)); memset(&self->_returnKeys,0,sizeof(self->_returnKeys));
+    });
 }
 @end

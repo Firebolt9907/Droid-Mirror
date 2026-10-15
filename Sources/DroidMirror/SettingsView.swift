@@ -15,6 +15,13 @@ struct SettingsView: View {
                         ForEach(model.devices) { Text($0.displayName).tag(Optional($0.id)) }
                     }.disabled(model.isMirroring || model.isStarting)
                     HStack {
+                        SecureField("BLE pairing code from Android", text: $model.bluetoothPairingCode)
+                        Button("Pair BLE") { model.pairBluetooth() }
+                            .disabled(model.selectedDevice == nil || model.bluetoothPairingCode.isEmpty)
+                    }.disabled(model.isMirroring || model.isStarting)
+                    Text("Once per phone: open Show BLE pairing code in the Android companion and paste the code here. Classic carries video; BLE carries all other communication.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    HStack {
                         Button("Refresh") { model.refreshDevices() }.disabled(model.isStarting || model.isMirroring)
                         Button(model.isMirroring || model.isStarting ? "Stop" : "Mirror") {
                             if model.isMirroring || model.isStarting { model.stop() } else { model.start() }
@@ -29,7 +36,7 @@ struct SettingsView: View {
                     Text("Experimental direct connection. Mirroring is unavailable in this build.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
-                Text("Bluetooth uses the Android companion at 480p, up to 8 fps, and 64 kbps target H.264. Authorize Shizuku and enable Mac connections once on Android; future streams start from the Mac. Mouse, keyboard and navigation use Bluetooth. Audio requires ADB. For screen-off, enable Shizuku recovery in the Android companion.")
+                Text("Bluetooth uses the Android companion at 480p, up to 16 fps, and 256 kbps target H.264. Authorize Shizuku and enable Mac connections once on Android; future streams start from the Mac. Mouse, keyboard and navigation use Bluetooth. Audio requires ADB. For screen-off, enable Shizuku recovery in the Android companion.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section("iPhone-like behavior") {

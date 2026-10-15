@@ -52,6 +52,14 @@ final class ClassicBluetoothTransport {
 
     struct Ports { let video: UInt16; let control: UInt16 }
 
+    static func pair(address: String, code: String) async throws {
+        guard let key = Data(base64Encoded: code.trimmingCharacters(in: .whitespacesAndNewlines)), key.count == 32 else {
+            throw RunnerError.failed("Paste the full BLE pairing code shown in the Android companion.")
+        }
+        guard let helper = helperPath else { throw RunnerError.failed("Bluetooth helper missing. Rebuild DroidMirror.") }
+        _ = try await ProcessRunner.output(helper, ["--pair", address], timeout: 60, input: key)
+    }
+
     func connect(address: String) async throws -> Ports {
         stop()
         guard let helper = Self.helperPath else { throw RunnerError.failed("Bluetooth helper missing. Rebuild DroidMirror with build-app.sh.") }

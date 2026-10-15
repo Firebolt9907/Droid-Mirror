@@ -13,6 +13,8 @@ final class ClassicL2capClient implements AutoCloseable {
     private final Shizuku.UserServiceArgs args;
     private volatile IClassicL2cap remote;
     private volatile boolean closed;
+    private volatile int transmitMtu;
+    int transmitMtu() { return transmitMtu; }
     private final ServiceConnection connection = new ServiceConnection() {
         @Override public void onServiceConnected(ComponentName name, IBinder binder) {
             remote = IClassicL2cap.Stub.asInterface(binder); ready.complete(remote);
@@ -25,7 +27,7 @@ final class ClassicL2capClient implements AutoCloseable {
     };
     ClassicL2capClient(Context context) {
         args = new Shizuku.UserServiceArgs(new ComponentName(context.getPackageName(), ClassicL2capService.class.getName()))
-            .daemon(true).processNameSuffix("classic_l2cap").debuggable(false).version(2);
+            .daemon(true).processNameSuffix("classic_l2cap").debuggable(false).version(4);
         Shizuku.bindUserService(args, connection);
     }
     void listen(String peer) throws Exception {
@@ -37,6 +39,7 @@ final class ClassicL2capClient implements AutoCloseable {
         if (closed || service == null) throw new IOException("Classic L2CAP service unavailable");
         ParcelFileDescriptor result = service.accept(owner);
         if (result == null) throw new IOException(service.getLastError());
+        transmitMtu = service.getTransmitMtu(owner);
         return result;
     }
     void disconnect() {

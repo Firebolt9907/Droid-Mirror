@@ -10,109 +10,109 @@
 		<dict>
 			<key>cdhash</key>
 			<data>
-			KFxyD29WbnH5dqC3Upd2Pjab4rU=
+			I7qicUNQgY3kIUk5IuHKvRLLZ0Y=
 			</data>
 			<key>requirement</key>
-			<string>cdhash H"285c720f6f566e71f976a0b75297763e369be2b5"</string>
+			<string>identifier libDroidMirrorBLE and anchor apple generic and certificate leaf[subject.CN] = "Apple Development: rishushar99@gmail.com (ZPFJS288H9)" and certificate 1[field.1.2.840.113635.100.6.2.1] /* exists */</string>
 		</dict>
 		<key>Frameworks/libDroidMirrorHostShim.dylib</key>
 		<dict>
 			<key>cdhash</key>
 			<data>
-			VgSA/NsUJrnX3uuVFMQae/37IYk=
+			N6fhKo+Rb6JxL8eEg38Ong/8G3w=
 			</data>
 			<key>requirement</key>
-			<string>cdhash H"560480fcdb1426b9d7deeb9514c41a7bfdfb2189"</string>
+			<string>identifier libDroidMirrorHostShim and anchor apple generic and certificate leaf[subject.CN] = "Apple Development: rishushar99@gmail.com (ZPFJS288H9)" and certificate 1[field.1.2.840.113635.100.6.2.1] /* exists */</string>
 		</dict>
 		<key>Frameworks/libDroidMirrorStyle.dylib</key>
 		<dict>
 			<key>cdhash</key>
 			<data>
-			gJmbxKbMrVBpMQoKxosa9+l/AXQ=
+			i9Lq39xhCcgVc7vBXXKIkFvBmfw=
 			</data>
 			<key>requirement</key>
-			<string>cdhash H"80999bc4a6ccad5069310a0ac68b1af7e97f0174"</string>
+			<string>identifier libDroidMirrorStyle and anchor apple generic and certificate leaf[subject.CN] = "Apple Development: rishushar99@gmail.com (ZPFJS288H9)" and certificate 1[field.1.2.840.113635.100.6.2.1] /* exists */</string>
 		</dict>
 		<key>Frameworks/libDroidMirrorStyleOriginal.dylib</key>
 		<dict>
 			<key>cdhash</key>
 			<data>
-			n6LNI41ZoEIiJBKfmMh/EdtKkGI=
+			rPRbE5y0BDdiJ9apXEddUwFxCJo=
 			</data>
 			<key>requirement</key>
-			<string>cdhash H"9fa2cd238d59a0422224129f98c87f11db4a9062"</string>
+			<string>identifier libDroidMirrorStyleOriginal and anchor apple generic and certificate leaf[subject.CN] = "Apple Development: rishushar99@gmail.com (ZPFJS288H9)" and certificate 1[field.1.2.840.113635.100.6.2.1] /* exists */</string>
 		</dict>
 		<key>Helpers/DroidMirror Notifications.app</key>
 		<dict>
 			<key>cdhash</key>
 			<data>
-			/nQwbnhNh3y1vMQ5eQqM0DnwQ+c=
+			ImnOHYRM9KldGytf/kJJ9YsOPs8=
 			</data>
 			<key>requirement</key>
-			<string>cdhash H"fe74306e784d877cb5bcc439790a8cd039f043e7"</string>
+			<string>identifier "app.droidmirror.notifications" and anchor apple generic and certificate leaf[subject.CN] = "Apple Development: rishushar99@gmail.com (ZPFJS288H9)" and certificate 1[field.1.2.840.113635.100.6.2.1] /* exists */</string>
 		</dict>
 		<key>Helpers/DroidMirrorBluetooth</key>
 		<dict>
 			<key>cdhash</key>
 			<data>
-			ajXKlLmD+Wztt+UzJXfjPC92Oks=
+			lTkMVS56hnPcmgOV4l8qrEhcF2U=
 			</data>
 			<key>requirement</key>
-			<string>cdhash H"6a35ca94b983f96cedb7e5332577e33c2f763a4b"</string>
+			<string>identifier DroidMirrorBluetooth and anchor apple generic and certificate leaf[subject.CN] = "Apple Development: rishushar99@gmail.com (ZPFJS288H9)" and certificate 1[field.1.2.840.113635.100.6.2.1] /* exists */</string>
 		</dict>
 		<key>Helpers/DroidMirrorWiFiAware</key>
 		<dict>
 			<key>cdhash</key>
 			<data>
-			QI486uFSuQTUG1AzVxLv0oTUaFc=
+			IH1bZeSs0tkOA4ALp0u7BzFw3VU=
 			</data>
 			<key>requirement</key>
-			<string>cdhash H"408e3ceae152b904d41b50335712efd284d46857"</string>
+			<string>identifier DroidMirrorWiFiAware and anchor apple generic and certificate leaf[subject.CN] = "Apple Development: rishushar99@gmail.com (ZPFJS288H9)" and certificate 1[field.1.2.840.113635.100.6.2.1] /* exists */</string>
 		</dict>
 		<key>Helpers/disconnected.png</key>
 		<dict>
 			<key>cdhash</key>
 			<data>
-			XK4L271v9dgh8CvyN/VgIAtw6wo=
+			Ok1Xpv15oc2dBLcVadTAj+PBDBM=
 			</data>
 			<key>requirement</key>
-			<string>cdhash H"5cae0bdbbd6ff5d821f02bf237f560200b70eb0a"</string>
+			<string>identifier disconnected and anchor apple generic and certificate leaf[subject.CN] = "Apple Development: rishushar99@gmail.com (ZPFJS288H9)" and certificate 1[field.1.2.840.113635.100.6.2.1] /* exists */</string>
 		</dict>
 		<key>Helpers/scrcpy</key>
 		<dict>
 			<key>cdhash</key>
 			<data>
-			+DvBgZCFMLuoNlvl4eelxsJpjUs=
+			nzsZNDuaBb5R/mcozKo10/LzfHo=
 			</data>
 			<key>requirement</key>
-			<string>cdhash H"f83bc181908530bba8365be5e1e7a5c6c2698d4b"</string>
+			<string>identifier scrcpy and anchor apple generic and certificate leaf[subject.CN] = "Apple Development: rishushar99@gmail.com (ZPFJS288H9)" and certificate 1[field.1.2.840.113635.100.6.2.1] /* exists */</string>
 		</dict>
 		<key>Helpers/scrcpy-server</key>
 		<dict>
 			<key>cdhash</key>
 			<data>
-			yI8PRCxQGQncldCeGPA3Kp/UnKc=
+			Q2wC13bndxOoORIMnfzG/soIuOc=
 			</data>
 			<key>requirement</key>
-			<string>cdhash H"c88f0f442c501909dc95d09e18f0372a9fd49ca7"</string>
+			<string>identifier "scrcpy-server" and anchor apple generic and certificate leaf[subject.CN] = "Apple Development: rishushar99@gmail.com (ZPFJS288H9)" and certificate 1[field.1.2.840.113635.100.6.2.1] /* exists */</string>
 		</dict>
 		<key>Helpers/scrcpy.png</key>
 		<dict>
 			<key>cdhash</key>
 			<data>
-			c1jksjl81v6nTjz5p6gYJrGo0Ho=
+			Fi3cpH8DjinDjTIRhDMGUewqAp4=
 			</data>
 			<key>requirement</key>
-			<string>cdhash H"7358e4b2397cd6fea74e3cf9a7a81826b1a8d07a"</string>
+			<string>identifier scrcpy and anchor apple generic and certificate leaf[subject.CN] = "Apple Development: rishushar99@gmail.com (ZPFJS288H9)" and certificate 1[field.1.2.840.113635.100.6.2.1] /* exists */</string>
 		</dict>
 		<key>MacOS/DroidMirrorHost</key>
 		<dict>
 			<key>cdhash</key>
 			<data>
-			gDNT8fiLlfw5gpYVbMBwDf97jus=
+			c9phmUJggUCBCY2ICOC+R22pJ/0=
 			</data>
 			<key>requirement</key>
-			<string>cdhash H"803353f1f88b95fc398296156cc0700dff7b8eeb"</string>
+			<string>identifier DroidMirrorHost and anchor apple generic and certificate leaf[subject.CN] = "Apple Development: rishushar99@gmail.com (ZPFJS288H9)" and certificate 1[field.1.2.840.113635.100.6.2.1] /* exists */</string>
 		</dict>
 	</dict>
 	<key>rules</key>

@@ -24,6 +24,18 @@ final class DroidMirrorAppDelegate: NSObject, NSApplicationDelegate {
         DispatchQueue.main.async { NSApp.terminate(nil) }
     }
 
+    @objc private func showSettings(_ sender: Any?) {
+        SettingsWindowController.shared.show(model: MirrorModel.shared)
+    }
+
+    @objc private func pairBluetooth(_ sender: Any?) {
+        let model = MirrorModel.shared
+        if !model.isMirroring && !model.isStarting {
+            model.preferences.transport = .bluetoothClassic
+        }
+        SettingsWindowController.shared.show(model: model)
+    }
+
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         SettingsWindowController.shared.show(model: MirrorModel.shared)
         return true
@@ -43,6 +55,13 @@ final class DroidMirrorAppDelegate: NSObject, NSApplicationDelegate {
         let mainMenu = NSMenu()
         let appItem = NSMenuItem()
         let appMenu = NSMenu()
+        let settingsItem = NSMenuItem(title: "Settings…", action: #selector(showSettings(_:)), keyEquivalent: ",")
+        settingsItem.target = self
+        appMenu.addItem(settingsItem)
+        let pairingItem = NSMenuItem(title: "Pair Bluetooth…", action: #selector(pairBluetooth(_:)), keyEquivalent: "")
+        pairingItem.target = self
+        appMenu.addItem(pairingItem)
+        appMenu.addItem(.separator())
         let quitItem = NSMenuItem(
             title: "Quit DroidMirror",
             action: #selector(NSApplication.terminate(_:)),
@@ -53,6 +72,21 @@ final class DroidMirrorAppDelegate: NSObject, NSApplicationDelegate {
         appMenu.addItem(quitItem)
         appItem.submenu = appMenu
         mainMenu.addItem(appItem)
+
+        // Text fields, including the BLE pairing code, need responder-chain editing
+        // commands because this app owns its AppKit menu instead of a SwiftUI scene.
+        let editItem = NSMenuItem()
+        let editMenu = NSMenu(title: "Edit")
+        for (title, action, key) in [
+            ("Cut", #selector(NSText.cut(_:)), "x"),
+            ("Copy", #selector(NSText.copy(_:)), "c"),
+            ("Paste", #selector(NSText.paste(_:)), "v"),
+            ("Select All", #selector(NSText.selectAll(_:)), "a")
+        ] {
+            editMenu.addItem(NSMenuItem(title: title, action: action, keyEquivalent: key))
+        }
+        editItem.submenu = editMenu
+        mainMenu.addItem(editItem)
         NSApp.mainMenu = mainMenu
     }
 }

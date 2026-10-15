@@ -29,7 +29,7 @@ public final class CaptureActivity extends Activity {
         super.onCreate(state);
         LinearLayout layout = new LinearLayout(this); layout.setOrientation(LinearLayout.VERTICAL); layout.setPadding(32, 48, 32, 32);
         status = new TextView(this);
-        status.setText("Set up once: pair your Mac, authorize Shizuku, select the Mac and enable connections. Then press Mirror on your Mac whenever needed. There is no Android screen-share prompt.\n\n480p · up to 8 fps · H.264 64 kbps target. Mouse, keyboard and navigation work over Bluetooth. Audio requires ADB mode. Protected content stays protected.");
+        status.setText("Set up once: pair your Mac, authorize Shizuku, select the Mac and enable connections. Then press Mirror on your Mac whenever needed. There is no Android screen-share prompt.\n\n480p · up to 16 fps · H.264 256 kbps target. Mouse, keyboard and navigation work over Bluetooth. Audio requires ADB mode. Protected content stays protected.");
         layout.addView(status);
         Button authorize = new Button(this); authorize.setText("Authorize Shizuku");
         authorize.setOnClickListener(v -> {
@@ -41,6 +41,18 @@ public final class CaptureActivity extends Activity {
         }); layout.addView(authorize);
         picker = new Spinner(this); layout.addView(picker);
         Button refresh = new Button(this); refresh.setText("Refresh paired Macs"); refresh.setOnClickListener(v -> refresh()); layout.addView(refresh);
+        Button pairing = new Button(this); pairing.setText("Show BLE pairing code");
+        pairing.setOnClickListener(v -> {
+            if (peers.isEmpty()) { status.setText("Select a paired Mac first."); return; }
+            try {
+                String peer = peers.get(picker.getSelectedItemPosition()).getAddress();
+                String code = android.util.Base64.encodeToString(BlePairing.key(this, peer), android.util.Base64.NO_WRAP);
+                TextView text = new TextView(this); text.setText(code); text.setTextIsSelectable(true); text.setPadding(32, 24, 32, 24);
+                new android.app.AlertDialog.Builder(this).setTitle("Pair BLE with this Mac").setView(text)
+                    .setMessage("Paste this code into DroidMirror Settings on the selected Mac. Keep it private; setup is needed only once.")
+                    .setPositiveButton("Done", null).show();
+            } catch (Exception error) { status.setText("Could not load pairing code: " + error.getMessage()); }
+        }); layout.addView(pairing);
         screenOff = new CheckBox(this); screenOff.setText("Turn phone panel off with Shizuku recovery");
         screenOff.setChecked(getSharedPreferences("ready", MODE_PRIVATE).getBoolean("panelOff", true)); layout.addView(screenOff);
         Button enable = new Button(this); enable.setText("Enable Mac connections");

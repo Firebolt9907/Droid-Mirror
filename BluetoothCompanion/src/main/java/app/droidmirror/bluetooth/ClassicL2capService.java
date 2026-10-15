@@ -8,7 +8,7 @@ import android.os.ParcelFileDescriptor;
 import java.io.*;
 import java.lang.reflect.InvocationTargetException;
 
-/** Shell-owned authenticated Classic L2CAP socket; app receives only a duplex pipe. */
+/** Shell-owned authenticated Classic L2CAP socket; app receives a video-only write pipe. */
 @SuppressLint({"PrivateApi", "BlockedPrivateApi", "SoonBlockedPrivateApi", "DiscouragedPrivateApi"})
 public final class ClassicL2capService extends IClassicL2cap.Stub {
     static final int PSM = 0x1001;
@@ -77,11 +77,10 @@ public final class ClassicL2capService extends IClassicL2cap.Stub {
                     if (!peer.equals(device.getAddress()) || device.getBondState() != BluetoothDevice.BOND_BONDED) {
                         candidate.close(); continue;
                     }
-                    ParcelFileDescriptor[] pair = ParcelFileDescriptor.createSocketPair();
+                    ParcelFileDescriptor[] pair = ParcelFileDescriptor.createPipe();
                     connection = candidate; relay = pair[0];
                     InputStream localInput = new ParcelFileDescriptor.AutoCloseInputStream(ParcelFileDescriptor.dup(relay.getFileDescriptor()));
-                    OutputStream localOutput = new ParcelFileDescriptor.AutoCloseOutputStream(ParcelFileDescriptor.dup(relay.getFileDescriptor()));
-                    pump(candidate, candidate.getInputStream(), localOutput, "L2capToApp");
+                    rejectIncoming(candidate);
                     pump(candidate, localInput, candidate.getOutputStream(), "AppToL2cap");
                     android.util.Log.i("DroidMirrorL2cap", "Classic L2CAP connected; TX MTU=" + candidate.getMaxTransmitPacketSize()
                         + ", RX MTU=" + candidate.getMaxReceivePacketSize());
@@ -97,10 +96,26 @@ public final class ClassicL2capService extends IClassicL2cap.Stub {
         } finally { android.os.Binder.restoreCallingIdentity(identity); }
     }
 
+    // No application payload may travel Mac-to-phone on Classic, even accidentally.
+    // Bluetooth link-layer acknowledgements remain the operating system's responsibility.
+    private void rejectIncoming(BluetoothSocket socket) {
+        new Thread(() -> {
+            try {
+                if (socket.getInputStream().read() != -1)
+                    android.util.Log.w("DroidMirrorL2cap", "Rejected unexpected reverse Classic payload");
+            } catch (IOException ignored) {
+            } finally {
+                synchronized (this) { if (connection == socket) closeConnection(); }
+            }
+        }, "L2capReverseGuard").start();
+    }
     private void pump(BluetoothSocket socket, InputStream input, OutputStream output, String name) {
         new Thread(() -> {
             try (InputStream source = input; OutputStream destination = output) {
-                byte[] bytes = new byte[4096]; int count;
+                int mtu = socket.getMaxTransmitPacketSize();
+                // Batch whole negotiated SDUs without waiting for a packet/ACK.
+                int bufferSize = mtu > 0 && mtu <= 16384 ? mtu * Math.min(6, 16384 / mtu) : 4096;
+                byte[] bytes = new byte[bufferSize]; int count;
                 while ((count = source.read(bytes)) != -1) { destination.write(bytes, 0, count); destination.flush(); }
             } catch (IOException failure) {
                 android.util.Log.d("DroidMirrorL2cap", name + " ended: " + failure.getMessage());
@@ -123,6 +138,9 @@ public final class ClassicL2capService extends IClassicL2cap.Stub {
     }
     @Override public synchronized void disconnect(IBinder token) { if (owner == token) closeConnection(); }
     @Override public synchronized void stop(IBinder token) { if (owner == token) closeListener(); }
+    @Override public synchronized int getTransmitMtu(IBinder token) {
+        return owner == token && connection != null ? connection.getMaxTransmitPacketSize() : 0;
+    }
     @Override public synchronized String getLastError() { return error; }
     @Override public synchronized void destroy() { closeListener(); System.exit(0); }
 }

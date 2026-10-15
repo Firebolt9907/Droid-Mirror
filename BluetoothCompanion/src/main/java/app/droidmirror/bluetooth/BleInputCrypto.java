@@ -12,9 +12,12 @@ final class BleInputCrypto {
     private final byte[] encryption, authentication;
     private long next = 1;
     BleInputCrypto(byte[] sessionKey) throws GeneralSecurityException {
+        this(sessionKey, false);
+    }
+    BleInputCrypto(byte[] sessionKey, boolean returning) throws GeneralSecurityException {
         if (sessionKey.length != 32) throw new GeneralSecurityException("Invalid BLE session key");
-        encryption = hmac(sessionKey, "DroidMirror BLE encryption v1".getBytes(StandardCharsets.US_ASCII));
-        authentication = hmac(sessionKey, "DroidMirror BLE authentication v1".getBytes(StandardCharsets.US_ASCII));
+        encryption = hmac(sessionKey, (returning ? "DroidMirror BLE return encryption v1" : "DroidMirror BLE encryption v1").getBytes(StandardCharsets.US_ASCII));
+        authentication = hmac(sessionKey, (returning ? "DroidMirror BLE return authentication v1" : "DroidMirror BLE authentication v1").getBytes(StandardCharsets.US_ASCII));
     }
     static byte[] hmac(byte[] key, byte[] data) throws GeneralSecurityException {
         Mac mac = Mac.getInstance("HmacSHA256"); mac.init(new SecretKeySpec(key, "HmacSHA256")); return mac.doFinal(data);
@@ -37,5 +40,15 @@ final class BleInputCrypto {
         Cipher cipher = Cipher.getInstance("AES/CTR/NoPadding");
         cipher.init(Cipher.DECRYPT_MODE, new SecretKeySpec(encryption, "AES"), new IvParameterSpec(iv.array()));
         byte[] plain = cipher.doFinal(body, 8, body.length - 8); ++next; return plain;
+    }
+    synchronized byte[] seal(byte[] plain) throws GeneralSecurityException {
+        if (plain.length == 0 || plain.length > 488 || next <= 0 || next == Long.MAX_VALUE)
+            throw new GeneralSecurityException("Invalid BLE return record");
+        ByteBuffer iv = ByteBuffer.allocate(16).put("DMINPUT1".getBytes(StandardCharsets.US_ASCII)).putLong(next);
+        Cipher cipher = Cipher.getInstance("AES/CTR/NoPadding");
+        cipher.init(Cipher.ENCRYPT_MODE, new SecretKeySpec(encryption, "AES"), new IvParameterSpec(iv.array()));
+        byte[] body = ByteBuffer.allocate(8 + plain.length).putLong(next).put(cipher.doFinal(plain)).array();
+        byte[] packet = ByteBuffer.allocate(body.length + 16).put(body).put(hmac(authentication, body), 0, 16).array();
+        ++next; return packet;
     }
 }

@@ -9,7 +9,9 @@ struct AndroidDevice: Identifiable, Hashable {
 
     var isOnline: Bool { state == "device" }
     var isBluetooth: Bool { transport == "bluetooth-classic" }
-    var isWireless: Bool { !isBluetooth && id.contains(":") }
+    var isWireless: Bool {
+        !isBluetooth && (id.contains(":") || id.hasSuffix("._adb-tls-connect._tcp"))
+    }
     var displayName: String {
         model.replacingOccurrences(of: "_", with: " ").trimmingCharacters(in: .whitespaces).nilIfEmpty
             ?? (isWireless ? "Wireless Android" : "Android device")

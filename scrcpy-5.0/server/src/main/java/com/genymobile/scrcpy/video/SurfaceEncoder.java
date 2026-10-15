@@ -258,6 +258,7 @@ public class SurfaceEncoder implements AsyncProcessor {
         MediaCodec.BufferInfo bufferInfo = new MediaCodec.BufferInfo();
         FrameFreshness freshness = maxFrameAgeUs > 0 ? new FrameFreshness(maxFrameAgeUs) : null;
         int currentBitRate = videoBitRate;
+        BitrateRecovery bitrateRecovery = new BitrateRecovery(videoBitRate);
 
         boolean eos;
         do {
@@ -274,7 +275,7 @@ public class SurfaceEncoder implements AsyncProcessor {
                         boolean keyframe = (bufferInfo.flags & MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0;
                         boolean send = freshness.shouldSend(bufferInfo.presentationTimeUs, System.nanoTime() / 1000, isConfig, keyframe);
                         if (freshness.takeSyncRequest()) {
-                            currentBitRate = Math.max(32000, currentBitRate / 2);
+                            currentBitRate = bitrateRecovery.stalled();
                             Bundle parameters = new Bundle();
                             parameters.putInt(MediaCodec.PARAMETER_KEY_VIDEO_BITRATE, currentBitRate);
                             parameters.putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0);
@@ -282,6 +283,19 @@ public class SurfaceEncoder implements AsyncProcessor {
                             Ln.i("Bluetooth video fell behind; requesting current keyframe at " + currentBitRate + " bit/s");
                         }
                         if (!send) continue;
+                        if (!isConfig) {
+                            long nowUs = System.nanoTime() / 1000;
+                            boolean backlogged = nowUs - bufferInfo.presentationTimeUs > 400000;
+                            int recovered = backlogged ? bitrateRecovery.backlogged(nowUs) : bitrateRecovery.healthy(nowUs);
+                            if (recovered != currentBitRate) {
+                                Bundle parameters = new Bundle();
+                                parameters.putInt(MediaCodec.PARAMETER_KEY_VIDEO_BITRATE, recovered);
+                                codec.setParameters(parameters);
+                                currentBitRate = recovered;
+                                Ln.i("Bluetooth video " + (backlogged ? "queue building; adjusting to " : "recovered; restoring ")
+                                        + recovered + " bit/s");
+                            }
+                        }
                     }
                     if (!isConfig) {
                         // If this is not a config packet, then it contains a frame

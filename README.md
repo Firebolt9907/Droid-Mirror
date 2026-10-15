@@ -6,19 +6,20 @@ Direct Bluetooth Classic L2CAP is the default source transport: after one-time A
 setup (Shizuku authorization, a selected paired Mac and **Enable Mac connections**),
 press **Mirror on the Mac** to start privileged scrcpy capture. There is no
 per-session Android screen-share prompt and no ADB/LAN transport. The profile
-is approximately 480p, up to 8 fps and a 64 kbps H.264 target. The Mac opens
+is approximately 480p, up to 16 fps and a 256 kbps H.264 target. The Mac opens
 fixed PSM `0x1001`; a Shizuku shell service owns Android’s authenticated Classic
 L2CAP listener. This uses a hidden Android API and requires the matching Mac
-and Android builds; it does not silently fall back to RFCOMM. Video and control
-replies travel phone-to-Mac over Classic L2CAP. Mac input, video acknowledgements
-and heartbeats travel over a separate BLE GATT connection, authenticated and
-encrypted using a fresh key shared over the bonded Classic connection.
+and Android builds; it does not silently fall back to RFCOMM. Classic L2CAP carries only video, phone-to-Mac. All input, acknowledgements,
+control replies, status events, heartbeats and session setup use BLE. Pair BLE once
+using **DroidMirror → Pair Bluetooth…** (or **Settings…**, ⌘,) and the code
+from **Show BLE pairing code** in the Android companion; no session
+secret or control payload travels over Classic.
 
 Bluetooth remembers the phone selected in DroidMirror. With auto-start enabled,
 launching the app starts that phone once; closing the mirror does not continually
 reopen it. An unavailable saved pairing does not select another device.
 
-The compiled test APK is `outputs/DroidMirror-Bluetooth-0.6-debug.apk`.
+The compiled test APK is `outputs/DroidMirror-Bluetooth-0.8-debug.apk`.
 Install the matching Mac and Android builds together. A phone power/screen-lock action ends the session, locks/restores the
 phone through Shizuku, and shows a separate **phone was used** popup on Mac.
 End-of-session audit notifications are posted on phone and Mac. Shell watchdog

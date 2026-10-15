@@ -43,10 +43,10 @@ final class PrivilegedCapture implements AutoCloseable {
         int[] target = VideoWire.dimensions(source.getWidth(), source.getHeight());
         int longest = Math.max(target[0], target[1]);
         Options options = Options.parse("5.0", "audio=false", "control=true", "clipboard_autosync=false", "power_on=false", "cleanup=false", "video_codec=h264",
-            "video_bit_rate=64000", "max_fps=8", "max_size=" + longest, "min_size_alignment=16",
+            "video_bit_rate=256000", "max_fps=16", "max_size=" + longest, "min_size_alignment=16", "downsize_on_error=false",
             // Hard QP limits force oversized frames even after bitrate reductions.
             // Refresh image detail gradually, including after motion has stopped.
-            "video_codec_options=bitrate-mode:int=2,frame-rate:int=8,max-bframes:int=0,intra-refresh-period:int=8,i-frame-interval=60,repeat-previous-frame-after:long=125000");
+            "video_codec_options=bitrate-mode:int=2,frame-rate:int=16,max-bframes:int=0,intra-refresh-period:int=16,i-frame-interval=60,repeat-previous-frame-after:long=62500");
         Streamer streamer = new Streamer(output.getFileDescriptor(), options.getVideoCodec(), true, true);
         com.genymobile.scrcpy.control.ControlChannel channel = new com.genymobile.scrcpy.control.ControlChannel(
             new java.io.FileInputStream(controls.getFileDescriptor()), new java.io.FileOutputStream(controls.getFileDescriptor()));
@@ -54,6 +54,8 @@ final class PrivilegedCapture implements AutoCloseable {
         ScreenCapture screen = new ScreenCapture(controller, options);
         controller.setSurfaceCapture(screen);
         encoder = new SurfaceEncoder(screen, streamer, options);
+        // Allow normal radio/ACK jitter before discarding a reference chain. Each
+        // recovery requests an expensive IDR and can reduce the encoder bitrate.
         encoder.setMaxFrameAgeUs(2000000);
         controller.start(fatal -> ended.run());
         encoder.start(fatal -> ended.run());

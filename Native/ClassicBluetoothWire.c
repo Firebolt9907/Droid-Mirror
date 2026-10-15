@@ -1,6 +1,9 @@
 #include "ClassicBluetoothWire.h"
 #include <string.h>
 void dm_classic_wire_init(DMClassicWire *wire) { memset(wire, 0, sizeof(*wire)); }
+void dm_classic_wire_init_video_only(DMClassicWire *wire) {
+    dm_classic_wire_init(wire); wire->require_video_only = true;
+}
 bool dm_classic_wire_feed_ble(DMClassicWire *wire, const uint8_t *bytes, size_t length,
                           DMWireVideo video, DMWireEvent event, DMWireVideo control, DMWireVideo setup, void *context) {
     while (length) {
@@ -11,9 +14,11 @@ bool dm_classic_wire_feed_ble(DMClassicWire *wire, const uint8_t *bytes, size_t 
             wire->magic_used += take; bytes += take; length -= take;
             if (wire->magic_used < 8) continue;
             wire->decided = true;
+            wire->video_only = !memcmp(wire->magic, "DMBT0006", 8);
+            if (wire->require_video_only && !wire->video_only) return false;
             wire->ble = !memcmp(wire->magic, "DMBT0005", 8);
             wire->control = wire->ble || !memcmp(wire->magic, "DMBT0004", 8);
-            if (!wire->control && memcmp(wire->magic, "DMBT0003", 8)) {
+            if (!wire->video_only && !wire->control && memcmp(wire->magic, "DMBT0003", 8)) {
                 if (wire->magic[0] != 0) return false;
                 wire->legacy = true;
                 if (!video(context, wire->magic, 8)) return false;
@@ -29,7 +34,8 @@ bool dm_classic_wire_feed_ble(DMClassicWire *wire, const uint8_t *bytes, size_t 
             wire->type = wire->header[0]; wire->header_used = 0;
             wire->remaining = (uint32_t)wire->header[1] << 24 | (uint32_t)wire->header[2] << 16
                             | (uint32_t)wire->header[3] << 8 | wire->header[4];
-            if ((wire->type == 0 && (!wire->remaining || wire->remaining > 16384))
+            if ((wire->video_only && wire->type != 0)
+                    || (wire->type == 0 && (!wire->remaining || wire->remaining > 16384))
                     || (wire->type == 1 && wire->remaining != 1)
                     || (wire->type == 2 && (!wire->control || !control || !wire->remaining || wire->remaining > 16384))
                     || (wire->type == 3 && (!wire->ble || !setup || wire->remaining != 32))

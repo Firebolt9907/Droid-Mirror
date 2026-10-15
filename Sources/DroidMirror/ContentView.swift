@@ -131,7 +131,7 @@ struct ContentView: View {
                 ForEach(MirrorTransport.allCases) { Text($0.label).tag($0) }
             }.disabled(model.isMirroring || model.isStarting)
             if model.preferences.transport == .bluetoothClassic {
-                Text("Authorize Shizuku and enable Mac connections once on Android, then press Mirror on the Mac. 480p · up to 8 fps · 64 kbps target. Mouse, keyboard and navigation work over Bluetooth.")
+                Text("Authorize Shizuku and enable Mac connections once on Android, then press Mirror on the Mac. 480p · up to 16 fps · 256 kbps target. Mouse, keyboard and navigation work over Bluetooth.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             if model.preferences.transport == .wifiAware {

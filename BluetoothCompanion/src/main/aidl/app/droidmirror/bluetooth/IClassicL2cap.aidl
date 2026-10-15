@@ -7,5 +7,6 @@ interface IClassicL2cap {
     void disconnect(IBinder owner) = 3;
     void stop(IBinder owner) = 4;
     String getLastError() = 5;
+    int getTransmitMtu(IBinder owner) = 6;
     void destroy() = 16777114;
 }

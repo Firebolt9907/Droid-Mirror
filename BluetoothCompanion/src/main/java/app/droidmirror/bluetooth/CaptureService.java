@@ -31,7 +31,7 @@ public final class CaptureService extends Service {
         volatile boolean stopped;
         volatile boolean hasGuard;
         volatile long lastPeerSeen;
-        final VideoWindow videoWindow = new VideoWindow(12 * 1024, 5000);
+        final VideoWindow videoWindow = new VideoWindow(BluetoothWire.VIDEO_WINDOW_BYTES, 5000);
         final AtomicInteger endEvent = new AtomicInteger();
         final AtomicBoolean streamStarted = new AtomicBoolean();
         final AtomicBoolean auditPosted = new AtomicBoolean();
@@ -64,6 +64,13 @@ public final class CaptureService extends Service {
         if (!settings.getBoolean("enabled", false) || settings.getString("peer", "").isEmpty()) return ReadyResult.NOT_CONFIGURED;
         if (Build.VERSION.SDK_INT >= 31 && (context.checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED
                 || context.checkSelfPermission(Manifest.permission.BLUETOOTH_ADVERTISE) != PackageManager.PERMISSION_GRANTED)) return ReadyResult.PERMISSION_REQUIRED;
+        try {
+            byte[] pairing = BlePairing.key(context, settings.getString("peer", ""));
+            java.util.Arrays.fill(pairing, (byte)0);
+        } catch (IOException error) {
+            android.util.Log.w("DroidMirrorReady", "Could not initialize BLE pairing", error);
+            return ReadyResult.FAILED;
+        }
         try {
             context.startForegroundService(new Intent(context, CaptureService.class));
             return ReadyResult.START_REQUESTED;
@@ -165,7 +172,7 @@ public final class CaptureService extends Service {
                     status("Ready for your paired Mac · Classic L2CAP");
                 }
                 // Shell enforces authentication, bonding and the selected Mac before
-                // passing this duplex descriptor. The fixed PSM remains stable.
+                // passing this video-only write descriptor. The fixed PSM remains stable.
                 socket = listener.accept();
                 if (!getSharedPreferences("ready", MODE_PRIVATE).getString("peer", "").equals(listenerPeer)) throw new IOException("Selected Mac changed");
                 serve();
@@ -191,7 +198,9 @@ public final class CaptureService extends Service {
             String peer = getSharedPreferences("ready", MODE_PRIVATE).getString("peer", "");
             String name = getSystemService(BluetoothManager.class).getAdapter().getRemoteDevice(peer).getName();
             state.peerName = name == null || name.trim().isEmpty() ? getString(R.string.stream_peer_fallback) : name;
-            wire = new BluetoothWire(new FileOutputStream(socket.getFileDescriptor()), SystemClock::elapsedRealtime); state.wire = wire;
+            wire = new BluetoothWire(new FileOutputStream(socket.getFileDescriptor()), SystemClock::elapsedRealtime, BluetoothWire.videoChunkForMtu(listener.transmitMtu())); state.wire = wire;
+            // Bound data queued ahead of the receiver; socket writes can otherwise
+            // enqueue seconds of old video even though the radio is reliable.
             wire.setVideoWindow(state.videoWindow);
             if (!ShizukuDisplayClient.authorized()) { wire.event(BluetoothWire.CAPTURE_FAILED); status("Authorize Shizuku on the phone once to enable Mac-initiated capture"); return; }
             state.hasGuard = true;
@@ -207,10 +216,10 @@ public final class CaptureService extends Service {
             ParcelFileDescriptor[] controls = ParcelFileDescriptor.createSocketPair(); state.controlPipe = controls[0];
             try (ParcelFileDescriptor output = pipe[1]; ParcelFileDescriptor remoteControls = controls[1]) {
                 byte[] key=new byte[32]; new java.security.SecureRandom().nextBytes(key);
-                state.ble=new BleInputServer(this,key,() -> {
+                state.ble=new BleInputServer(this,key,peer,() -> {
                     synchronized(CaptureService.this) { if(current==state) stopSession(); }
                 });
-                state.ble.start(); wire.bleSetup(key); java.util.Arrays.fill(key,(byte)0);
+                state.ble.start(); wire.setSideChannel(state.ble::send); java.util.Arrays.fill(key,(byte)0);
                 startControls(state,state.ble.input(),wire);
                 status("Waiting for authenticated BLE input");
                 if (!state.ble.awaitInput()) throw new IOException("BLE input connection timed out");
@@ -221,14 +230,26 @@ public final class CaptureService extends Service {
             sendVideo(wire, header.toByteArray());
             try (DataInputStream input = new DataInputStream(new ParcelFileDescriptor.AutoCloseInputStream(state.inputPipe))) {
                 byte[] codec = new byte[4]; input.readFully(codec); sendVideo(wire, codec);
+                long statsStarted = SystemClock.elapsedRealtime(), frames = 0, bytesSent = 0, sendingMillis = 0;
                 while (!shutdown && !state.stopped && state.endEvent.get() == 0) {
                     byte[] frameHeader = new byte[12]; input.readFully(frameHeader);
                     if ((frameHeader[0] & 0x80) != 0) { sendVideo(wire, frameHeader); continue; }
                     int size = ((frameHeader[8] & 255) << 24) | ((frameHeader[9] & 255) << 16) | ((frameHeader[10] & 255) << 8) | (frameHeader[11] & 255);
                     if (size <= 0 || size > VideoWire.MAX_PACKET) throw new IOException("Invalid video frame size");
                     byte[] frame = new byte[12 + size]; System.arraycopy(frameHeader, 0, frame, 0, 12); input.readFully(frame, 12, size);
+                    long sendingStarted = SystemClock.elapsedRealtime();
                     sendVideo(wire, frame);
+                    sendingMillis += SystemClock.elapsedRealtime() - sendingStarted;
+                    bytesSent += frame.length;
                     if ((frameHeader[0] & 0x40) == 0) {
+                        ++frames;
+                        long now = SystemClock.elapsedRealtime(), duration = now - statsStarted;
+                        if (duration >= 5000) {
+                            android.util.Log.i("DroidMirrorPerformance", "relay fps=" + (frames * 1000.0 / duration)
+                                + " kbps=" + (bytesSent * 8.0 / duration) + " sendBlockedMs=" + sendingMillis
+                                + " ackWaitMs=" + state.videoWindow.takeWaitMillis() + " inFlight=" + state.videoWindow.inFlightBytes());
+                            statsStarted = now; frames = bytesSent = sendingMillis = 0;
+                        }
                         if (!state.streamStarted.get()) {
                             state.startedElapsed = SystemClock.elapsedRealtime();
                             if (state.streamStarted.compareAndSet(false, true)) {
@@ -287,7 +308,9 @@ public final class CaptureService extends Service {
             try {
                 while (!state.stopped) {
                     if (state.heartbeatReply.getAndSet(false)) wire.event(BluetoothWire.ALIVE);
-                    Thread.sleep(100);
+                    // Video ACKs arrive every 250 ms. Return only a sparse
+                    // liveness echo, avoiding constant bidirectional BLE airtime.
+                    Thread.sleep(1000);
                 }
             } catch (IOException | InterruptedException error) {
                 if (!state.stopped) android.util.Log.w("DroidMirrorBluetooth", "Heartbeat replies ended", error);

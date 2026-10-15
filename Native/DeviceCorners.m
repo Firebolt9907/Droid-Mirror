@@ -10,8 +10,9 @@ static CGFloat DMBottomCornerRatio = 102.0 / 1080.0;
 CGFloat DMCornerExtentForRadius(CGFloat radius) {
     // Match the 45-degree inset of Android's circular approximation:
     // circle: r(1 - 1/sqrt(2)); superellipse n=3: e(1 - 2^(-1/3)).
-    // This is a geometric conversion, not a phone-specific rounding multiplier.
-    return radius * (1 - M_SQRT1_2) / (1 - pow(.5, 1.0 / 3.0));
+    // Tighten the silhouette slightly to avoid over-rounding the mirrored image.
+    // The mask, shadow and resize hit areas all share this adjustment.
+    return 0.92 * radius * (1 - M_SQRT1_2) / (1 - pow(.5, 1.0 / 3.0));
 }
 
 static double DMGeometryNumber(NSString *line, NSString *pattern, NSUInteger capture) {

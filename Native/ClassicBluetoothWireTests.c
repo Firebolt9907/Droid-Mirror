@@ -18,6 +18,26 @@ static bool control_video(void *context, const uint8_t *bytes, size_t length) {
     memcpy(out->controls + out->control_size, bytes, length); out->control_size += length; return true;
 }
 int main(int argc, char **argv) {
+    const uint8_t onlyVideo[]={'D','M','B','T','0','0','0','6',0,0,0,0,2,42,43};
+    for (size_t fragment=1;fragment<=sizeof(onlyVideo);++fragment) {
+        DMClassicWire strict; dm_classic_wire_init_video_only(&strict); Output out={0};
+        for (size_t offset=0;offset<sizeof(onlyVideo);offset+=fragment) {
+            size_t count=sizeof(onlyVideo)-offset; if (count>fragment) count=fragment;
+            assert(dm_classic_wire_feed_ble(&strict,onlyVideo+offset,count,video,event,control_video,setup,&out));
+        }
+        assert(dm_classic_wire_complete(&strict) && out.video_size==2 && !out.event_count && !out.control_size && !out.setup_size);
+    }
+    for (uint8_t type=1;type<=3;++type) {
+        uint8_t invalid[sizeof(onlyVideo)]; memcpy(invalid,onlyVideo,sizeof(invalid)); invalid[8]=type;
+        DMClassicWire strict; dm_classic_wire_init_video_only(&strict); Output out={0};
+        assert(!dm_classic_wire_feed_ble(&strict,invalid,sizeof(invalid),video,event,control_video,setup,&out));
+        assert(!out.video_size && !out.event_count && !out.control_size && !out.setup_size);
+    }
+    for (uint8_t version='3';version<='5';++version) {
+        uint8_t invalid[sizeof(onlyVideo)]; memcpy(invalid,onlyVideo,sizeof(invalid)); invalid[7]=version;
+        DMClassicWire strict; dm_classic_wire_init_video_only(&strict); Output out={0};
+        assert(!dm_classic_wire_feed_ble(&strict,invalid,sizeof(invalid),video,event,control_video,setup,&out));
+    }
     uint8_t ble[52]={'D','M','B','T','0','0','0','5',3,0,0,0,32};
     for(size_t i=0;i<32;++i) ble[13+i]=(uint8_t)i;
     const uint8_t end[]={0,0,0,0,2,50,51}; memcpy(ble+45,end,sizeof(end));
@@ -87,9 +107,10 @@ int main(int argc, char **argv) {
         FILE *fixture = fopen(argv[1], "rb"); assert(fixture);
         dm_classic_wire_init(&wire); out = (Output){0};
         uint8_t block[4096]; size_t count;
-        while ((count = fread(block, 1, sizeof(block), fixture))) assert(dm_classic_wire_feed(&wire, block, count, video, event, &out));
+        while ((count = fread(block, 1, sizeof(block), fixture)))
+            assert(dm_classic_wire_feed_ble(&wire, block, count, video, event, control_video, setup, &out));
         fclose(fixture); assert(dm_classic_wire_complete(&wire));
-        assert(out.video_size == 20000 && out.event_count == 2 && out.events[0] == 1 && out.events[1] == 4);
+        assert(wire.video_only && out.video_size == 20000 && !out.event_count && !out.control_size && !out.setup_size);
         for (size_t i = 0; i < out.video_size; i++) assert(out.video[i] == (uint8_t)i);
         puts("Java sender → C receiver fixture passed");
     }

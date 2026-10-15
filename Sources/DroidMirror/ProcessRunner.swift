@@ -37,7 +37,8 @@ enum ProcessRunner {
     static func output(
         _ executable: String,
         _ arguments: [String],
-        timeout: TimeInterval? = nil
+        timeout: TimeInterval? = nil,
+        input: Data? = nil
     ) async throws -> String {
         try await withCheckedThrowingContinuation { continuation in
             let process = Process()
@@ -51,7 +52,9 @@ enum ProcessRunner {
             }
             process.executableURL = URL(fileURLWithPath: executable)
             process.arguments = arguments
-            process.standardInput = FileHandle.nullDevice
+            let inputPipe = input == nil ? nil : Pipe()
+            if let inputPipe { process.standardInput = inputPipe }
+            else { process.standardInput = FileHandle.nullDevice }
             process.standardOutput = outputHandle
             process.standardError = outputHandle
             gate.retain(process)
@@ -69,7 +72,13 @@ enum ProcessRunner {
             }
             do {
                 try process.run()
+                if let input, let inputPipe {
+                    try inputPipe.fileHandleForWriting.write(contentsOf: input)
+                    try inputPipe.fileHandleForWriting.close()
+                }
             } catch {
+                try? inputPipe?.fileHandleForWriting.close()
+                if process.isRunning { process.terminate() }
                 if gate.claim() {
                     try? outputHandle.close()
                     try? FileManager.default.removeItem(at: outputURL)
