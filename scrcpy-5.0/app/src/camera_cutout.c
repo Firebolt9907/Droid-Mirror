@@ -1,4 +1,5 @@
 #include "camera_cutout.h"
+#include "events.h"
 
 #include <math.h>
 #include <string.h>
@@ -12,6 +13,18 @@ void
 sc_camera_cutout_set(const struct sc_camera_cutout *cutout) {
     if (cutout) current = *cutout;
     else memset(&current, 0, sizeof(current));
+    // Geometry arrives independently of video over the control channel. Wake
+    // the renderer even when the phone's screen is static after a handoff.
+    SDL_Event event = {.type = SC_EVENT_CAMERA_CUTOUT_UPDATED};
+    bool posted = SDL_PushEvent(&event);
+    (void) posted;
+}
+
+bool
+sc_camera_cutout_matches_frame(struct sc_size frame) {
+    // Empty geometry is a valid response for a phone without a cutout.
+    return frame.width && frame.height
+        && current.width == frame.width && current.height == frame.height;
 }
 
 bool

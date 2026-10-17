@@ -23,8 +23,8 @@ public final class VideoWireTest {
         require(Arrays.equals(payload, copy));
         in = new DataInputStream(new ByteArrayInputStream(VideoWire.packet(payload, 999, true, true)));
         require(in.readLong() == (1L << 62));
-        require(Arrays.equals(VideoWire.dimensions(1080, 2400), new int[]{468, 1040}));
-        require(Arrays.equals(VideoWire.dimensions(1920, 1080), new int[]{832, 468}));
+        require(Arrays.equals(VideoWire.dimensions(1080, 2400), new int[]{306, 680}));
+        require(Arrays.equals(VideoWire.dimensions(1920, 1080), new int[]{544, 306}));
         require(Arrays.equals(VideoWire.dimensions(320, 640), new int[]{320, 640}));
         for (int length : new int[]{0, VideoWire.MAX_PACKET + 1}) {
             try { VideoWire.packet(new byte[length], 0, false, false); throw new AssertionError(); }

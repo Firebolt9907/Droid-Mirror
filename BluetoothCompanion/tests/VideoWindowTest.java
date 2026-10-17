@@ -35,6 +35,29 @@ public final class VideoWindowTest {
             fallback.acknowledge(capacity * 3); resumed.get(1, TimeUnit.SECONDS);
             if (fallback.inFlightBytes() != capacity) throw new AssertionError("Fallback reset cumulative accounting");
             fallback.close();
+            // A replay can take longer than one timeout overall, provided ACKs
+            // keep advancing. Duplicate heartbeats must not extend a real stall.
+            VideoWindow replay = new VideoWindow(capacity, 150);
+            replay.useWirelessCapacity(); replay.reserve(capacity * 6);
+            replay.useBluetoothCapacity();
+            Future<?> paced = executor.submit(() -> {
+                try { replay.awaitBluetoothReplay(capacity * 6, 0); }
+                catch(IOException e) { throw new RuntimeException(e); }
+            });
+            for (int i=1; i<=5; ++i) {
+                Thread.sleep(60); replay.acknowledge(capacity*i);
+            }
+            paced.get(1, TimeUnit.SECONDS);
+            if (replay.inFlightBytes()!=capacity) throw new AssertionError("Replay counted bytes twice");
+            VideoWindow stalledReplay = new VideoWindow(capacity, 80);
+            stalledReplay.useWirelessCapacity(); stalledReplay.reserve(capacity*2);
+            stalledReplay.useBluetoothCapacity();
+            Future<?> stalledReplayResult=executor.submit(() -> {
+                try { stalledReplay.awaitBluetoothReplay(capacity*2,0); throw new AssertionError("Stalled replay continued"); }
+                catch(IOException expected) {}
+            });
+            for (int i=0; i<5; ++i) { Thread.sleep(30); stalledReplay.acknowledge(0); }
+            stalledReplayResult.get(1,TimeUnit.SECONDS);
             System.out.println("VideoWindow: bounded backlog, cumulative ACK, validation, cancellation, stalled peer and Wi-Fi fallback capacity passed");
         } finally { executor.shutdownNow(); }
     }

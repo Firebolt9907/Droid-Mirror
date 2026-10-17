@@ -6,6 +6,7 @@ import Darwin
 final class BLEController: NSObject, ObservableObject {
     private static let serviceID = CBUUID(string: "7E57B000-9A6B-4C5D-8E7F-102030405060")
     private static let endpointID = CBUUID(string: "7E57B001-9A6B-4C5D-8E7F-102030405060")
+    private static let inputServiceID = CBUUID(string: "C356A44E-6F2B-4DA9-85E5-397991B8A610")
     var onEvent: (([String: Any]) -> Void)?
     var onAuthenticated: (() -> Void)?
     private var session: BLESecureSession?
@@ -63,9 +64,31 @@ final class BLEController: NSObject, ObservableObject {
             status = "Bluetooth is not ready"
             return
         }
+        guard phone == nil else { return }
+        // Mirroring may already own the physical BLE link. Such a phone need
+        // not advertise again, so scanning alone can wait forever.
+        let candidates = central.retrieveConnectedPeripherals(withServices: [Self.serviceID])
+            + central.retrieveConnectedPeripherals(withServices: [Self.inputServiceID])
+        for peripheral in candidates {
+            if let until = rejectedPeers[peripheral.identifier], until > Date() { continue }
+            connect(peripheral)
+            return
+        }
         guard !central.isScanning else { return }
         status = "Scanning for Android…"
         central.scanForPeripherals(withServices: [Self.serviceID])
+    }
+
+    private func connect(_ peripheral: CBPeripheral) {
+        central.stopScan()
+        phone = peripheral
+        bleAttemptStartedAt = Date()
+        lastEndpointResponseAt = nil
+        pendingRequestID = nil
+        pendingRequestStartedAt = nil
+        peripheral.delegate = self
+        status = "Connecting to Android…"
+        central.connect(peripheral)
     }
 
     func requestEndpoint() {
@@ -186,6 +209,9 @@ final class BLEController: NSObject, ObservableObject {
 
         let reference = lastEndpointResponseAt ?? bleAttemptStartedAt ?? Date()
         if Date().timeIntervalSince(reference) > 25 {
+            // A connected input peripheral can expose stale/missing discovery
+            // services. Give advertisements and other candidates a chance.
+            if !authenticated { rejectedPeers[phone.identifier] = Date().addingTimeInterval(30) }
             rebuildBLESession(phone)
             return
         }
@@ -363,7 +389,7 @@ final class BLEController: NSObject, ObservableObject {
             case "ready":
                 status = "Authenticated phone connected"
                 requestEndpoint(); send(["type": "subscribe"]); onAuthenticated?()
-            case "notification", "removed", "actionResult": onEvent?(plain)
+            case "notification", "removed", "actionResult", "minimizeMirror": onEvent?(plain)
             default: accept(try JSONSerialization.data(withJSONObject: plain))
             }
         } catch {
@@ -394,15 +420,7 @@ extension BLEController: CBCentralManagerDelegate {
     ) {
         guard phone == nil else { return }
         if let until = rejectedPeers[peripheral.identifier], until > Date() { return }
-        central.stopScan()
-        phone = peripheral
-        bleAttemptStartedAt = Date()
-        lastEndpointResponseAt = nil
-        pendingRequestID = nil
-        pendingRequestStartedAt = nil
-        peripheral.delegate = self
-        status = "Connecting to Android…"
-        central.connect(peripheral)
+        connect(peripheral)
     }
 
     func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
@@ -446,13 +464,30 @@ extension BLEController: CBCentralManagerDelegate {
 }
 
 extension BLEController: CBPeripheralDelegate {
+    func peripheral(_ peripheral: CBPeripheral, didModifyServices invalidatedServices: [CBService]) {
+        guard phone?.identifier == peripheral.identifier,
+              invalidatedServices.contains(where: { $0.uuid == Self.serviceID }) else { return }
+        // Companion updates/restarts replace GATT handles while the input
+        // connection can remain alive. Never keep writing to stale handles.
+        resetSecurity()
+        endpointCharacteristic = nil
+        pendingRequestID = nil
+        pendingRequestStartedAt = nil
+        lastEndpointResponseAt = nil
+        bleAttemptStartedAt = Date()
+        peripheral.discoverServices([Self.serviceID])
+    }
     func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
+        guard phone?.identifier == peripheral.identifier, !stopped else { return }
         guard error == nil,
               let service = peripheral.services?.first(where: { $0.uuid == Self.serviceID })
         else {
             status = error?.localizedDescription ?? "BLE service was not found"
+            rejectedPeers[peripheral.identifier] = Date().addingTimeInterval(30)
+            rebuildBLESession(peripheral)
             return
         }
+        status = "Discovering notification characteristic…"
         peripheral.discoverCharacteristics([Self.endpointID], for: service)
     }
 
@@ -461,10 +496,13 @@ extension BLEController: CBPeripheralDelegate {
         didDiscoverCharacteristicsFor service: CBService,
         error: Error?
     ) {
+        guard phone?.identifier == peripheral.identifier, !stopped else { return }
         guard error == nil,
               let item = service.characteristics?.first(where: { $0.uuid == Self.endpointID })
         else {
             status = error?.localizedDescription ?? "Endpoint characteristic was not found"
+            rejectedPeers[peripheral.identifier] = Date().addingTimeInterval(30)
+            rebuildBLESession(peripheral)
             return
         }
         endpointCharacteristic = item
@@ -472,6 +510,7 @@ extension BLEController: CBPeripheralDelegate {
     }
 
     func peripheral(_ peripheral: CBPeripheral, didWriteValueFor characteristic: CBCharacteristic, error: Error?) {
+        guard phone?.identifier == peripheral.identifier, characteristic === endpointCharacteristic, !stopped else { return }
         if let error {
             status = error.localizedDescription
             rebuildBLESession(peripheral)
@@ -485,7 +524,9 @@ extension BLEController: CBPeripheralDelegate {
         didUpdateNotificationStateFor characteristic: CBCharacteristic,
         error: Error?
     ) {
+        guard phone?.identifier == peripheral.identifier, characteristic === endpointCharacteristic, !stopped else { return }
         if let error { status = error.localizedDescription; rebuildBLESession(peripheral); return }
+        guard characteristic.isNotifying else { rebuildBLESession(peripheral); return }
         do {
             guard let key = BLETrust.key() else { throw BLECryptoError.invalid }
             session = try BLESecureSession(key: key, nonce: BLETrust.random())
@@ -494,6 +535,7 @@ extension BLEController: CBPeripheralDelegate {
     }
 
     func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
+        guard phone?.identifier == peripheral.identifier, characteristic === endpointCharacteristic, !stopped else { return }
         if let error {
             status = error.localizedDescription
             return

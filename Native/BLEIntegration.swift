@@ -20,6 +20,7 @@ public func refreshDroidMirrorBLEMenu() {
 }
 
 private final class BLEIntegration: NSObject {
+    private var mirrorTarget = MirrorWindowCommandTarget()
     private var controller: BLEController?
     private var timer: Timer?
     private var subscriptions = Set<AnyCancellable>()
@@ -55,6 +56,12 @@ private final class BLEIntegration: NSObject {
             })
         }
         let distributed = DistributedNotificationCenter.default()
+        menuObservers.append(distributed.addObserver(forName: Notification.Name("app.droidmirror.sessionState"), object: nil, queue: .main) {
+            [weak self] event in
+            guard let pid = event.userInfo?["pid"] as? Int,
+                  let active = event.userInfo?["active"] as? Bool else { return }
+            self?.mirrorTarget.session(pid: pid, active: active)
+        })
         menuObservers.append(distributed.addObserver(forName: Notification.Name("app.droidmirror.receiverStatus"), object: nil, queue: .main) {
             [weak self] event in
             guard !NotificationRuntime.background, let self else { return }
@@ -85,7 +92,20 @@ private final class BLEIntegration: NSObject {
         let bridge = BLEController()
         controller = bridge
         phoneNotifications?.controller = bridge
-        bridge.onEvent = { [weak self] event in self?.phoneNotifications?.receive(event) }
+        bridge.onEvent = { [weak self] event in
+            if event["type"] as? String == "minimizeMirror" {
+                guard let pid = self?.mirrorTarget.target() else {
+                    NSLog("DroidMirror minimize: no active mirror heartbeat")
+                    return
+                }
+                NSLog("DroidMirror minimize: forwarding to host %d", pid)
+                DistributedNotificationCenter.default().postNotificationName(
+                    Notification.Name("app.droidmirror.minimizeMirror"),
+                    object: String(pid), userInfo: nil, deliverImmediately: true)
+            } else {
+                self?.phoneNotifications?.receive(event)
+            }
+        }
         bridge.onAuthenticated = { [weak self] in self?.phoneNotifications?.flush() }
         bridge.$status.sink { status in
             NSLog("DroidMirror BLE: %@", status)

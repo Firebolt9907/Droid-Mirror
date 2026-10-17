@@ -13,13 +13,14 @@ android {
     sourceSets {
         main.java.srcDirs += '../scrcpy-5.0/server/src/main/java'
         main.aidl.srcDirs += '../scrcpy-5.0/server/src/main/aidl'
+        main.jniLibs.srcDirs += "$buildDir/iroh-jni"
     }
     defaultConfig {
         applicationId 'app.droidmirror.bluetooth'
         minSdk 26
         targetSdk 35
-        versionCode 20
-        versionName '0.20'
+        versionCode 26
+        versionName '0.26'
     }
 }
 
@@ -30,3 +31,15 @@ dependencies {
 }
 
 kotlin { compilerOptions { jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17 } }
+
+tasks.register('buildPeerTransport', Exec) {
+    inputs.dir('../PeerTransport/src')
+    inputs.file('../PeerTransport/Cargo.toml')
+    inputs.file('../PeerTransport/Cargo.lock')
+    inputs.file('../tools/build-peer-android.py')
+    inputs.property('abis', System.getenv('DROIDMIRROR_ANDROID_ABIS') ?: 'arm64-v8a')
+    outputs.dir("$buildDir/iroh-jni")
+    environment 'ANDROID_HOME', android.sdkDirectory.absolutePath
+    commandLine 'python3', '../tools/build-peer-android.py', "$buildDir/iroh-jni"
+}
+tasks.named('preBuild').configure { dependsOn 'buildPeerTransport' }

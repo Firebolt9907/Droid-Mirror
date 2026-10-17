@@ -34,10 +34,10 @@ public final class BluetoothWireTest {
             try { video.get(30, TimeUnit.MILLISECONDS); throw new AssertionError("Window did not apply backpressure"); }
             catch (TimeoutException expected) {}
             executor.submit(() -> {
-                try { wire.event(BluetoothWire.ALIVE); }
+                try { wire.event(BluetoothWire.MINIMIZE_WINDOW); }
                 catch (IOException e) { throw new RuntimeException(e); }
             }).get(1, TimeUnit.SECONDS);
-            require(side.size() == 6);
+            require(Arrays.equals(side.toByteArray(), new byte[]{1,0,0,0,1,7}));
             window.acknowledge(capacity); video.get(1, TimeUnit.SECONDS);
             require(bytes.size() == 8 + capacity + BluetoothWire.VIDEO_CHUNK + (capacity / BluetoothWire.VIDEO_CHUNK + 1) * 5);
         } finally { window.close(); executor.shutdownNow(); }

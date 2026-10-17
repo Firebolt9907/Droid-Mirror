@@ -39,9 +39,12 @@ public final class AdbStreamService extends Service {
     @Override public int onStartCommand(Intent intent, int flags, int startId) {
         if (intent == null) { finishSession(); return START_NOT_STICKY; }
         String action = intent.getAction();
-        if (StreamNotifications.DISCONNECT.equals(action) || StreamNotifications.DISMISSED.equals(action)) {
+        if (StreamNotifications.DISCONNECT.equals(action) || StreamNotifications.DISMISSED.equals(action)
+                || StreamNotifications.MINIMIZE.equals(action)) {
             if (token != null && token.equals(intent.getStringExtra(StreamNotifications.TOKEN))) {
-                if (StreamNotifications.DISCONNECT.equals(action)) {
+                if (StreamNotifications.MINIMIZE.equals(action)) {
+                    StreamNotifications.minimizeOnMac();
+                } else if (StreamNotifications.DISCONNECT.equals(action)) {
                     AdbStreamSession.signal(owner, AdbStreamSession.DISCONNECT);
                     finishSession();
                 } else {

@@ -31,6 +31,7 @@ static void DMPositionToolbarWithDeviceCorners(id controller, SEL selector) {
 static BOOL DMFrameRendered;
 static __weak NSWindow *DMMirrorWindow;
 static id DMFocusObserver;
+static id DMMinimizeObserver;
 
 static void DMReportMirrorVisible(void) {
     if (!DMFrameRendered || !DMMirrorWindow.visible || DMMirrorWindow.miniaturized) return;
@@ -243,6 +244,14 @@ static void DMSetupKeyboardPassthrough(id self, SEL command) {
                     [NSApp activateIgnoringOtherApps:YES];
                     [mirrorWindow makeKeyAndOrderFront:nil];
                     DMReportMirrorVisible();
+                }];
+            DMMinimizeObserver = [[NSDistributedNotificationCenter defaultCenter]
+                addObserverForName:@"app.droidmirror.minimizeMirror"
+                object:NSProcessInfo.processInfo.environment[@"DROIDMIRROR_HOST_PID"] queue:NSOperationQueue.mainQueue
+                usingBlock:^(__unused NSNotification *notification) {
+                    if (DMHostQuitRequested || mirrorWindow.miniaturized) return;
+                    NSLog(@"DroidMirror minimize: received by mirror window (style=%lu)", mirrorWindow.styleMask);
+                    [mirrorWindow miniaturize:nil];
                 }];
             // Run after the styling controller finishes attaching its toolbar,
             // so the stream, rather than its child toolbar, receives focus.

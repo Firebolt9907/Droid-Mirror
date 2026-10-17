@@ -1,4 +1,5 @@
 import com.genymobile.scrcpy.video.BitrateRecovery;
+import app.droidmirror.bluetooth.HevcCapturePolicy;
 
 public final class BitrateRecoveryTest {
     static void require(boolean value) { if (!value) throw new AssertionError(); }
@@ -40,6 +41,20 @@ public final class BitrateRecoveryTest {
         require(probing.stalled() == 128000); // Ceiling must not raise the congestion floor.
         for (long now = 61000000; now <= 65000000; now += 100000) probing.healthy(now);
         require(probing.healthy(65100000) > 128000); // Resume probing after congestion clears.
+        require(HevcCapturePolicy.BLUETOOTH_BIT_RATE == 128000);
+        require(HevcCapturePolicy.BLUETOOTH_MAX_BIT_RATE == HevcCapturePolicy.BLUETOOTH_BIT_RATE);
+        BitrateRecovery bluetooth = new BitrateRecovery(HevcCapturePolicy.BLUETOOTH_BIT_RATE);
+        for (long now = 0; now <= 30000000; now += 62500) {
+            require(bluetooth.healthy(now) == 128000);
+        }
+        require(bluetooth.healthy(30062500) == 128000);
+        for (long now = 31000000; now <= 40000000; now += 1000000) bluetooth.backlogged(now);
+        require(bluetooth.stalled() == 64000); // Fit links below the old 128 kbps floor.
+        // Recovery needs ten continuous healthy seconds and never exceeds startup quality.
+        for (long now = 41000000; now < 51000000; now += 100000) require(bluetooth.healthy(now) == 64000);
+        require(bluetooth.healthy(51000000) == 80000);
+        for (long now = 51100000; now <= 100000000; now += 100000) require(bluetooth.healthy(now) <= 128000);
+        require(bluetooth.healthy(100100000) == 128000);
         System.out.println("Bitrate recovery: sustained progress, idle gaps, congestion reset, target ceiling and bandwidth probing passed");
     }
 }

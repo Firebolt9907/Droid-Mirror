@@ -29,16 +29,16 @@ final class AndroidNotificationBridge {
         }
         observer = DistributedNotificationCenter.default().addObserver(forName: Notification.Name("app.droidmirror.mirrorVisible"),
             object: nil, queue: .main) { [weak self] event in
-                guard let pid = event.object as? String, let host = NotificationRuntime.host,
-                      pid == String(host.processIdentifier) else { return }
+                guard let value = event.object as? String, let pid = Int32(value),
+                      NotificationRuntime.isHost(pid: pid) else { return }
                 self?.visible = true; self?.flush()
             }
         sessionObserver = DistributedNotificationCenter.default().addObserver(
             forName: Notification.Name("app.droidmirror.sessionState"), object: nil, queue: .main) { [weak self] event in
-                guard let self, let pid = event.userInfo?["pid"] as? Int,
-                      let host = NotificationRuntime.host, pid == Int(host.processIdentifier),
+                guard let self, let value = event.userInfo?["pid"] as? Int, let pid = Int32(exactly: value),
+                      NotificationRuntime.isHost(pid: pid),
                       let active = event.userInfo?["active"] as? Bool else { return }
-                self.sessionPID = host.processIdentifier
+                self.sessionPID = pid
                 self.policy.session(active: active)
                 if !active { self.visible = false }
             }
@@ -67,11 +67,11 @@ final class AndroidNotificationBridge {
             received += 1
             // Do not queue suppressed notifications for later: that would replay
             // everything the user already saw on the mirrored phone.
-            let hostPID = NotificationRuntime.host?.processIdentifier
+            let hostIsRunning = NotificationRuntime.host != nil
             // Absence of the host always wins, including when no heartbeat was
             // received. Comparing two nil PIDs previously left suppression stuck.
-            policy.reconcile(hostIsRunning: hostPID != nil,
-                hasSessionState: hostPID != nil && sessionPID == hostPID)
+            policy.reconcile(hostIsRunning: hostIsRunning,
+                hasSessionState: sessionPID.map { NotificationRuntime.isHost(pid: $0) } == true)
             guard policy.shouldDeliver() else { suppressed += 1; return }
             guard let id = event["id"] as? String, let version = event["version"] as? String,
                   let identity = BLETrust.identity else { return }
@@ -140,7 +140,7 @@ final class AndroidNotificationBridge {
                 }
                 if focus {
                     DistributedNotificationCenter.default().postNotificationName(Notification.Name("app.droidmirror.focusMirror"),
-                        object: NotificationRuntime.host.map { String($0.processIdentifier) }, userInfo: nil, deliverImmediately: true)
+                        object: sessionPID.map { String($0) }, userInfo: nil, deliverImmediately: true)
                 }
             }
             return

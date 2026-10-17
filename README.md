@@ -6,11 +6,14 @@ Direct Bluetooth Classic L2CAP is the default source transport: after one-time A
 setup (Shizuku authorization, a selected paired Mac and **Enable background bridge**),
 press **Mirror on the Mac** to start privileged scrcpy capture. There is no
 per-session Android screen-share prompt. The session starts entirely over Bluetooth,
-then attempts to move video to an already paired wireless ADB connection in the
-background, preserving the exact same scrcpy window. Hybrid video stays HEVC
+then attempts to move video to an encrypted Iroh peer connection in the
+background, preserving the exact same scrcpy window. Video tries direct LAN first,
+then an already paired wireless ADB connection, then continues over Bluetooth.
+Iroh relay servers and public discovery are disabled; Tailscale is not required.
+Hybrid video stays HEVC
 throughout and all input stays on BLE; direct ADB mode keeps its selected codec
 and ADB input. Bluetooth starts at
-approximately 480p, up to 16 fps and a 256 kbps regular HEVC target. Once Wi-Fi is confirmed,
+approximately 320p, up to 15 fps and a 128 kbps HEVC target and maximum. Once Wi-Fi is confirmed,
 resolution, frame rate and bitrate increase to the saved Wi-Fi/ADB picture targets
 (1920 px longest edge, up to 60 fps and 12 Mbps by default). Every capture
 resolution preserves the phone's exact aspect ratio; select **Native** in Picture
@@ -32,11 +35,13 @@ launch after updating to this version, any previously saved transport selection
 resets to Automatic. The remembered phone and other settings are retained;
 subsequent launches respect any new transport choice you make.
 
-The compiled test APK is `outputs/DroidMirror-Bluetooth-0.20-debug.apk`.
+The compiled test APK is `outputs/DroidMirror-Bluetooth-0.26-debug.apk`.
+The phone Live Activity includes **Minimize**, which uses the paired BLE
+connection to minimize the mirror window while streaming continues.
 Android now uses one background service and one enable/stop setting for mirroring
 readiness, the BLE ADB Bridge's encrypted ADB discovery, notification
 forwarding, notification actions and replies. Authorizing Shizuku also grants
-DroidMirror’s secure-settings permission for automatic Wireless debugging. Open **Notifications and wireless
+DroidMirror’s secure-settings permission for optional wireless ADB setup. Open **Notifications and wireless
 ADB** in DroidMirror to enable it. Users of the separate bridge must stop it,
 paste the shared pairing code once in **DroidMirror → Pair Bluetooth…** and
 grant notification access to DroidMirror; see
@@ -48,15 +53,16 @@ recovery covers app death and stale stream leases; physical-device behavior stil
 needs validation. Mouse, keyboard, scrolling and navigation use the Bluetooth control channel through Shizuku. Audio remains available through ADB mode.
 See [setup, behavior and validation limits](Native/CLASSIC-BLUETOOTH.md).
 
-For the automatic video upgrade, enable Android **Wireless debugging** and pair
-this Mac once using DroidMirror's wireless connection sheet. Keep phone and Mac
-on a network that permits wireless ADB. Bluetooth never waits for ADB at startup;
-if it is unavailable, video stays on Bluetooth and retries in the background.
-If ADB drops after an upgrade, a BLE signal restarts Bluetooth video in the same
-window, restores the Bluetooth quality profile, and resumes wireless retries.
-The saved BLE pairing key also authenticates the upgrade target, preventing a
-different connected phone from taking over the window. See
-[wireless handoff behavior and limitations](Native/WIRELESS-HANDOFF.md).
+For automatic video upgrades, install matching Mac and Android 0.26 builds.
+Keep the existing Bluetooth pairing and Shizuku setup. The app first tries Iroh
+using only local multicast discovery and direct encrypted LAN connections. If that
+fails, it tries already paired wireless ADB devices. Enable Wireless debugging and
+pair the Mac once if you want this fallback. If neither path works, Bluetooth
+video continues. Relays and public Iroh discovery are disabled on both devices.
+Bluetooth still carries startup and input. Network loss recovers over Bluetooth
+in the same window, then retries LAN followed by wireless ADB.
+See [transport order and validation](Native/PEER-TRANSPORT.md).
+The background bridge does not enable Wireless debugging automatically.
 
 With Android gesture navigation enabled, clicking the bottom pill once goes Home,
 twice opens Recents, and three times sends a long Home press for Circle to Search
@@ -95,7 +101,8 @@ single, double and triple clicks, and Control-to-Home uses the same shorter dela
 
 ## Build and run
 
-Requirements: macOS 14+, Xcode command-line tools, and the client dependencies (`brew install meson ninja pkg-config sdl3 ffmpeg libusb`). Building the customized Android server also requires JDK 17+ and Android SDK platform/build-tools 36 (`ANDROID_HOME`, default `~/Library/Android/sdk`). Bluetooth setup also requires the Android companion; see the linked guide.
+Requirements: Rust 1.91+ (Cargo), macOS 14+, Xcode command-line tools, and the client dependencies (`brew install meson ninja pkg-config sdl3 ffmpeg libusb`). Building the customized Android server also requires JDK 17+ and Android SDK platform/build-tools 36 (`ANDROID_HOME`, default `~/Library/Android/sdk`). Bluetooth setup also requires the Android companion, Android NDK 28+ and the Rust
+`aarch64-linux-android` target; see the linked guide.
 
 ```sh
 chmod +x build-app.sh

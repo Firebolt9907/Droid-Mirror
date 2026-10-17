@@ -1,6 +1,11 @@
 # Bluetooth input traffic audit
 
-The installed Mac build limits consecutive absolute mouse MOVE/hover positions
+DroidMirror disables mouse hover forwarding for both Bluetooth and ADB sessions.
+Mouse movement without a held button is discarded by the client before it reaches
+the control queue, so it sends no input traffic and triggers no phone hover animations.
+Clicks, releases, dragging and scrolling still send their coordinates normally.
+
+The Mac build limits consecutive absolute mouse drag MOVE positions
 to 60 Hz for sustained movement and retains the newest unsent position per 16.7 ms source-time bucket for the same
 pointer and button/display state. Clicks, releases, keys and other state changes
 are ordering barriers. The final position flushes before a barrier. Direct mouse drags and trackpads have no
@@ -12,7 +17,8 @@ for a full packet. Video ACK priority and one in-flight GATT operation remain.
 
 | Activity | Rate / trigger | Goes to phone? |
 |---|---|---|
-| Absolute pointer moves and hover | 60 Hz cap; latest position and source event time retained | BLE input writes |
+| Mouse hover (no held button) | Discarded before the control queue | No |
+| Absolute pointer moves while dragging | 60 Hz cap; latest position and source event time retained | BLE input writes |
 | Mouse buttons and keyboard | Actual state changes; OS key repeat retained | BLE input writes |
 | Trackpad drag/scroll | Position updates use the same 60 Hz cap | BLE input writes |
 | Discrete mouse wheel scrolling | Direction/distance commands, at most 30 Hz; summed during backpressure | BLE writes; Android synthesizes touch movement locally every 16 ms |

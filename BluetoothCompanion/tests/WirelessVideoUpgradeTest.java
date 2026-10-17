@@ -91,6 +91,26 @@ public final class WirelessVideoUpgradeTest {
             while (failedWire.isWireless() && System.nanoTime()<until) Thread.sleep(5);
             check(!failedWire.isWireless());
         }
+        // Android's raw fd close does not necessarily release a native write.
+        // Keep that write blocked until shutdownOutput, then recover the same stream.
+        BluetoothWire blockedWire=new BluetoothWire(new ByteArrayOutputStream()); blockedWire.video(new byte[]{1,2,3});
+        CountDownLatch upgraded=new CountDownLatch(1);
+        ExecutorService sender=Executors.newSingleThreadExecutor();
+        try (WirelessVideoUpgrade endpoint=new WirelessVideoUpgrade(blockedWire,key,p -> { if (p!=null) upgraded.countDown(); }); Socket socket=connect()) {
+            byte[] active=authenticate(socket,key,profile);
+            socket.getOutputStream().write(1); socket.getOutputStream().flush();
+            check(upgraded.await(2,TimeUnit.SECONDS));
+            android.net.LocalSocket.BlockedWrite blocked=new android.net.LocalSocket.BlockedWrite();
+            android.net.LocalSocket.blockedWrite=blocked;
+            Future<?> write=sender.submit(() -> {
+                try { blockedWire.video(new byte[]{4,5,6}); }
+                catch (IOException failure) { throw new RuntimeException(failure); }
+            });
+            check(blocked.entered.await(2,TimeUnit.SECONDS));
+            endpoint.fallback(active,3);
+            write.get(2,TimeUnit.SECONDS);
+            check(!blockedWire.isWireless());
+        } finally { sender.shutdownNow(); }
         System.out.println("Wireless endpoint: profile authentication, receiver-confirmed quality, bad profile rejection and failed-confirmation teardown passed");
     }
 }

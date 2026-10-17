@@ -243,9 +243,11 @@ final class MirrorModel: ObservableObject {
             switch event {
             case .wirelessActive:
                 let resolution = wifiMaxSize == 0 ? "native resolution" : "\(wifiMaxSize) px"
-                self.status = "Wi-Fi · \(resolution) · up to \(wifiFPS) fps · \(wifiBitRate) Mbps target"
+                self.status = "Peer video · \(resolution) · up to \(wifiFPS) fps · \(wifiBitRate) Mbps target"
+            case .wirelessRecovering:
+                self.status = "Peer video disconnected · resuming Bluetooth…"
             case .bluetoothActive:
-                self.status = "Bluetooth · up to 16 fps · 256 kbps target"
+                self.status = "Bluetooth · up to 15 fps · 128 kbps maximum"
             case .streamStarted: SessionNotifications.shared.began()
             case .phoneOn, .phoneLocalUse:
                 if !self.phoneTakenOver {
@@ -270,6 +272,7 @@ final class MirrorModel: ObservableObject {
             process.executableURL = URL(fileURLWithPath: scrcpyPath)
             process.arguments = ["--external-video-port=\(ports.video)", "--external-control-port=\(ports.control)", "--window-title=DroidMirror — \(device.displayName)",
                                  "--window-borderless", "--window-width=430", "--video-buffer=0",
+                                 "--no-mouse-hover",
                                  "--no-audio", "--pause-on-exit=false"]
             if preferences.alwaysOnTop { process.arguments?.append("--always-on-top") }
             // Share the native chrome, with controls sent through scrcpy/BLE.
@@ -306,7 +309,7 @@ final class MirrorModel: ObservableObject {
             mirrorProcess = process
             sessionIsBluetooth = true
             isMirroring = true
-            status = "Bluetooth · 480p · up to 16 fps · 256 kbps target"
+            status = "Bluetooth · 320p · up to 15 fps · 128 kbps maximum"
         } catch is CancellationError {
             status = "Bluetooth connection cancelled"
         } catch {
@@ -708,6 +711,7 @@ final class MirrorModel: ObservableObject {
             "--video-codec=\(preferences.codec.rawValue)",
             "--keyboard=\(preferences.keyboard.rawValue)",
             "--mouse=sdk",
+            "--no-mouse-hover",
             // Command is remapped to Android Control by the native window
             // integration. Keep scrcpy's own shortcut modifier out of its way.
             "--shortcut-mod=ralt",

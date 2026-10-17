@@ -52,6 +52,12 @@ public final class StreamDetailsActivity extends Activity {
         peer.setText(getString(R.string.stream_destination, getIntent().getStringExtra(StreamNotifications.PEER)));
         peer.setTextSize(18); content.addView(peer);
         duration = new TextView(this); content.addView(duration);
+        Button minimize = new Button(this); minimize.setText(R.string.stream_minimize);
+        minimize.setOnClickListener(view -> {
+            try { StreamNotifications.action(this, StreamNotifications.MINIMIZE, token).send(); }
+            catch (PendingIntent.CanceledException ignored) {}
+        });
+        content.addView(minimize);
         Button disconnect = new Button(this); disconnect.setText(R.string.stream_disconnect);
         disconnect.setOnClickListener(view -> {
             try { StreamNotifications.action(this, StreamNotifications.DISCONNECT, token).send(); }

@@ -40,7 +40,7 @@ class BridgeSettingsActivity : Activity() {
             setPadding(32, 48, 32, 32)
             addView(TextView(context).apply { text = "DroidMirror notifications and wireless ADB"; textSize = 24f })
             addView(TextView(context).apply {
-                text = "Forward phone notifications and discover the changing Wireless debugging port over encrypted Bluetooth, even when mirroring is closed. Pair once with your Mac for mirroring and notifications. One background bridge keeps mirroring, discovery and notification forwarding ready. The Pair Mac button below opens the shared pairing screen.\n\nStop the old BLE ADB Bridge before enabling this service. Use DroidMirror’s shared pairing code and allow its notification access."
+                text = "Forward phone notifications over encrypted Bluetooth, even when mirroring is closed. Mirroring video tries Iroh on the local network, then wireless ADB, then Bluetooth. Relay servers are disabled. Wireless ADB is optional and is enabled only by the explicit button below. Pair once with your Mac for mirroring and notifications. One background bridge keeps mirroring, discovery and notification forwarding ready. The Pair Mac button below opens the shared pairing screen.\n\nStop the old BLE ADB Bridge before enabling this service. Use DroidMirror’s shared pairing code and allow its notification access."
             })
             addView(status)
             addView(permissions)
@@ -65,8 +65,8 @@ class BridgeSettingsActivity : Activity() {
         }
         button("Set up Shizuku") { startActivity(Intent(this, app.droidmirror.bluetooth.CaptureActivity::class.java)) }
         button("Wireless debugging settings") { startActivity(Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS)) }
-        button("Refresh ADB endpoint") {
-            BridgeRuntime.live?.findEndpoint() ?: run { status.text = "Enable the background bridge first." }
+        button("Enable wireless ADB (optional)") {
+            BridgeRuntime.live?.findEndpoint(enableWirelessDebugging = true) ?: run { status.text = "Enable the background bridge first." }
         }
         button("Stop background bridge") {
             BackgroundBridgePreferences.setEnabled(this, false)
@@ -107,7 +107,7 @@ class BridgeSettingsActivity : Activity() {
         val secure = checkSelfPermission(Manifest.permission.WRITE_SECURE_SETTINGS) == PackageManager.PERMISSION_GRANTED
         permissions.text = "\nNotification forwarding: ${if (access) "allowed" else "not allowed"}\n" +
             "Shared Mac pairing code: ${if (BleTrust.key(this) != null) "available; paste it on your Mac" else "select a Mac and tap Pair Mac"}\n" +
-            (if (secure) "Automatic Wireless debugging: authorized\n" else
+            (if (secure) "Optional wireless ADB setup: authorized\n" else
                 "Start and authorize Shizuku in the main setup screen. DroidMirror grants secure settings automatically, or tap Grant secure settings with Shizuku to retry.\n") +
             grantMessage
     }

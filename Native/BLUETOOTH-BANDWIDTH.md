@@ -1,11 +1,12 @@
 # Bluetooth bandwidth and quality
 
-Bluetooth now starts at 256 kbps and probes upward by 25% after every two
-seconds of continuous current encoder output, up to 1.5 Mbps. Encoder backlog
-above 400 ms backs off by 25% at most once a second. Stale-frame recovery still
-halves bitrate and requests a current keyframe. The congestion floor remains
-128 kbps; increasing the probing ceiling does not increase that floor. Wi-Fi
-keeps its explicit profile and ordinary ADB encoding does not enable probing.
+Bluetooth starts at 128 kbps with a roughly 320-pixel short edge and up to
+15 FPS. Recovery returns toward the same 128 kbps ceiling after ten seconds
+of continuous healthy output, with a 64 kbps congestion floor. Encoder backlog above 250 ms backs off by 25% at most once a second.
+Frames over 500 ms old trigger reference-safe keyframe recovery instead of
+allowing two seconds of codec backlog. The same limits apply after Wi-Fi
+fallback. Wi-Fi keeps its explicit profile, and ordinary ADB encoding does
+not enable freshness control.
 
 The Classic byte window starts at 8 KiB and adapts up to 64 KiB based on
 cumulative ACK delivery. It samples active throughput every 500 ms, budgets
@@ -13,14 +14,33 @@ cumulative ACK delivery. It samples active throughput every 500 ms, budgets
 increases, and reacts directly to a decrease. Window growth is limited to
 8 KiB per sample. Idle periods and Wi-Fi fallback reset its estimate. This
 avoids a fixed small window capping throughput when feedback is delayed.
-It estimates delivered traffic, not spare capacity: encoder probes discover
-headroom. Active ACKs retain the 40 ms cadence introduced in the latency fix.
+It estimates delivered traffic, not spare capacity: the encoder stays within its conservative bitrate ceiling. Active ACKs retain the 40 ms cadence introduced in the latency fix.
 
 `DroidMirrorPerformance` reports encoded kbps, FPS, send blocking, ACK waiting,
 in-flight bytes, window capacity and delivered kbps. Shizuku service version
-33 ensures existing persistent capture processes load the updated controller.
+37 ensures existing persistent capture processes load the updated controller.
 
-## Validation on October 16, 2026
+## 128 kbps ceiling validation on October 16, 2026
+
+- `bash Native/test-wireless-upgrade.sh` passes, including the 128 kbps ceiling,
+  64 kbps floor, ten-second recovery, and Wi-Fi handoff/fallback coverage.
+- Android `assembleDebug lintDebug` and the Swift app build pass.
+- APK: `outputs/DroidMirror-Bluetooth-128kbps-debug.apk`, with SHA-256 alongside it.
+- Install the updated companion to apply the encoder changes; Shizuku service
+  version 37 refreshes persistent capture processes.
+- Sustained radio performance still needs live-device validation. Codec bitrate
+  control is an average target; individual keyframes can still exceed it.
+
+## Earlier 160 kbps profile validation on October 16, 2026
+
+- `bash Native/test-wireless-upgrade.sh` passes, including the 192 kbps recovery
+  ceiling, 80 kbps floor, reduced capture geometry, 500 ms frame freshness,
+  and Wi-Fi handoff/fallback coverage.
+- Android `assembleDebug lintDebug` succeeds using Java 21 and SDK 36.
+- APK: `outputs/DroidMirror-Bluetooth-320p-debug.apk`, with SHA-256 alongside it.
+- Sustained radio FPS and end-to-end latency have not been measured for this profile.
+
+## Earlier-profile validation on October 16, 2026
 
 - `bash Native/test-wireless-upgrade.sh` passes, including slow/fast delivery,
   contraction, hard cap, idle/reset, delayed ACKs, bitrate probing and backoff,
@@ -46,7 +66,8 @@ with a negative relative timestamp drift, but the companion was being replaced
 and restarted during validation, so those runs do not establish sustained
 quality, stability, or absolute end-to-end latency. No video was saved.
 
-The higher ceiling allows better quality where the link supports it. It cannot
-make a 100–200 kbps link deliver 1.5 Mbps or guarantee readable motion at the
-existing 468×1040, up-to-16-FPS profile. The 128 kbps quality floor also remains
-above the lowest measured sample; sufficiently weak links may still fall behind.
+The reduced profile trades image detail for fresher frames on the measured
+100–200 kbps links. The 500 ms encoder age limit is not an end-to-end latency
+guarantee: an in-progress frame, the radio window and receiver add delay.
+The new defaults need live-device validation for sustained FPS and input-to-display
+latency; the earlier measurements above describe the previous profile.

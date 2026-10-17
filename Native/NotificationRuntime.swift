@@ -13,6 +13,10 @@ enum NotificationRuntime {
     static var host: NSRunningApplication? {
         NSRunningApplication.runningApplications(withBundleIdentifier: "app.droidmirror.mac").first
     }
+    static func isHost(pid: Int32) -> Bool {
+        guard pid > 0, let process = NSRunningApplication(processIdentifier: pid), !process.isTerminated else { return false }
+        return process.bundleIdentifier == "app.droidmirror.mac" && process.bundleURL == host?.bundleURL
+    }
     static func post(_ name: String, info: [String: Any]? = nil) {
         DistributedNotificationCenter.default().postNotificationName(Notification.Name(name), object: nil,
             userInfo: info, deliverImmediately: true)
@@ -50,4 +54,26 @@ struct NotificationDeliveryPolicy {
         else if !hasSessionState { active = true }
     }
     func shouldDeliver() -> Bool { !active }
+}
+
+// The launcher execs the Swift host. LaunchServices may retain a stale -1 PID
+// even while the host is alive; its session heartbeat carries the actual PID.
+struct MirrorWindowCommandTarget {
+    private var pid: Int32?
+    private var updatedAt = Date.distantPast
+
+    mutating func session(pid: Int, active: Bool, now: Date = Date()) {
+        guard let validPID = Int32(exactly: pid), validPID > 0 else { return }
+        if active {
+            self.pid = validPID
+            updatedAt = now
+        } else if self.pid == validPID {
+            self.pid = nil
+        }
+    }
+
+    func target(now: Date = Date()) -> Int32? {
+        guard now.timeIntervalSince(updatedAt) <= 3 else { return nil }
+        return pid
+    }
 }

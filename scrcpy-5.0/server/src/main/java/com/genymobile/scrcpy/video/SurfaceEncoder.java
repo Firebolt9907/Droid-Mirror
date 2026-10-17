@@ -324,7 +324,7 @@ public class SurfaceEncoder implements AsyncProcessor {
                         if (!send) continue;
                         if (!isConfig) {
                             long nowUs = System.nanoTime() / 1000;
-                            boolean backlogged = nowUs - bufferInfo.presentationTimeUs > 400000;
+                            boolean backlogged = nowUs - bufferInfo.presentationTimeUs > Math.min(400000, maxFrameAgeUs / 2);
                             int recovered = backlogged ? bitrateRecovery.backlogged(nowUs) : bitrateRecovery.healthy(nowUs);
                             if (recovered != currentBitRate) {
                                 Bundle parameters = new Bundle();

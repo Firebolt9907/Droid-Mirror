@@ -3,7 +3,7 @@ import com.genymobile.scrcpy.video.FrameFreshness;
 public final class FrameFreshnessTest {
     private static void require(boolean value) { if (!value) throw new AssertionError(); }
     public static void main(String[] args) {
-        FrameFreshness policy = new FrameFreshness(500000);
+        FrameFreshness policy = new FrameFreshness(app.droidmirror.bluetooth.HevcCapturePolicy.BLUETOOTH_MAX_FRAME_AGE_US);
         require(policy.shouldSend(1000000, 1100000, false, false));
         require(!policy.shouldSend(1000000, 2000000, false, false));
         require(policy.takeSyncRequest()); require(!policy.takeSyncRequest());

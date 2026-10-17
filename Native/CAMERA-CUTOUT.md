@@ -21,7 +21,12 @@ metadata and receive no overlay.
 The controller inverses its existing touch coordinate mapping to put these bounds
 in encoded-video coordinates. That handles downscaling, capture rotation and
 cropping. Metadata refreshes when capture geometry changes; mismatched frame
-sizes are hidden until the corresponding metadata arrives. The client then applies
+sizes are hidden until the corresponding metadata arrives. The client requests
+fresh geometry whenever decoded frame dimensions change (including Bluetooth to
+LAN/ADB quality upgrades and fallback), and retries missing/mismatched geometry
+at most once per second while new frames arrive. Metadata updates post a redraw
+event, so a late BLE reply can restore the punch hole immediately even when the
+phone is showing a static screen. A valid empty response stops those retries. The client then applies
 the same content rectangle, letterboxing, display rotation and mirror transform as
 the video. Rendering happens after video filters, keeping edges smooth regardless
 of sharpening/upscaling. The circle is clipped to video content, excluded on the
@@ -39,7 +44,7 @@ Validation:
 
 - `sh Native/test-camera-cutout.sh` checks actual rendered pixels (a circle rather
   than a rectangle), placement, resize scale, rotation/mirroring, letterboxing,
-  absent/stale geometry, partial/malformed protocol packets, and opt-in serialization.
+  absent/stale geometry, delayed metadata redraw events across repeated Bluetooth/LAN/ADB resolution transitions, partial/malformed protocol packets, and opt-in serialization.
 - `Native/CameraCutoutWindowTests.m` checks toolbar hiding/restoration, immediate
   delegation to AppKit window dragging and ordinary input passthrough.
   Renderer tests also verify the normalized hit geometry and stale/absent resets.

@@ -35,8 +35,11 @@ the stream draws a broad ambient shadow (60-point blur, 18-point downward offset
 and a tighter contact shadow (16-point blur, 4-point downward offset). Its 120-point
 margin keeps the blur outside the clipped SDL surface. It ignores mouse events,
 follows the parent window, hides in full screen, and disappears when the mirror
-closes. Moving the phone reuses the drawing; resizing or changing the corner
-profile refreshes the silhouette. The native window shadow is disabled to avoid
+closes. The shadow surface clears its old backing pixels and draws only the blur
+outside the silhouette, so its caster cannot appear as a solid black duplicate.
+Move and resize updates reconcile the child position after AppKit finishes moving
+the parent and flush any changed drawing. Changing the corner profile also
+refreshes the silhouette. The native window shadow is disabled to avoid
 doubling it.
 The controller applies the mask after the original layout method on every resize.
 No Accessibility API, capture of other apps, new permission or layout crop is used.
@@ -56,3 +59,6 @@ to a circle. It does not introduce overlays/windows or global event taps. Corner
 drags preserve the starting aspect ratio and opposite-corner anchor, respect window
 size limits, and consume their down/drag/up events instead of tapping Android.
 Ordinary side resizing and screen interactions are left to the existing handlers.
+
+`PhoneShadowTests.m` checks transparent caster interiors, removal of old shadow
+pixels, and child alignment after moving, resizing, and crossing a desktop edge.

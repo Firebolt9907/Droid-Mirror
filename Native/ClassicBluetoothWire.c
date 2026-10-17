@@ -48,7 +48,7 @@ bool dm_classic_wire_feed_ble(DMClassicWire *wire, const uint8_t *bytes, size_t 
         else if (wire->type == 2) { if (!control(context, bytes, take)) return false; }
         else if (wire->type == 3) { if (!setup(context, bytes, take)) return false; }
         else {
-            if (wire->video_only ? bytes[0] != 6 : (bytes[0] < 1 || bytes[0] > (wire->control ? 6 : 5))) return false;
+            if (wire->video_only ? bytes[0] != 6 : (bytes[0] < 1 || bytes[0] > (wire->ble ? 7 : (wire->control ? 6 : 5)))) return false;
             event(context, bytes[0]);
         }
         wire->remaining -= (uint32_t)take; bytes += take; length -= take;

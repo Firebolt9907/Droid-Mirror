@@ -11,6 +11,7 @@ import android.os.Bundle;
 /** One notification becomes a live update only while actual video is flowing. */
 final class StreamNotifications {
     static final String DISCONNECT = "app.droidmirror.bluetooth.action.DISCONNECT_STREAM";
+    static final String MINIMIZE = "app.droidmirror.bluetooth.action.MINIMIZE_STREAM";
     static final String DISMISSED = "app.droidmirror.bluetooth.action.DISMISS_STREAM_UPDATE";
     static final String FINISHED = "app.droidmirror.bluetooth.action.STREAM_FINISHED";
     static final String TOKEN = "session", PEER = "peerName", STARTED = "startedElapsed";
@@ -36,6 +37,8 @@ final class StreamNotifications {
             .setCategory(Notification.CATEGORY_STATUS).setVisibility(Notification.VISIBILITY_PRIVATE)
             .setShowWhen(false)
             .setDeleteIntent(action(context, DISMISSED, token))
+            .addAction(new Notification.Action.Builder(null, context.getString(R.string.stream_minimize),
+                action(context, MINIMIZE, token)).build())
             .addAction(new Notification.Action.Builder(null, context.getString(R.string.stream_disconnect),
                 action(context, DISCONNECT, token)).build());
         if (Build.VERSION.SDK_INT >= 36) {
@@ -50,6 +53,7 @@ final class StreamNotifications {
     }
 
     static void ended(Context context, String token) {
+        action(context, MINIMIZE, token).cancel();
         action(context, DISCONNECT, token).cancel();
         action(context, DISMISSED, token).cancel();
         Intent details = new Intent(context, StreamDetailsActivity.class)
@@ -58,6 +62,18 @@ final class StreamNotifications {
             PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_NO_CREATE);
         if (open != null) open.cancel();
         context.sendBroadcast(new Intent(FINISHED).setPackage(context.getPackageName()).putExtra(TOKEN, token));
+    }
+
+    /** Best effort over the existing authenticated BLE link; never reconnect or stop capture. */
+    static void minimizeOnMac() {
+        app.droidmirror.bluetooth.bridge.BridgeRuntime runtime =
+            app.droidmirror.bluetooth.bridge.BridgeRuntime.Companion.getLive();
+        if (runtime != null) {
+            org.json.JSONObject event = new org.json.JSONObject();
+            try { event.put("type", "minimizeMirror"); }
+            catch (org.json.JSONException impossible) { return; }
+            runtime.sendEvent(event);
+        }
     }
 
     private StreamNotifications() {}

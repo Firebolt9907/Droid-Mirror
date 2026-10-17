@@ -106,7 +106,8 @@ static inline CGFloat DMScreenCornerRadius(CGFloat width) {
     _screenView.layer.cornerCurve = kCACornerCurveContinuous;
     _screenView.layer.masksToBounds = YES;
     [self buildToolbar];
-    window.styleMask = NSWindowStyleMaskBorderless | NSWindowStyleMaskResizable;
+    // Keep the phone chrome borderless while allowing the window into the Dock.
+    window.styleMask = NSWindowStyleMaskBorderless | NSWindowStyleMaskResizable | NSWindowStyleMaskMiniaturizable;
     window.opaque = NO;
     window.backgroundColor = NSColor.clearColor;
     window.hasShadow = YES;

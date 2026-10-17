@@ -181,9 +181,9 @@ notification helper's Keychain identity; the build script signs ad-hoc.
 ## Video and control events
 
 The hybrid Bluetooth profile requires regular HEVC (H.265 Main, 8-bit), starting at
-256,000 bit/s and probing up to a 1,500,000 bit/s ceiling, up to 16 fps and about a
-480-pixel short-edge limit. It chooses an exact-ratio size compatible with the
-encoder alignment instead of rounding width and height separately (468×1040
+160,000 bit/s and probing up to a 192,000 bit/s ceiling, up to 15 fps and about a
+320-pixel short-edge limit. It chooses an exact-ratio size compatible with the
+encoder alignment instead of rounding width and height separately (306×680
 on the Pixel 8).
 The encoder requests constant bitrate where advertised (otherwise VBR), without
 hard quantization limits or B-frames, and gradual intra refresh only when advertised.
@@ -275,7 +275,8 @@ radio throughput and end-to-end latency still require a connected phone test.
 Unsent cumulative ACKs coalesce to the newest
 count under CoreBluetooth backpressure. The newest ACK is prioritized between
 complete input envelopes, so sustained mouse traffic cannot keep it behind the
-whole input backlog. Sustained mouse MOVE/hover positions are limited to 60 Hz, keeping the newest unsent
+whole input backlog. Mouse hover forwarding is disabled at client launch; motion
+without a held button sends no control input. Sustained mouse drag MOVE positions are limited to 60 Hz, keeping the newest unsent
 position in each 16.7 ms source-time bucket for the same pointer and button state.
 Earlier buckets remain queued during radio backpressure, preserving the motion
 history Android needs for fling velocity; only samples within a bucket coalesce. Clicks, releases, keys, scrolling
@@ -324,9 +325,9 @@ bridge. The relay rejects encoded packets over 128 KiB and closes Bluetooth writ
 blocked for five seconds when peer heartbeats have also expired. Live peer input
 keeps ordinary radio backpressure from being mistaken for a dead connection.
 The Mac bounds pending video to 128 KiB with a one-second
-pending deadline. The encoder discards frames more than two seconds old only with keyframe recovery,
-reducing bitrate when the stream falls behind. After two seconds of continuous
-healthy Bluetooth output, bitrate grows by 25% toward the 1.5 Mbps ceiling; idle gaps do
+pending deadline. The encoder discards frames more than 500 ms old only with keyframe recovery,
+reducing bitrate when the stream falls behind. After ten seconds of continuous
+healthy Bluetooth output, bitrate recovers by 25% toward the 128 kbps ceiling; idle gaps do
 not count as healthy throughput. `DroidMirrorPerformance` logs relay FPS, encoded
 kbps and time spent sending every five seconds, without saving video.
 This is a recovery threshold, not
@@ -419,16 +420,14 @@ sleeping/locked startup before relying on unattended mirroring.
 
 ## Adaptive quality
 
-Capture dimensions stay fixed. Bluetooth starts at 256 kbps, then raises the
-encoder bitrate by 25% after each two seconds of continuous current output, up
-to a 1.5 Mbps ceiling. The previous 256 kbps ceiling left faster links unused.
-This is an operating ceiling, not a claim about measured radio capacity. When
-an encoded frame is more than 400 ms old, bitrate decreases by 25%, at most once
-a second, with a 128 kbps floor independent of the higher probing ceiling.
-Frames older than two seconds trigger safe keyframe recovery and halve bitrate
-without crossing that floor. Idle gaps do not count as healthy throughput.
-After congestion clears, upward probing resumes. Wi-Fi retains its explicit
-profile, and ordinary ADB encoding does not enable this controller.
+Bluetooth captures at roughly a 320-pixel short edge with up to 15 FPS, starting
+at 128 kbps. The encoder recovers bitrate by 25% after each ten seconds of
+continuous current output, capped at the same 128 kbps startup rate. When an encoded frame is more
+than 250 ms old, bitrate decreases by 25%, at most once a second, down to an
+64 kbps floor. Frames older than 500 ms trigger safe keyframe recovery and
+halve bitrate without crossing that floor. Idle gaps do not count as healthy
+throughput. The same profile is restored after Wi-Fi fallback. Wi-Fi retains
+its explicit profile, and ordinary ADB encoding does not enable this controller.
 
 The relay logs `window`, `inFlight`, `deliveredKbps`, `ackWaitMs` and encoded kbps
 so a physical test can distinguish an ACK-limited sender from an overloaded

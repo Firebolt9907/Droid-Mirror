@@ -6,7 +6,7 @@ import java.io.*;
 import java.security.MessageDigest;
 import java.security.SecureRandom;
 
-/** Active-session-only endpoint reached through an already authorized ADB forward. */
+/** Active-session-only local endpoint reached through the paired Iroh tunnel. */
 final class WirelessVideoUpgrade implements AutoCloseable {
     private final LocalServerSocket listener;
     private volatile LocalSocket candidate;
@@ -62,9 +62,9 @@ final class WirelessVideoUpgrade implements AutoCloseable {
                     } catch (IOException unavailable) {
                         // Probes are harmless before commit. After commit, the
                         // Mac restarts Classic video through the authenticated BLE path.
-                        if (committed) socket.close();
+                        if (committed) abort(socket);
                     } finally {
-                        socket.close();
+                        abort(socket);
                         if (candidate==socket) candidate=null;
                     }
                     // A lost ADB transport must not accept another upgrade until
@@ -83,8 +83,9 @@ final class WirelessVideoUpgrade implements AutoCloseable {
     void fallback(byte[] nonce, long received) {
         byte[] active=activeNonce;
         if (closed || active==null || !MessageDigest.isEqual(active,nonce) || !wire.isWireless() || !recovering.compareAndSet(false,true)) return;
-        // Closing does not need the wire lock and interrupts a blocked ADB write.
-        try { LocalSocket socket=candidate; if (socket!=null) socket.close(); } catch (IOException ignored) {}
+        // Do not wait for the wire monitor: its writer may be blocked in ADB.
+        LocalSocket socket=candidate;
+        abort(socket);
         new Thread(() -> {
             try {
                 synchronized (transition) {
@@ -96,9 +97,18 @@ final class WirelessVideoUpgrade implements AutoCloseable {
         },"BluetoothVideoFallback").start();
     }
 
+    private static void abort(LocalSocket socket) {
+        if (socket==null) return;
+        // close() alone need not interrupt a native write already using the fd.
+        // shutdown releases that write before fallback needs the wire monitor.
+        try { socket.shutdownOutput(); } catch (IOException ignored) {}
+        try { socket.shutdownInput(); } catch (IOException ignored) {}
+        try { socket.close(); } catch (IOException ignored) {}
+    }
+
     @Override public void close() {
         closed = true;
         try { listener.close(); } catch (IOException ignored) {}
-        try { if (candidate != null) candidate.close(); } catch (IOException ignored) {}
+        abort(candidate);
     }
 }

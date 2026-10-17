@@ -15,6 +15,8 @@ export CLANG_MODULE_CACHE_PATH="/tmp/droidmirror-clang-cache"
 export SWIFTPM_MODULECACHE_OVERRIDE="/tmp/droidmirror-swift-cache"
 swift build --disable-sandbox --scratch-path /tmp/droidmirror-app-build
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$APP/Contents/Frameworks" "$APP/Contents/Helpers"
+cargo build --locked --release --manifest-path "$ROOT/PeerTransport/Cargo.toml"
+cp "$ROOT/PeerTransport/target/release/libdroidmirror_peer.dylib" "$APP/Contents/Frameworks/libdroidmirror_peer.dylib"
 # The host and background receiver share the same pairing implementation.
 BLE_SOURCES=(Native/NotificationRuntime.swift Native/NotificationPresentationPolicy.swift
   Native/NotificationIconAttachment.swift Native/BLEController.swift Native/BLEIntegration.swift

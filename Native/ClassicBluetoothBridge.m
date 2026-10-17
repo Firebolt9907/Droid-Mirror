@@ -13,6 +13,10 @@
 #import <CoreBluetooth/CoreBluetooth.h>
 #import <Security/Security.h>
 #import <CommonCrypto/CommonHMAC.h>
+#import <dlfcn.h>
+
+typedef void *(*DMPeerStart)(const uint8_t *, uint16_t *);
+typedef void (*DMPeerStop)(void *);
 
 // Private Classic BR/EDR L2CAP PSM, shared with the Shizuku listener.
 // Avoid 0x1001: Android system Bluetooth can already allocate that PSM.
@@ -54,9 +58,16 @@ static NSData *DMUpgradeProof(NSData *key, const char *direction, const uint8_t 
 }
 @property(nonatomic) int wifiSocket;
 @property(nonatomic) BOOL probingWiFi;
+@property(nonatomic) void *peerLibrary;
+@property(nonatomic) void *peerHandle;
+@property(nonatomic) uint16_t peerPort;
+@property(nonatomic) DMPeerStop peerStop;
+@property(nonatomic) BOOL reportedMissingPeer;
+@property(nonatomic) NSUInteger videoProbeAttempts;
 @property(nonatomic) BOOL wifiActive;
 @property(nonatomic) BOOL wifiRecovering;
 @property(nonatomic) NSTimeInterval wifiLastData;
+@property(nonatomic) NSTimeInterval wifiRecoveryRequested;
 @property(nonatomic) uint64_t wifiCutoff;
 @property(nonatomic) NSTimeInterval wifiPendingSince;
 @property(nonatomic, strong) NSData *wirelessProfile;
@@ -119,16 +130,46 @@ static bool DMControl(void *context, const uint8_t *bytes, size_t length) {
 static void DMEvent(void *context, uint8_t event) { [(__bridge DMClassicBridge *)context receiveEvent:event]; }
 
 @implementation DMClassicBridge
+- (void)probePeer {
+    if (_failing || _benchmark || _wifiActive || _wifiRecovering || _probingWiFi || _wifiSocket >= 0) return;
+    if (!_peerHandle) {
+        NSString *executable=NSProcessInfo.processInfo.arguments.firstObject;
+        NSString *library=[[[executable stringByDeletingLastPathComponent] stringByDeletingLastPathComponent]
+            stringByAppendingPathComponent:@"Frameworks/libdroidmirror_peer.dylib"];
+        if (!_peerLibrary) _peerLibrary=dlopen(library.fileSystemRepresentation, RTLD_NOW|RTLD_LOCAL);
+        DMPeerStart start=_peerLibrary ? (DMPeerStart)dlsym(_peerLibrary,"dm_peer_start") : NULL;
+        _peerStop=_peerLibrary ? (DMPeerStop)dlsym(_peerLibrary,"dm_peer_stop") : NULL;
+        if (!start || !_peerStop) {
+            if (!_reportedMissingPeer) fprintf(stderr,"Iroh video transport missing; rebuild matching Mac and Android apps\n");
+            _reportedMissingPeer=YES;
+            printf("EVENT LAN_UNAVAILABLE\n"); fflush(stdout);
+            return;
+        }
+        uint16_t port=0;
+        _peerHandle=start(_pairingKey.bytes,&port); _peerPort=port;
+        if (!_peerHandle || !_peerPort) { printf("EVENT LAN_UNAVAILABLE\n"); fflush(stdout); return; }
+    }
+    [self probeWiFi:_peerPort];
+}
+- (void)stopPeer {
+    if (_peerHandle && _peerStop) _peerStop(_peerHandle);
+    _peerHandle=NULL; _peerPort=0;
+    // Rust threads are stopped before the dylib may be unloaded at process exit.
+}
 - (void)probeWiFi:(uint16_t)port {
     if (_probingWiFi || _wifiSocket >= 0 || _wifiRecovering || _benchmark) return;
     _probingWiFi=YES;
+    if (_videoProbeAttempts++ < 3) fprintf(stderr,"Trying %s video\n",port == _peerPort ? "direct LAN" : "wireless ADB");
     NSData *key=_pairingKey;
     NSData *profile=_wirelessProfile;
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY,0), ^{
         int fd=socket(AF_INET,SOCK_STREAM,0);
         BOOL valid=NO; uint64_t cutoff=0; NSData *nonce=nil;
         if (fd >= 0) {
-            struct timeval timeout={2,0}; int yes=1;
+            // Iroh may need DNS discovery, relay registration and NAT traversal
+            // before the application challenge can arrive. This worker must not
+            // abandon its local socket while the native dial is still pending.
+            struct timeval timeout={port == self.peerPort ? 20 : 2,0}; int yes=1;
             setsockopt(fd,SOL_SOCKET,SO_RCVTIMEO,&timeout,sizeof(timeout));
             setsockopt(fd,SOL_SOCKET,SO_SNDTIMEO,&timeout,sizeof(timeout));
             setsockopt(fd,SOL_SOCKET,SO_NOSIGPIPE,&yes,sizeof(yes));
@@ -158,15 +199,18 @@ static void DMEvent(void *context, uint8_t event) { [(__bridge DMClassicBridge *
         }
         dispatch_async(dispatch_get_main_queue(), ^{
             self.probingWiFi=NO;
+            if (self.failing) { if (fd >= 0) close(fd); return; }
             if (!valid) {
                 if (fd >= 0) close(fd);
                 // A response can be lost after the phone has committed. A BLE
                 // request is harmless if this probe never committed.
                 if (self.ble.ready && nonce) [self.ble requestBluetoothVideo:self.videoReceived nonce:nonce];
+                if (port == self.peerPort) { printf("EVENT LAN_UNAVAILABLE\n"); fflush(stdout); }
                 return;
             }
             if (cutoff < self.videoReceived) { close(fd); [self fail:@"Invalid Wi-Fi video cutoff"]; return; }
             fcntl(fd,F_SETFL,O_NONBLOCK);
+            fprintf(stderr,"Video handoff authenticated over %s\n",port == self.peerPort ? "direct LAN" : "wireless ADB");
             self.wifiNonce=nonce;
             self.wifiSocket=fd; self.wifiCutoff=cutoff; self.wifiLastData=NSDate.timeIntervalSinceReferenceDate;
             self.wifiPendingSince=NSDate.timeIntervalSinceReferenceDate;
@@ -182,10 +226,12 @@ static void DMEvent(void *context, uint8_t event) { [(__bridge DMClassicBridge *
 - (void)fallbackToBluetooth {
     if (_wifiSocket>=0) close(_wifiSocket);
     _wifiSocket=-1; _wifiActive=NO; _wifiRecovering=YES;
+    _wifiRecoveryRequested=NSDate.timeIntervalSinceReferenceDate;
+    printf("EVENT WIFI_RECOVERING\n"); fflush(stdout);
     // The offset counts bytes already accepted by scrcpy's local bridge, even
     // if the ADB socket ended in the middle of an envelope or codec packet.
     if (![_ble requestBluetoothVideo:_videoReceived nonce:_wifiNonce]) [self fail:@"BLE video recovery request failed"];
-    fprintf(stderr,"Wireless ADB dropped; requested Bluetooth video over BLE\n");
+    fprintf(stderr,"Peer video dropped; requested Bluetooth video over BLE\n");
 }
 - (void)pollWiFi {
     uint8_t command[256];
@@ -204,11 +250,22 @@ static void DMEvent(void *context, uint8_t event) { [(__bridge DMClassicBridge *
                 NSInteger port=[[line substringFromIndex:8] integerValue];
                 if (port > 0 && port <= UINT16_MAX) [self probeWiFi:(uint16_t)port];
             }
+            if ([line isEqualToString:@"UPGRADE_PEER"]) [self probePeer];
 
         }
     }
-    if (_wifiSocket < 0) return;
+    if (_wifiSocket < 0) {
+        // Retry until Classic delivers data. Nonce checks and the phone's
+        // recovery guard make duplicate BLE requests harmless.
+        NSTimeInterval now=NSDate.timeIntervalSinceReferenceDate;
+        if (_wifiRecovering && now-_wifiRecoveryRequested >= 1) {
+            _wifiRecoveryRequested=now;
+            if (![_ble requestBluetoothVideo:_videoReceived nonce:_wifiNonce]) [self fail:@"BLE video recovery request failed"];
+        }
+        return;
+    }
     if (NSDate.timeIntervalSinceReferenceDate-_wifiLastData > 4) {
+        fprintf(stderr,"Peer video stalled: queued=%lu received=%llu\n",(unsigned long)_pending.length,(unsigned long long)_videoReceived);
         [self fallbackToBluetooth]; return;
     }
     if (!_wifiActive) {
@@ -230,7 +287,10 @@ static void DMEvent(void *context, uint8_t event) { [(__bridge DMClassicBridge *
         size_t capacity=MIN((NSUInteger)16384,DMQueueLimit-_pending.length);
         if (!capacity) return;
         uint8_t buffer[16384]; n=recv(_wifiSocket,buffer,capacity,0);
-        if (!n || (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)) { [self fallbackToBluetooth]; return; }
+        if (!n || (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)) {
+            fprintf(stderr,"Peer video socket ended: read=%ld error=%d\n",(long)n,n<0 ? errno : 0);
+            [self fallbackToBluetooth]; return;
+        }
         if (n < 0) return;
         _wifiLastData=NSDate.timeIntervalSinceReferenceDate;
         if (!dm_classic_wire_feed_ble(&_wifiWire,buffer,n,DMVideo,DMEvent,NULL,NULL,(__bridge void *)self))
@@ -252,6 +312,7 @@ static void DMEvent(void *context, uint8_t event) { [(__bridge DMClassicBridge *
     if (_failing) return;
     _failing=YES;
     fprintf(stderr,"Closing Bluetooth session before helper termination\n");
+    [self stopPeer];
     [self closeClassicStreams];
     [_channel setDelegate:nil];
     [_channel closeChannel];
@@ -363,6 +424,14 @@ static void DMEvent(void *context, uint8_t event) { [(__bridge DMClassicBridge *
 }
 - (void)receiveEvent:(uint8_t)event {
     if (event == 6) return; // Peer heartbeat keeps lastData fresh without log growth.
+    if (event == 7) {
+        // This helper's parent is the owning Swift host, even when
+        // LaunchServices reports a stale PID for its exec-based launcher.
+        [[NSDistributedNotificationCenter defaultCenter] postNotificationName:@"app.droidmirror.minimizeMirror"
+            object:[NSString stringWithFormat:@"%d", getppid()] userInfo:nil deliverImmediately:YES];
+        fprintf(stderr, "Minimize command received over capture BLE for host %d\n", getppid());
+        return; // Window commands may repeat; lifecycle event deduplication does not apply.
+    }
     uint8_t mask = (uint8_t)(1u << (event - 1));
     if (_eventMask & mask) return;
     _eventMask |= mask;

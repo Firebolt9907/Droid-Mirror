@@ -47,7 +47,7 @@ final class PrivilegedCapture implements AutoCloseable {
         android.util.Log.i("DroidMirrorCapture", "Hybrid HEVC encoder: " + codec.name);
         Options options = Options.parse("5.0", "audio=false", "control=true", "clipboard_autosync=false", "power_on=false", "cleanup=false",
             "video_codec=" + HevcCapturePolicy.CODEC, "video_encoder=" + codec.name,
-            "video_bit_rate=256000", "max_fps=16", "max_size=" + longest, "downsize_on_error=false",
+            "video_bit_rate=" + HevcCapturePolicy.BLUETOOTH_BIT_RATE, "max_fps=" + HevcCapturePolicy.BLUETOOTH_FPS, "max_size=" + longest, "downsize_on_error=false",
             // Hard QP limits force oversized frames even after bitrate reductions.
             // Refresh image detail gradually, including after motion has stopped.
             "video_codec_options=" + codec.bluetoothOptions());
@@ -59,12 +59,10 @@ final class PrivilegedCapture implements AutoCloseable {
         ScreenCapture screen = new ScreenCapture(controller, options);
         controller.setSurfaceCapture(screen);
         encoder = new SurfaceEncoder(screen, streamer, options);
-        // Allow normal radio/ACK jitter before discarding a reference chain. Each
-        // recovery requests an expensive IDR and can reduce the encoder bitrate.
-        encoder.setMaxFrameAgeUs(2000000);
-        // Start conservatively, then probe upward while frames stay current.
-        // Wi-Fi disables freshness control and retains its explicit profile.
-        encoder.setMaxAdaptiveBitRate(1500000);
+        // Bound codec backlog before it becomes seconds of delayed interaction.
+        encoder.setMaxFrameAgeUs(HevcCapturePolicy.BLUETOOTH_MAX_FRAME_AGE_US);
+        // Keep recovery within the Classic budget. Wi-Fi uses its explicit profile.
+        encoder.setMaxAdaptiveBitRate(HevcCapturePolicy.BLUETOOTH_MAX_BIT_RATE);
         controller.start(fatal -> ended.run());
         encoder.start(fatal -> ended.run());
     }
@@ -80,7 +78,7 @@ final class PrivilegedCapture implements AutoCloseable {
     }
     synchronized void restoreBluetoothVideo() {
         if (closed) throw new IllegalStateException("Capture ended");
-        encoder.requestVideoProfile(bluetoothProfile,2000000);
+        encoder.requestVideoProfile(bluetoothProfile,HevcCapturePolicy.BLUETOOTH_MAX_FRAME_AGE_US);
     }
     @Override public synchronized void close() {
         if (closed) return;

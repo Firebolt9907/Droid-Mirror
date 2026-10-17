@@ -100,8 +100,11 @@ class BridgeRuntime(private val context: Context, private val onChanged: Runnabl
     fun sendEvent(value: org.json.JSONObject) { ble.sendEvent(value) }
     fun resetTrust() { ble.revokeTrust() }
 
-    fun findEndpoint() {
+    @JvmOverloads fun findEndpoint(enableWirelessDebugging: Boolean = false) {
         if (destroyed) return
+        // Iroh video and notifications never enable Android's debugging listener.
+        // Retain the old ADB bridge only behind an explicit optional setup action.
+        if (!enableWirelessDebugging) { refreshEndpoint(); return }
         if (!refreshRunning.compareAndSet(false, true)) return
         finder.enableAndFind(
             onStatus = { update(it, details) },
@@ -141,7 +144,7 @@ class BridgeRuntime(private val context: Context, private val onChanged: Runnabl
                         update("Waiting for a new ADB port", "Wireless Debugging listener is offline")
                         ble.publish()
                     }
-                    current == null -> Unit
+                    current == null -> update("Bluetooth ready", "Iroh video uses direct LAN only. Wireless ADB is the optional fallback.")
                     current.port != previousPort -> {
                         update(
                             "Ready for Mac",

@@ -15,6 +15,7 @@ struct sc_camera_cutout {
 
 // All access is on the SDL main thread. NULL clears geometry between sessions.
 void sc_camera_cutout_set(const struct sc_camera_cutout *cutout);
+bool sc_camera_cutout_matches_frame(struct sc_size frame);
 void sc_camera_cutout_render(SDL_Renderer *renderer, const SDL_FRect *content,
                             struct sc_size frame, enum sc_orientation orientation);
 void sc_camera_cutout_update_window(SDL_Renderer *renderer, const SDL_FRect *content,

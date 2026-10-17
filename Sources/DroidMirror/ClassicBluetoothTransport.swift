@@ -10,13 +10,14 @@ final class ClassicBluetoothTransport {
     private var consumedLines = 0
     private var commands: FileHandle?
     private var upgradeTask: Task<Void, Never>?
-    private var wirelessActive = false
+    private var lanProbeFinished = false
     private var forwards: [String: String] = [:]
+    private var wirelessActive = false
     var onEvent: ((Event) -> Void)?
     enum Event: String {
         case phoneOn = "PHONE_ON", sessionEnded = "SESSION_ENDED", phoneLocalUse = "PHONE_LOCAL_USE"
         case streamStarted = "STREAM_STARTED", captureFailed = "CAPTURE_FAILED"
-        case wirelessActive = "WIFI_ACTIVE", bluetoothActive = "BLUETOOTH_ACTIVE"
+        case wirelessActive = "WIFI_ACTIVE", bluetoothActive = "BLUETOOTH_ACTIVE", wirelessRecovering = "WIFI_RECOVERING"
     }
     private func pollEvents() {
         guard let outputURL, let data = try? Data(contentsOf: outputURL), data.count <= 16_384 else { return }
@@ -24,8 +25,10 @@ final class ClassicBluetoothTransport {
         let completed = max(0, lines.count - 1)
         if completed > consumedLines {
             for line in lines[consumedLines..<completed] {
+                if line == "EVENT LAN_UNAVAILABLE" { lanProbeFinished = true; continue }
                 if line.hasPrefix("EVENT "), let event = Event(rawValue: String(line.dropFirst(6))) {
                     if event == .streamStarted { attemptWirelessUpgrade() }
+                    if event == .wirelessRecovering { upgradeTask?.cancel(); upgradeTask=nil }
                     if event == .wirelessActive { wirelessActive = true; upgradeTask?.cancel(); upgradeTask=nil }
                     if event == .bluetoothActive { wirelessActive=false; attemptWirelessUpgrade() }
                     onEvent?(event)
@@ -36,54 +39,67 @@ final class ClassicBluetoothTransport {
     }
 
     private func attemptWirelessUpgrade() {
-        guard upgradeTask == nil, let adb = ToolLocator.find("adb") else { return }
+        guard upgradeTask == nil else { return }
         let token = generation
         upgradeTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(3))
             while !Task.isCancelled {
-                guard let self, token == self.generation, !self.wirelessActive, self.process?.isRunning == true else { return }
-                // ADB auto-connects previously paired wireless-debugging services.
-                // Never use USB or a model-name match to select an upgrade target.
-                let devices = (try? await ProcessRunner.output(adb, ["devices"], timeout: 3)) ?? ""
-                guard token == self.generation, !Task.isCancelled else { return }
-                // ADB discards forwards when a wireless device disconnects. Drop
-                // stale ports so the next connection can allocate a working one.
-                if let listing = try? await ProcessRunner.output(adb, ["forward", "--list"], timeout: 3) {
-                    guard token == self.generation, !Task.isCancelled else { return }
-                    let active = Set(listing.split(separator: "\n").map {
-                        $0.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
-                    })
-                    self.forwards = self.forwards.filter { serial, port in
-                        active.contains("\(serial) tcp:\(port) localabstract:droidmirror_video_upgrade")
-                    }
+                guard let self, token == self.generation, !self.wirelessActive,
+                      self.process?.isRunning == true else { return }
+                self.lanProbeFinished = false
+                try? self.commands?.write(contentsOf: Data("UPGRADE_PEER\n".utf8))
+                // Finish the LAN attempt before touching wireless ADB. Bluetooth
+                // keeps streaming throughout discovery and unsuccessful probes.
+                for _ in 0..<220 {
+                    if self.lanProbeFinished { break }
+                    guard token == self.generation, !Task.isCancelled, !self.wirelessActive else { return }
+                    try? await Task.sleep(for: .milliseconds(100))
                 }
-                for line in devices.split(separator: "\n") {
-                    let fields = line.split(whereSeparator: { $0.isWhitespace })
-                    guard fields.count >= 2, fields[1] == "device" else { continue }
-                    let serial = String(fields[0])
-                    guard serial.contains(":") || serial.hasSuffix("._adb-tls-connect._tcp") else { continue }
-                    var port = self.forwards[serial]
-                    if port == nil, self.forwards.count < 32 {
-                        port = try? await ProcessRunner.output(adb, ["-s", serial, "forward", "tcp:0", "localabstract:droidmirror_video_upgrade"], timeout: 3)
-                            .trimmingCharacters(in: .whitespacesAndNewlines)
-                        if let port, UInt16(port) != nil {
-                            if token != self.generation || Task.isCancelled {
-                                _ = try? await ProcessRunner.output(adb, ["-s", serial, "forward", "--remove", "tcp:\(port)"], timeout: 3)
-                                return
-                            }
-                            self.forwards[serial] = port
-                        }
-                    }
-                    guard token == self.generation, !Task.isCancelled, !self.wirelessActive, self.process?.isRunning == true else { return }
-                    if let port, let value = UInt16(port), value > 0 {
-                        try? self.commands?.write(contentsOf: Data("UPGRADE \(value)\n".utf8))
-                        try? await Task.sleep(for: .seconds(3))
-                    }
-                }
+                guard token == self.generation, !Task.isCancelled, !self.wirelessActive else { return }
+                await self.attemptADBUpgrade(token: token)
                 try? await Task.sleep(for: .seconds(10))
             }
         }
     }
+    private func attemptADBUpgrade(token: UUID) async {
+        guard let adb = ToolLocator.find("adb"), token == generation, !Task.isCancelled else { return }
+        let devices = (try? await ProcessRunner.output(adb, ["devices"], timeout: 3)) ?? ""
+        guard token == generation, !Task.isCancelled else { return }
+        if let listing = try? await ProcessRunner.output(adb, ["forward", "--list"], timeout: 3) {
+            guard token == generation, !Task.isCancelled else { return }
+            let active = Set(listing.split(separator: "\n").map {
+                $0.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
+            })
+            forwards = forwards.filter { serial, port in
+                active.contains("\(serial) tcp:\(port) localabstract:droidmirror_video_upgrade")
+            }
+        }
+        for line in devices.split(separator: "\n") {
+            let fields = line.split(whereSeparator: { $0.isWhitespace })
+            guard fields.count >= 2, fields[1] == "device" else { continue }
+            let serial = String(fields[0])
+            guard serial.contains(":") || serial.hasSuffix("._adb-tls-connect._tcp") else { continue }
+            guard token == generation, !Task.isCancelled, !wirelessActive, process?.isRunning == true else { return }
+            var port = forwards[serial]
+            if port == nil, forwards.count < 32 {
+                port = try? await ProcessRunner.output(adb, ["-s", serial, "forward", "tcp:0", "localabstract:droidmirror_video_upgrade"], timeout: 3)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                if let port, let value = UInt16(port), value > 0 {
+                    if token != generation || Task.isCancelled {
+                        _ = try? await ProcessRunner.output(adb, ["-s", serial, "forward", "--remove", "tcp:\(port)"], timeout: 3)
+                        return
+                    }
+                    forwards[serial] = port
+                }
+            }
+            guard token == generation, !Task.isCancelled, !wirelessActive else { return }
+            if let port, let value = UInt16(port), value > 0 {
+                try? commands?.write(contentsOf: Data("UPGRADE \(value)\n".utf8))
+                try? await Task.sleep(for: .seconds(3))
+            }
+        }
+    }
+
     private func monitorEvents() {
         monitor = Task { [weak self] in
             while !Task.isCancelled {

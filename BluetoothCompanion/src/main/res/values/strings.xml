@@ -3,6 +3,7 @@
     <string name="stream_destination">Mirroring to %1$s</string>
     <string name="stream_short_status">Mirroring</string>
     <string name="stream_duration">Duration: %1$s</string>
+    <string name="stream_minimize">Minimize</string>
     <string name="stream_disconnect">Stop Mirroring</string>
     <string name="stream_peer_fallback">your paired Mac</string>
 </resources>

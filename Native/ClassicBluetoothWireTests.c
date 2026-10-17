@@ -18,6 +18,21 @@ static bool control_video(void *context, const uint8_t *bytes, size_t length) {
     memcpy(out->controls + out->control_size, bytes, length); out->control_size += length; return true;
 }
 int main(int argc, char **argv) {
+    // A window command is repeatable and belongs only to the BLE return wire.
+    for (uint8_t version = '3'; version <= '6'; ++version) {
+        const uint8_t commands[] = {'D','M','B','T','0','0','0',version, 1,0,0,0,1,7, 1,0,0,0,1,7};
+        for (size_t fragment = 1; fragment <= sizeof(commands); ++fragment) {
+            DMClassicWire commandWire; dm_classic_wire_init(&commandWire); Output commandsOut = {0};
+            bool accepted = true;
+            for (size_t offset = 0; offset < sizeof(commands) && accepted; offset += fragment) {
+                size_t count = sizeof(commands) - offset; if (count > fragment) count = fragment;
+                accepted = dm_classic_wire_feed_ble(&commandWire, commands + offset, count, video, event, control_video, setup, &commandsOut);
+            }
+            assert(accepted == (version == '5'));
+            if (accepted) assert(commandsOut.event_count == 2 && commandsOut.events[0] == 7 && commandsOut.events[1] == 7);
+            else assert(commandsOut.event_count == 0);
+        }
+    }
     const uint8_t onlyVideo[]={'D','M','B','T','0','0','0','6',0,0,0,0,2,42,43};
     for (size_t fragment=1;fragment<=sizeof(onlyVideo);++fragment) {
         DMClassicWire strict; dm_classic_wire_init_video_only(&strict); Output out={0};

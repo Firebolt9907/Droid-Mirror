@@ -33,7 +33,7 @@ public final class VideoWire {
     }
     public static int[] dimensions(int width, int height) {
         if (width < 16 || height < 16) throw new IllegalArgumentException("Invalid display size");
-        int limit = (int) Math.min(Math.max(width, height), (long) Math.max(width, height) * 480 / Math.min(width, height));
+        int limit = (int) Math.min(Math.max(width, height), (long) Math.max(width, height) * HevcCapturePolicy.BLUETOOTH_SHORT_EDGE / Math.min(width, height));
         return com.genymobile.scrcpy.model.ExactAspectRatio.fit(width, height, limit, 2, null);
     }
 }

@@ -540,6 +540,7 @@ sc_screen_init(struct sc_screen *screen,
     screen->paused = false;
     screen->resume_frame = NULL;
     screen->camera_cutout_requested = false;
+    screen->camera_cutout_request_at = 0;
     sc_camera_cutout_set(NULL);
     screen->orientation = SC_ORIENTATION_0;
     screen->disconnected = false;
@@ -1002,10 +1003,6 @@ sc_screen_apply_frame(struct sc_screen *screen, bool can_resize) {
     assert(screen->video);
     assert(screen->window_shown);
 
-    if (!screen->camera_cutout_requested && screen->controller && !screen->camera) {
-        struct sc_control_msg request = {.type = SC_CONTROL_MSG_TYPE_GET_CAMERA_CUTOUT};
-        screen->camera_cutout_requested = sc_controller_push_msg(screen->controller, &request);
-    }
     sc_fps_counter_add_rendered_frame(&screen->fps_counter);
 
     AVFrame *frame = screen->frame;
@@ -1017,8 +1014,19 @@ sc_screen_apply_frame(struct sc_screen *screen, bool can_resize) {
         return false;
     }
 
-    if (screen->frame_size.width != new_frame_size.width
-            || screen->frame_size.height != new_frame_size.height) {
+    bool frame_size_changed = screen->frame_size.width != new_frame_size.width
+            || screen->frame_size.height != new_frame_size.height;
+    sc_tick cutout_now = sc_tick_now();
+    if (screen->controller && !screen->camera
+            && (!screen->camera_cutout_requested || frame_size_changed
+                || (!sc_camera_cutout_matches_frame(new_frame_size)
+                    && cutout_now >= screen->camera_cutout_request_at))) {
+        struct sc_control_msg request = {.type = SC_CONTROL_MSG_TYPE_GET_CAMERA_CUTOUT};
+        screen->camera_cutout_requested = sc_controller_push_msg(screen->controller, &request);
+        screen->camera_cutout_request_at = cutout_now + SC_TICK_FROM_SEC(1);
+    }
+
+    if (frame_size_changed) {
 
         // frame dimension changed
         screen->frame_size = new_frame_size;
@@ -1264,6 +1272,11 @@ sc_screen_handle_event(struct sc_screen *screen, const SDL_Event *event) {
             }
             return;
         }
+        case SC_EVENT_CAMERA_CUTOUT_UPDATED:
+            if (screen->window_shown && !screen->camera) {
+                sc_screen_render(screen, false);
+            }
+            return;
         case SDL_EVENT_WINDOW_EXPOSED:
             sc_screen_render(screen, true);
             return;

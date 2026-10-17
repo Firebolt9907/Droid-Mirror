@@ -10,6 +10,8 @@ java -cp "$work" VideoWireTest
 java -cp "$work" VideoWindowTest
 java -cp "$work" BluetoothVideoBudgetTest
 java -cp "$work" BitrateRecoveryTest
+javac -cp "$work" -d "$work" scrcpy-5.0/server/src/main/java/com/genymobile/scrcpy/video/FrameFreshness.java BluetoothCompanion/tests/FrameFreshnessTest.java
+java -cp "$work" FrameFreshnessTest
 java -cp "$work" BluetoothWireTest
 java -cp "$work" WirelessUpgradeTest "$work"
 java -cp "$work" WirelessFallbackTest "$work"

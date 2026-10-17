@@ -36,7 +36,7 @@ struct SettingsView: View {
                     Text("Experimental direct connection. Mirroring is unavailable in this build.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
-                Text("Bluetooth starts at 480p, up to 16 fps, and 256 kbps HEVC, then upgrades to the picture settings below when paired wireless ADB becomes available. Enable Wireless debugging and pair this Mac once. Mouse, keyboard and navigation stay on Bluetooth. Audio requires a direct ADB session. Authorize Shizuku and enable the background bridge once in the Android companion.")
+                Text("Bluetooth starts at 320p, up to 15 fps, and a 128 kbps HEVC ceiling, then upgrades video over Iroh to the picture settings below. Video tries direct LAN first, then an already-paired wireless ADB connection, then stays on Bluetooth. Relays and public Iroh discovery are disabled. Wireless ADB fallback requires Wireless debugging and one-time ADB pairing. Mouse, keyboard and navigation stay on Bluetooth. Audio requires a direct ADB session. Authorize Shizuku and enable the background bridge once in the Android companion.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section("iPhone-like behavior") {

@@ -142,7 +142,16 @@ static void *DMPhoneShadowKey = &DMPhoneShadowKey;
     NSRect phone = self.phoneRect;
     CGPathRef path = DMCreatePixelScreenPath(phone.size, NO);
     CGContextSaveGState(context);
+    // The panel reuses its backing store as the phone moves and resizes.
+    // Erase the previous silhouette before painting the new shadow.
+    CGContextClearRect(context, NSRectToCGRect(dirtyRect));
     CGContextTranslateCTM(context, phone.origin.x, phone.origin.y);
+    // Draw only the blur outside the phone. A solid shadow caster can show as
+    // a second black phone while AppKit moves/resizes the two windows.
+    CGContextAddRect(context, CGRectOffset(NSRectToCGRect(self.bounds),
+        -phone.origin.x, -phone.origin.y));
+    CGContextAddPath(context, path);
+    CGContextEOClip(context);
     CGContextSetFillColorWithColor(context, NSColor.blackColor.CGColor);
     // A wide ambient shadow adds depth; a tighter contact shadow defines the edge.
     CGContextSetShadowWithColor(context, CGSizeMake(0, -18), 60,
@@ -169,6 +178,7 @@ static void *DMPhoneShadowKey = &DMPhoneShadowKey;
 @property(nonatomic, weak) NSWindow *host;
 @property(nonatomic, strong) DMPhoneShadowPanel *panel;
 @property(nonatomic, strong) id closeObserver;
+@property(nonatomic) BOOL updateScheduled;
 @property(nonatomic) NSSize drawnSize;
 @property(nonatomic) NSRect drawnPhoneRect;
 @property(nonatomic) CGFloat topRadius;
@@ -242,6 +252,24 @@ static void *DMPhoneShadowKey = &DMPhoneShadowKey;
         self.panel.contentView.needsDisplay = YES;
     }
     if (self.panel.parentWindow != window) [window addChildWindow:self.panel ordered:NSWindowBelow];
+    // Child-window movement may finish after the parent's move notification.
+    // Reconcile once AppKit has completed that operation, then flush the new
+    // drawing rather than leaving an old backing store at the new position.
+    if (!self.updateScheduled) {
+        self.updateScheduled = YES;
+        __weak typeof(self) weakSelf = self;
+        __weak NSView *weakScreen = screen;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            DMPhoneShadow *shadow = weakSelf;
+            NSView *surface = weakScreen;
+            if (!shadow) return;
+            if (surface && surface.window == shadow.host) {
+                [shadow updateForScreen:surface];
+                [shadow.panel displayIfNeeded];
+            }
+            shadow.updateScheduled = NO;
+        });
+    }
 }
 @end
 

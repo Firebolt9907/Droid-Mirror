@@ -61,6 +61,29 @@ public final class WirelessFallbackTest {
                 check(wire.upgrade(new ByteArrayOutputStream(),key,nonce,profile));
                 check(wire.fallback(expected.length));
             }
+            // A full Wi-Fi backlog must respect Bluetooth credit during replay.
+            ByteArrayOutputStream pacedClassic=new ByteArrayOutputStream();
+            BluetoothWire pacedWire=new BluetoothWire(pacedClassic);
+            VideoWindow window=new VideoWindow(BluetoothWire.VIDEO_WINDOW_BYTES,1000);
+            pacedWire.setVideoWindow(window);
+            check(pacedWire.upgrade(new ByteArrayOutputStream(),key,nonce,profile));
+            pacedWire.enableWirelessThroughput(); pacedWire.video(expected);
+            Future<?> recovery=executor.submit(() -> {
+                try { check(pacedWire.fallback(0)); }
+                catch(IOException error) { throw new RuntimeException(error); }
+            });
+            long delivered=0, replayDeadline=System.nanoTime()+5_000_000_000L;
+            while (delivered<expected.length && System.nanoTime()<replayDeadline) {
+                Thread.sleep(20);
+                byte[] bytes=payload(pacedClassic.toByteArray(),8,false);
+                check(bytes.length-delivered<=BluetoothWire.VIDEO_WINDOW_BYTES);
+                delivered=bytes.length;
+                window.acknowledge(delivered);
+            }
+            check(delivered==expected.length);
+            recovery.get(2,TimeUnit.SECONDS);
+            check(Arrays.equals(payload(pacedClassic.toByteArray(),8,false),expected));
+            check(window.inFlightBytes()==0);
             // Confirmation can fail while pre-handoff Classic bytes are in flight.
             BluetoothWire wire=new BluetoothWire(new ByteArrayOutputStream());
             wire.video(new byte[]{1,2,3}); check(wire.upgrade(new ByteArrayOutputStream(),key,nonce,profile));

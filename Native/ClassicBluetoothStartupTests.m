@@ -134,6 +134,7 @@ static void TestVideoAckCadence(void) {
 }
 
 static void TestDroppedADB(void) {
+    for (int silent=0; silent<2; ++silent) {
     int video[2], output[2]; assert(!socketpair(AF_UNIX,SOCK_STREAM,0,video));
     assert(!socketpair(AF_UNIX,SOCK_STREAM,0,output));
     DMStartupBridge *bridge=[DMStartupBridge new];
@@ -141,16 +142,67 @@ static void TestDroppedADB(void) {
     bridge.commands=[NSMutableData data]; bridge.pending=[NSMutableData data];
     bridge.wifiSocket=video[1]; bridge.client=output[1]; bridge.wifiActive=YES;
     bridge.wifiNonce=[NSMutableData dataWithLength:32]; bridge.videoReceived=123;
-    bridge.wifiLastData=NSDate.timeIntervalSinceReferenceDate;
-    close(video[0]);
+    bridge.wifiLastData=NSDate.timeIntervalSinceReferenceDate-(silent ? 5 : 0);
+    if (!silent) close(video[0]);
     [bridge pollWiFi];
     assert(bridge.wifiSocket==-1 && !bridge.wifiActive && bridge.wifiRecovering);
     assert(ble.requests==1 && ble.received==123 && [ble.nonce isEqual:bridge.wifiNonce]);
+    bridge.wifiRecoveryRequested=NSDate.timeIntervalSinceReferenceDate-2;
+    [bridge pollWiFi]; assert(ble.requests==2 && ble.received==123);
+    [bridge pollWiFi]; assert(ble.requests==2); // Back off between attempts.
+    bridge.videoReceived=124;
+    bridge.channel=nil;
+    // Classic data confirms that the existing channel resumed.
+    [bridge l2capChannelData:nil data:"DMBT0006" length:8];
+    assert(!bridge.wifiRecovering);
+    bridge.wifiRecoveryRequested=NSDate.timeIntervalSinceReferenceDate-2;
+    [bridge pollWiFi]; assert(ble.requests==2);
     // The existing scrcpy socket remains open and connected.
     assert(bridge.client==output[1] && send(bridge.client,"x",1,0)==1);
     char byte; assert(recv(output[0],&byte,1,0)==1 && byte=='x');
     close(output[0]); close(output[1]);
+    if (silent) close(video[0]);
+    }
     puts("Dropped ADB: real socket EOF requests BLE recovery with exact offset and nonce, preserving scrcpy socket");
+}
+
+static void TestColdPeerConnection(void) {
+    int listener=socket(AF_INET,SOCK_STREAM,0); assert(listener>=0);
+    struct sockaddr_in address={0}; address.sin_family=AF_INET;
+    address.sin_addr.s_addr=htonl(INADDR_LOOPBACK);
+    assert(!bind(listener,(struct sockaddr *)&address,sizeof(address)) && !listen(listener,1));
+    socklen_t size=sizeof(address); assert(!getsockname(listener,(struct sockaddr *)&address,&size));
+    DMStartupBridge *bridge=[DMStartupBridge new];
+    bridge.wifiSocket=-1; bridge.peerPort=ntohs(address.sin_port);
+    bridge.pairingKey=[NSMutableData dataWithLength:32];
+    bridge.wirelessProfile=[NSMutableData dataWithLength:12];
+    dispatch_semaphore_t completed=dispatch_semaphore_create(0);
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY,0), ^{
+        int peer=accept(listener,NULL,NULL); assert(peer>=0);
+        int yes=1; setsockopt(peer,SOL_SOCKET,SO_NOSIGPIPE,&yes,sizeof(yes));
+        // Model a relay/DNS cold start longer than the former two-second budget.
+        [NSThread sleepForTimeInterval:3];
+        uint8_t hello[40]={0}; memcpy(hello,"DMWIFI03",8);
+        assert(send(peer,hello,sizeof(hello),0)==sizeof(hello));
+        uint8_t request[44]; assert(DMReadExact(peer,request,sizeof(request)));
+        NSData *proof=DMUpgradeProof(bridge.pairingKey,"client",hello+8,request,12);
+        assert(!memcmp(proof.bytes,request+12,32));
+        uint8_t response[48]={0};
+        NSMutableData *authenticated=[bridge.wirelessProfile mutableCopy];
+        [authenticated appendBytes:response length:8];
+        NSData *server=DMUpgradeProof(bridge.pairingKey,"server",hello+8,authenticated.bytes,authenticated.length);
+        memcpy(response+8,server.bytes,32); memcpy(response+40,"DMBT0006",8);
+        assert(send(peer,response,sizeof(response),0)==sizeof(response));
+        close(peer); close(listener); dispatch_semaphore_signal(completed);
+    });
+    [bridge probeWiFi:bridge.peerPort];
+    NSDate *deadline=[NSDate dateWithTimeIntervalSinceNow:6];
+    do { [[NSRunLoop mainRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.02]]; }
+    while (bridge.wifiSocket<0 && deadline.timeIntervalSinceNow>0);
+    assert(bridge.wifiSocket>=0 && bridge.wifiCutoff==0 && bridge.wifiNonce.length==32);
+    close(bridge.wifiSocket);
+    assert(!dispatch_semaphore_wait(completed,dispatch_time(DISPATCH_TIME_NOW,NSEC_PER_SEC)));
+    puts("Cold Iroh startup: delayed challenge survives discovery, authenticates and preserves video cutoff");
 }
 
 int main(void) {
@@ -158,6 +210,7 @@ int main(void) {
         TestNativeClassicStreams();
         TestVideoAckCadence();
         TestDroppedADB();
+        TestColdPeerConnection();
         DMStartupDevice *device=[DMStartupDevice new];
         DMStartupBridge *bridge=[DMStartupBridge new];
         bridge.device=(IOBluetoothDevice *)device;

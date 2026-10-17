@@ -30,6 +30,7 @@ public final class CaptureService extends Service {
         volatile ParcelFileDescriptor controlPipe;
         volatile BluetoothWire wire;
         volatile WirelessVideoUpgrade wirelessUpgrade;
+        volatile PeerVideoTransport peerTransport;
         volatile BleInputServer ble;
         volatile ShizukuDisplayClient guard;
         volatile boolean stopped;
@@ -113,7 +114,8 @@ public final class CaptureService extends Service {
     }
     @Override public int onStartCommand(Intent intent, int flags, int id) {
         if (intent != null && (StreamNotifications.DISCONNECT.equals(intent.getAction())
-                || StreamNotifications.DISMISSED.equals(intent.getAction()))) {
+                || StreamNotifications.DISMISSED.equals(intent.getAction())
+                || StreamNotifications.MINIMIZE.equals(intent.getAction()))) {
             notificationAction(intent);
             // A stale PendingIntent must not start readiness after a process death.
             if (bridge == null && server == null) { stopSelfResult(id); return START_NOT_STICKY; }
@@ -165,6 +167,19 @@ public final class CaptureService extends Service {
         SessionState state = current;
         if (state == null || state.stopped || !state.streamStarted.get()
                 || !state.token.equals(intent.getStringExtra(StreamNotifications.TOKEN))) return;
+        if (StreamNotifications.MINIMIZE.equals(intent.getAction())) {
+            // The capture BLE channel is already authenticated to this session's
+            // Mac; background discovery may be unavailable while it is active.
+            new Thread(() -> {
+                try {
+                    BluetoothWire wire = state.wire;
+                    if (current == state && !state.stopped && wire != null) wire.event(BluetoothWire.MINIMIZE_WINDOW);
+                } catch (IOException error) {
+                    android.util.Log.w("DroidMirrorBluetooth", "Could not send minimize command", error);
+                }
+            }, "MinimizeMirror").start();
+            return;
+        }
         if (StreamNotifications.DISMISSED.equals(intent.getAction())) {
             state.promotionDismissed = true;
             return;
@@ -252,6 +267,7 @@ public final class CaptureService extends Service {
                             if (state.stopped || guard == null) throw new IOException("Video session ended before quality upgrade");
                             if (profile==null) guard.restoreBluetoothVideo(); else guard.upgradeVideo(profile);
                         });
+                        if (!state.stopped) state.peerTransport = new PeerVideoTransport(this, BlePairing.key(this, peer));
                     }
                 }
                 catch (IOException unavailable) { android.util.Log.d("DroidMirrorBluetooth", "Wireless upgrade unavailable", unavailable); }
@@ -376,6 +392,7 @@ public final class CaptureService extends Service {
             state.stopped = true;
             state.videoWindow.close();
             if (state.wirelessUpgrade != null) state.wirelessUpgrade.close();
+            if (state.peerTransport != null) state.peerTransport.close();
             if (state.ble != null) state.ble.close();
             ShizukuDisplayClient active = state.guard; state.guard = null;
             if (active != null) active.close(); else if (!state.hasGuard && state.streamStarted.get()) auditEnd(state, false);

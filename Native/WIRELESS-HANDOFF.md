@@ -1,3 +1,8 @@
+> Companion 0.26 tries Iroh on the LAN first, wireless ADB second, and Bluetooth
+> last. Relays and public Iroh discovery are disabled. See [the current transport
+> order](PEER-TRANSPORT.md). The DMWIFI03 handoff and BLE recovery below apply to
+> both network paths; ADB pairing is needed only for the second path.
+
 # Bluetooth-first wireless video handoff
 
 Use matching Mac sources and companion 0.16 or newer. The default Connection
@@ -94,6 +99,14 @@ unacknowledged byte suffix on Classic. This completes a packet interrupted by AD
 loss without duplicate bytes or decoder corruption. The same local scrcpy socket,
 process and window remain alive. Recovery waits for this suffix before continuing
 new Bluetooth-profile frames, so a large in-flight frame can extend the pause.
+Companion 0.21 shuts down both directions of the ADB socket before closing it,
+releasing a native write before recovery acquires the video lock. Replay obeys
+the Bluetooth ACK window without counting already-sent bytes twice. ACK progress
+renews the stall deadline, so a long but advancing replay does not end capture;
+duplicate ACKs do not renew it. Wireless reservations allow twelve seconds without
+progress to cover silent-loss detection and BLE recovery; Bluetooth retains its
+five-second stalled-peer timeout. The Mac shows recovery status and retries the
+nonce-bound BLE request once per second until Classic data resumes.
 
 Sparse one-second ADB envelope heartbeats never enter the decoder. Four seconds
 without transport data triggers the same BLE fallback for silent network loss.

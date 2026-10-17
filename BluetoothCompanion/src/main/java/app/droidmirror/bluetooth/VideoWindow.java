@@ -8,6 +8,9 @@ public final class VideoWindow {
     private final long timeoutMillis;
     private long sent, acknowledged;
     private long waitNanos;
+    private long progressNanos = System.nanoTime();
+    // Mac detects silent ADB loss after four seconds, then signals over BLE.
+    private static final long WIRELESS_RECOVERY_MILLIS = 12000;
     private boolean closed;
     private boolean wireless;
     private BluetoothVideoBudget bluetoothBudget;
@@ -22,9 +25,14 @@ public final class VideoWindow {
     }
     public synchronized void reserve(int count) throws IOException {
         if (count <= 0 || count > capacity) throw new IOException("Invalid video reservation");
-        long deadline = System.nanoTime() + timeoutMillis * 1_000_000;
-        while (!closed && sent - acknowledged + count > capacity) {
-            long remaining = deadline - System.nanoTime();
+        awaitCredit(sent + count, 0);
+        sent += count;
+    }
+    private void awaitCredit(long end, long received) throws IOException {
+        long startedWaiting = System.nanoTime();
+        while (!closed && end - Math.max(acknowledged, received) > capacity) {
+            long timeout = wireless ? Math.max(timeoutMillis, WIRELESS_RECOVERY_MILLIS) : timeoutMillis;
+            long remaining = timeout * 1_000_000 - (System.nanoTime() - Math.max(startedWaiting, progressNanos));
             if (remaining <= 0) throw new IOException("Mac video acknowledgement stalled");
             long started = System.nanoTime();
             try { wait(Math.max(1, remaining / 1_000_000)); }
@@ -32,10 +40,15 @@ public final class VideoWindow {
             finally { waitNanos += System.nanoTime() - started; }
         }
         if (closed) throw new IOException("Video window closed");
-        sent += count;
+    }
+    /** Replay is already counted in sent; pace it without reserving it twice. */
+    public synchronized void awaitBluetoothReplay(long end, long received) throws IOException {
+        if (end > sent || received < 0 || received > sent) throw new IOException("Invalid replay offset");
+        awaitCredit(end, received);
     }
     public synchronized void acknowledge(long count) throws IOException {
         if (count < acknowledged || count > sent) throw new IOException("Invalid video acknowledgement");
+        if (count > acknowledged) progressNanos = System.nanoTime();
         acknowledged = count;
         if (!wireless && bluetoothBudget != null)
             capacity = bluetoothBudget.acknowledge(count, System.nanoTime() / 1000000);
@@ -44,12 +57,14 @@ public final class VideoWindow {
     /** Keep cumulative accounting, but allow Wi-Fi throughput between BLE ACKs. */
     public synchronized void useWirelessCapacity() {
         wireless = true;
+        progressNanos = System.nanoTime();
         capacity = 2 * 1024 * 1024;
         notifyAll();
     }
     public synchronized long acknowledgedBytes() { return acknowledged; }
     public synchronized void useBluetoothCapacity() {
         wireless = false;
+        progressNanos = System.nanoTime();
         if (bluetoothBudget != null) bluetoothBudget.reset(acknowledged);
         capacity = BluetoothWire.VIDEO_WINDOW_BYTES;
         notifyAll();

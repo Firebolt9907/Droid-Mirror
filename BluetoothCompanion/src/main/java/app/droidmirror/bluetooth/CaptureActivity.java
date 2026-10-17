@@ -30,7 +30,7 @@ public final class CaptureActivity extends Activity {
         super.onCreate(state);
         LinearLayout layout = new LinearLayout(this); layout.setOrientation(LinearLayout.VERTICAL); layout.setPadding(32, 48, 32, 32);
         status = new TextView(this);
-        status.setText("Set up once: pair your Mac, authorize Shizuku, select the Mac and enable connections. Then press Mirror on your Mac whenever needed. There is no Android screen-share prompt.\n\n480p · up to 16 fps · HEVC 256 kbps target. Hybrid mode keeps HEVC when video upgrades to Wi-Fi; input stays on BLE. Direct ADB mode keeps ADB input and its selected codec. Protected content stays protected.");
+        status.setText("Set up once: pair your Mac, authorize Shizuku, select the Mac and enable connections. Then press Mirror on your Mac whenever needed. There is no Android screen-share prompt.\n\n320p · up to 15 fps · HEVC 160 kbps target. Hybrid mode keeps HEVC when video upgrades to Wi-Fi; input stays on BLE. Direct ADB mode keeps ADB input and its selected codec. Protected content stays protected.");
         layout.addView(status);
         if (getIntent().getBooleanExtra("pairMac", false)) status.setText("Select your paired Mac below, then tap Pair Mac (mirroring and notifications). Paste that one code into DroidMirror → Pair Bluetooth… on your Mac.");
         secureSettingsStatus = new TextView(this); layout.addView(secureSettingsStatus);

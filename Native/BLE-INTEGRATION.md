@@ -91,6 +91,23 @@ requirement and cause repeated Always Allow prompts. The receiver caches its key
 in memory, including failed reads, so reconnects do not repeatedly request access.
 Explicit receiver configuration/re-pairing invalidates that cache.
 
+The notification receiver checks both the notification and input services for
+phones already connected to macOS before scanning advertisements. It rediscovers
+the notification service when Android invalidates GATT handles, ignores callbacks
+for retired characteristics, and temporarily skips candidates whose service setup
+fails or times out. This avoids repeatedly selecting a stale input connection.
+
+Session and window-visible events validate their actual sender PID through
+`NSRunningApplication(processIdentifier:)`. The launcher can leave the host's
+LaunchServices listing at PID -1; comparing heartbeats with that listing would
+reject all session updates and keep notification delivery suppressed. With
+DroidMirror open, verify this regression outside the sandbox:
+
+```sh
+xcrun swiftc -module-cache-path /private/tmp/droidmirror-notification-module-cache Native/NotificationRuntime.swift Native/NotificationHostProbe.swift -o /private/tmp/droidmirror-host-tests
+/private/tmp/droidmirror-host-tests
+```
+
 Mac notifications expose up to three Android actions, including a single free-form
 RemoteInput reply where supported. Opaque notification ID/version pairs identify
 in-memory PendingIntents held only on Android; arbitrary remote intents are never

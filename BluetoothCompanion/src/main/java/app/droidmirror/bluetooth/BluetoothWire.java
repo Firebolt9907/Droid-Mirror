@@ -7,7 +7,7 @@ import java.nio.charset.StandardCharsets;
 public final class BluetoothWire {
     public static final byte[] MAGIC = "DMBT0006".getBytes(StandardCharsets.US_ASCII);
     public static final int VIDEO = 0, EVENT = 1, MAX_CHUNK = 16 * 1024, VIDEO_CHUNK = 1024;
-    public static final int PHONE_ON = 1, SESSION_ENDED = 2, LOCAL_USE_FAILED = 3, STREAM_STARTED = 4, CAPTURE_FAILED = 5, ALIVE = 6;
+    public static final int PHONE_ON = 1, SESSION_ENDED = 2, LOCAL_USE_FAILED = 3, STREAM_STARTED = 4, CAPTURE_FAILED = 5, ALIVE = 6, MINIMIZE_WINDOW = 7;
     // Initial/minimum Classic window; live sessions grow it from measured ACK
     // delivery. Every chunk still fits this minimum during transport changes.
     public static final int VIDEO_WINDOW_BYTES = 8 * 1024;
@@ -105,14 +105,15 @@ public final class BluetoothWire {
         long first=replay.isEmpty() ? videoBytes : replay.peek().offset;
         if (received<first || received>videoBytes) throw new IOException("Invalid Bluetooth resume offset");
         out=classic;
+        if (videoWindow!=null) videoWindow.useBluetoothCapacity();
         for (Chunk chunk : replay) {
             int start=(int)Math.max(0,received-chunk.offset);
             for (int offset=start;offset<chunk.bytes.length;) {
                 int length=Math.min(videoChunk,chunk.bytes.length-offset);
+                if (videoWindow!=null) videoWindow.awaitBluetoothReplay(chunk.offset+offset+length,received);
                 writeVideo(classic,chunk.bytes,offset,length); offset+=length;
             }
         }
-        if (videoWindow!=null) videoWindow.useBluetoothCapacity();
         upgraded=false; pruneReplay(); notifyAll();
         return true;
     }
@@ -143,7 +144,7 @@ public final class BluetoothWire {
         sideRecord(2, bytes, length);
     }
     public void event(int event) throws IOException {
-        if (event < PHONE_ON || event > ALIVE) throw new IOException("Unknown event");
+        if (event < PHONE_ON || event > MINIMIZE_WINDOW) throw new IOException("Unknown event");
         sideRecord(EVENT, new byte[]{(byte)event}, 1);
     }
 }
