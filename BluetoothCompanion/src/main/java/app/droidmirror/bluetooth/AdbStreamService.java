@@ -33,7 +33,7 @@ public final class AdbStreamService extends Service {
     @Override public IBinder onBind(Intent intent) { return null; }
 
     private Notification notification() {
-        return StreamNotifications.streaming(this, token, "Mac (ADB)", started, dismissed);
+        return StreamNotifications.streaming(this, token, started, dismissed);
     }
 
     @Override public int onStartCommand(Intent intent, int flags, int startId) {

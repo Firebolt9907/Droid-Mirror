@@ -16,7 +16,7 @@ final class ClassicBluetoothTransport {
     var onEvent: ((Event) -> Void)?
     enum Event: String {
         case phoneOn = "PHONE_ON", sessionEnded = "SESSION_ENDED", phoneLocalUse = "PHONE_LOCAL_USE"
-        case streamStarted = "STREAM_STARTED", captureFailed = "CAPTURE_FAILED"
+        case streamStarted = "STREAM_STARTED", captureFailed = "CAPTURE_FAILED", phoneInUse = "PHONE_IN_USE"
         case wirelessActive = "WIFI_ACTIVE", bluetoothActive = "BLUETOOTH_ACTIVE", wirelessRecovering = "WIFI_RECOVERING"
     }
     private func pollEvents() {
@@ -155,6 +155,8 @@ final class ClassicBluetoothTransport {
         child.executableURL = URL(fileURLWithPath: helper)
         child.arguments = [address]
         var environment = ToolProcessEnvironment.clean()
+        let device = AndroidDevice(id: address, state: "device", model: "", product: "", transport: "bluetooth-classic")
+        environment["DROIDMIRROR_APPEARANCE_CACHE"] = PhoneAppearanceCache.path(for: device)
         environment["DROIDMIRROR_WIFI_MAX_SIZE"] = String(wirelessMaxSize)
         environment["DROIDMIRROR_WIFI_FPS"] = String(wirelessFPS)
         environment["DROIDMIRROR_WIFI_BIT_RATE"] = String(wirelessBitRate)
@@ -174,7 +176,10 @@ final class ClassicBluetoothTransport {
                 let data = (try? Data(contentsOf: url)) ?? Data()
                 guard data.count <= 16_384 else { throw RunnerError.failed("Bluetooth helper returned too much output") }
                 let text = String(decoding: data, as: UTF8.self)
-                if let line = text.split(separator: "\n").first(where: { $0.hasPrefix("READY ") }),
+                if text.contains("EVENT PHONE_IN_USE") {
+                    throw RunnerError.failed(PhoneUsePolicy.errorMessage)
+                }
+                if let line = text.split(separator: "\n").first(where: { $0.hasPrefix("LISTENING ") }),
                    child.isRunning {
                     let fields = line.split(separator: " ")
                     guard fields.count == 3, let video = UInt16(fields[1]), let control = UInt16(fields[2]),

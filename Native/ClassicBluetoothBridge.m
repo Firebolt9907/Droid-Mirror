@@ -8,6 +8,7 @@
 #import <signal.h>
 #import <string.h>
 #import "ClassicBluetoothWire.h"
+#import "PhoneAppearance.h"
 #import "BleInputTransport.h"
 #import "BleInputCrypto.h"
 #import <CoreBluetooth/CoreBluetooth.h>
@@ -17,6 +18,7 @@
 
 typedef void *(*DMPeerStart)(const uint8_t *, uint16_t *);
 typedef void (*DMPeerStop)(void *);
+typedef bool (*DMPeerAddAddress)(void *, uint8_t, const uint8_t *, uint16_t);
 
 // Private Classic BR/EDR L2CAP PSM, shared with the Shizuku listener.
 // Avoid 0x1001: Android system Bluetooth can already allocate that PSM.
@@ -62,6 +64,11 @@ static NSData *DMUpgradeProof(NSData *key, const char *direction, const uint8_t 
 @property(nonatomic) void *peerHandle;
 @property(nonatomic) uint16_t peerPort;
 @property(nonatomic) DMPeerStop peerStop;
+@property(nonatomic) DMPeerAddAddress peerAddAddress;
+@property(nonatomic, strong) NSMutableArray<NSData *> *peerAddresses;
+@property(nonatomic, strong) NSMutableData *peerAddressBuffer;
+@property(nonatomic, strong) NSMutableData *appearanceBuffer;
+@property(nonatomic) BOOL reportedTailscaleCandidate;
 @property(nonatomic) BOOL reportedMissingPeer;
 @property(nonatomic) NSUInteger videoProbeAttempts;
 @property(nonatomic) BOOL wifiActive;
@@ -88,6 +95,7 @@ static NSData *DMUpgradeProof(NSData *key, const char *direction, const uint8_t 
 @property(nonatomic) int controlListener;
 @property(nonatomic) int controlClient;
 @property(nonatomic) uint16_t controlPort;
+@property(nonatomic) uint16_t videoPort;
 @property(nonatomic, strong) NSMutableData *controlPending;
 @property(nonatomic, strong) NSMutableData *outgoing;
 @property(nonatomic, strong) DMBleInputTransport *ble;
@@ -118,16 +126,24 @@ static NSData *DMUpgradeProof(NSData *key, const char *direction, const uint8_t 
 - (BOOL)receiveVideo:(const uint8_t *)data length:(size_t)length;
 - (void)receiveEvent:(uint8_t)event;
 - (BOOL)receiveControl:(const uint8_t *)data length:(size_t)length;
+- (BOOL)receivePeerAddress:(const uint8_t *)data length:(size_t)length;
+- (BOOL)receiveAppearance:(const uint8_t *)data length:(size_t)length;
 @end
 
 static bool DMVideo(void *context, const uint8_t *bytes, size_t length) {
     return [(__bridge DMClassicBridge *)context receiveVideo:bytes length:length];
+}
+static bool DMAppearance(void *context, const uint8_t *bytes, size_t length) {
+    return [(__bridge DMClassicBridge *)context receiveAppearance:bytes length:length];
 }
 static bool DMReject(void *context, const uint8_t *bytes, size_t length) { return false; }
 static bool DMControl(void *context, const uint8_t *bytes, size_t length) {
     return [(__bridge DMClassicBridge *)context receiveControl:bytes length:length];
 }
 static void DMEvent(void *context, uint8_t event) { [(__bridge DMClassicBridge *)context receiveEvent:event]; }
+static bool DMPeerAddress(void *context, const uint8_t *bytes, size_t length) {
+    return [(__bridge DMClassicBridge *)context receivePeerAddress:bytes length:length];
+}
 
 @implementation DMClassicBridge
 - (void)probePeer {
@@ -139,7 +155,8 @@ static void DMEvent(void *context, uint8_t event) { [(__bridge DMClassicBridge *
         if (!_peerLibrary) _peerLibrary=dlopen(library.fileSystemRepresentation, RTLD_NOW|RTLD_LOCAL);
         DMPeerStart start=_peerLibrary ? (DMPeerStart)dlsym(_peerLibrary,"dm_peer_start") : NULL;
         _peerStop=_peerLibrary ? (DMPeerStop)dlsym(_peerLibrary,"dm_peer_stop") : NULL;
-        if (!start || !_peerStop) {
+        _peerAddAddress=_peerLibrary ? (DMPeerAddAddress)dlsym(_peerLibrary,"dm_peer_add_address") : NULL;
+        if (!start || !_peerStop || !_peerAddAddress) {
             if (!_reportedMissingPeer) fprintf(stderr,"Iroh video transport missing; rebuild matching Mac and Android apps\n");
             _reportedMissingPeer=YES;
             printf("EVENT LAN_UNAVAILABLE\n"); fflush(stdout);
@@ -148,6 +165,10 @@ static void DMEvent(void *context, uint8_t event) { [(__bridge DMClassicBridge *
         uint16_t port=0;
         _peerHandle=start(_pairingKey.bytes,&port); _peerPort=port;
         if (!_peerHandle || !_peerPort) { printf("EVENT LAN_UNAVAILABLE\n"); fflush(stdout); return; }
+        for (NSData *record in _peerAddresses) {
+            const uint8_t *bytes=record.bytes;
+            _peerAddAddress(_peerHandle,bytes[8],bytes+9,(uint16_t)bytes[25]<<8|bytes[26]);
+        }
     }
     [self probeWiFi:_peerPort];
 }
@@ -159,16 +180,15 @@ static void DMEvent(void *context, uint8_t event) { [(__bridge DMClassicBridge *
 - (void)probeWiFi:(uint16_t)port {
     if (_probingWiFi || _wifiSocket >= 0 || _wifiRecovering || _benchmark) return;
     _probingWiFi=YES;
-    if (_videoProbeAttempts++ < 3) fprintf(stderr,"Trying %s video\n",port == _peerPort ? "direct LAN" : "wireless ADB");
+    if (_videoProbeAttempts++ < 3) fprintf(stderr,"Trying %s video\n",port == _peerPort ? "direct IP (LAN/VPN)" : "wireless ADB");
     NSData *key=_pairingKey;
     NSData *profile=_wirelessProfile;
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY,0), ^{
         int fd=socket(AF_INET,SOCK_STREAM,0);
         BOOL valid=NO; uint64_t cutoff=0; NSData *nonce=nil;
         if (fd >= 0) {
-            // Iroh may need DNS discovery, relay registration and NAT traversal
-            // before the application challenge can arrive. This worker must not
-            // abandon its local socket while the native dial is still pending.
+            // Direct discovery and video warm-up run off the main run loop;
+            // Classic video and BLE acknowledgements continue throughout.
             struct timeval timeout={port == self.peerPort ? 20 : 2,0}; int yes=1;
             setsockopt(fd,SOL_SOCKET,SO_RCVTIMEO,&timeout,sizeof(timeout));
             setsockopt(fd,SOL_SOCKET,SO_SNDTIMEO,&timeout,sizeof(timeout));
@@ -176,7 +196,7 @@ static void DMEvent(void *context, uint8_t event) { [(__bridge DMClassicBridge *
             struct sockaddr_in address={0}; address.sin_family=AF_INET;
             address.sin_addr.s_addr=htonl(INADDR_LOOPBACK); address.sin_port=htons(port);
             uint8_t hello[40], response[48];
-            if (!connect(fd,(struct sockaddr *)&address,sizeof(address)) && DMReadExact(fd,hello,sizeof(hello)) && !memcmp(hello,"DMWIFI03",8)) {
+            if (!connect(fd,(struct sockaddr *)&address,sizeof(address)) && DMReadExact(fd,hello,sizeof(hello)) && !memcmp(hello,"DMWIFI04",8)) {
                 nonce=[NSData dataWithBytes:hello+8 length:32];
                 NSData *proof=DMUpgradeProof(key,"client",hello+8,profile.bytes,profile.length);
                 NSMutableData *request=[profile mutableCopy]; [request appendData:proof];
@@ -187,7 +207,34 @@ static void DMEvent(void *context, uint8_t event) { [(__bridge DMClassicBridge *
                     if (n <= 0) break;
                     sent+=n;
                 }
-                if (sent == request.length && DMReadExact(fd,response,sizeof(response))) {
+                BOOL warmed=NO;
+                uint8_t previewProof[32];
+                if (sent == request.length && DMReadExact(fd,previewProof,sizeof(previewProof))) {
+                    NSData *expected=DMUpgradeProof(key,"preview server",hello+8,profile.bytes,profile.length);
+                    uint8_t difference=0;
+                    for (size_t i=0;i<32;++i) difference |= ((const uint8_t *)expected.bytes)[i]^previewProof[i];
+                    NSUInteger frames=0; BOOL confirmed=NO, sawVideo=NO;
+                    NSTimeInterval started=NSDate.timeIntervalSinceReferenceDate;
+                    while (!difference && NSDate.timeIntervalSinceReferenceDate-started < 10) {
+                        uint32_t encodedLength;
+                        if (!DMReadExact(fd,&encodedLength,4)) break;
+                        int32_t length=(int32_t)ntohl(encodedLength);
+                        if (length == -1) { warmed=confirmed; break; }
+                        if (length < 0 || length > 8192) break;
+                        uint8_t video[8192];
+                        if (length && !DMReadExact(fd,video,(size_t)length)) break;
+                        if (length) sawVideo=YES;
+                        else if (sawVideo) { ++frames; sawVideo=NO; }
+                        // The first marker may finish a partial frame. Require
+                        // two further frames and a sustained delivery interval.
+                        if (!confirmed && frames >= 3 && NSDate.timeIntervalSinceReferenceDate-started >= 0.25) {
+                            const uint8_t ready=1;
+                            if (send(fd,&ready,1,0)!=1) break;
+                            confirmed=YES;
+                        }
+                    }
+                }
+                if (warmed && DMReadExact(fd,response,sizeof(response))) {
                     NSMutableData *authenticated=[profile mutableCopy]; [authenticated appendBytes:response length:8];
                     NSData *expected=DMUpgradeProof(key,"server",hello+8,authenticated.bytes,authenticated.length);
                     uint8_t difference=0;
@@ -210,7 +257,7 @@ static void DMEvent(void *context, uint8_t event) { [(__bridge DMClassicBridge *
             }
             if (cutoff < self.videoReceived) { close(fd); [self fail:@"Invalid Wi-Fi video cutoff"]; return; }
             fcntl(fd,F_SETFL,O_NONBLOCK);
-            fprintf(stderr,"Video handoff authenticated over %s\n",port == self.peerPort ? "direct LAN" : "wireless ADB");
+            fprintf(stderr,"Video handoff authenticated over %s\n",port == self.peerPort ? "direct IP (LAN/VPN)" : "wireless ADB");
             self.wifiNonce=nonce;
             self.wifiSocket=fd; self.wifiCutoff=cutoff; self.wifiLastData=NSDate.timeIntervalSinceReferenceDate;
             self.wifiPendingSince=NSDate.timeIntervalSinceReferenceDate;
@@ -355,10 +402,46 @@ static void DMEvent(void *context, uint8_t event) { [(__bridge DMClassicBridge *
     }
     if (!_controlPending.length) _controlSince = 0;
 }
+- (BOOL)receiveAppearance:(const uint8_t *)data length:(size_t)length {
+    if (!_appearanceBuffer) _appearanceBuffer = [NSMutableData data];
+    if (length > 16384 - _appearanceBuffer.length) return NO;
+    [_appearanceBuffer appendBytes:data length:length];
+    if (length && data[length - 1] == '\n') {
+        id value = [NSJSONSerialization JSONObjectWithData:_appearanceBuffer options:0 error:nil];
+        if (![value isKindOfClass:NSDictionary.class]) return NO;
+        DMCachePhoneAppearance(value);
+        [_appearanceBuffer setLength:0];
+    }
+    return YES;
+}
 - (BOOL)receiveControl:(const uint8_t *)data length:(size_t)length {
     if (length > DMQueueLimit - _controlPending.length) return NO;
     if (!_controlPending.length) _controlSince = NSDate.timeIntervalSinceReferenceDate;
     [_controlPending appendBytes:data length:length]; [self flushControl]; return YES;
+}
+- (BOOL)receivePeerAddress:(const uint8_t *)data length:(size_t)length {
+    if (!_peerAddressBuffer) _peerAddressBuffer=[NSMutableData data];
+    if (length > 32-_peerAddressBuffer.length) return NO;
+    [_peerAddressBuffer appendBytes:data length:length];
+    if (_peerAddressBuffer.length<32) return YES;
+    NSData *record=[_peerAddressBuffer copy]; [_peerAddressBuffer setLength:0];
+    const uint8_t *bytes=record.bytes;
+    if (memcmp(bytes,"DMIP0001",8) || (bytes[8]!=0 && bytes[8]!=4 && bytes[8]!=16)) return NO;
+    if (!_peerAddresses) _peerAddresses=[NSMutableArray array];
+    if (!bytes[8]) [_peerAddresses removeAllObjects];
+    else {
+        if (!bytes[25] && !bytes[26]) return NO;
+        if (![_peerAddresses containsObject:record] && _peerAddresses.count<32) [_peerAddresses addObject:record];
+        const uint8_t tailscaleV6[]={0xfd,0x7a,0x11,0x5c,0xa1,0xe0};
+        if (!_reportedTailscaleCandidate && ((bytes[8]==4 && bytes[9]==100 && (bytes[10]&0xc0)==0x40)
+                || (bytes[8]==16 && !memcmp(bytes+9,tailscaleV6,sizeof(tailscaleV6))))) {
+            fprintf(stderr,"Received Tailscale direct IP candidate over authenticated BLE\n");
+            _reportedTailscaleCandidate=YES;
+        }
+    }
+    if (_peerHandle && _peerAddAddress)
+        _peerAddAddress(_peerHandle,bytes[8],bytes+9,(uint16_t)bytes[25]<<8|bytes[26]);
+    return YES;
 }
 - (void)sendControl {
     if (!_ble.ready || !_outgoing.length) return;
@@ -367,14 +450,12 @@ static void DMEvent(void *context, uint8_t event) { [(__bridge DMClassicBridge *
 }
 - (BOOL)bleInputReceived:(NSData *)bytes {
     _lastData=NSDate.timeIntervalSinceReferenceDate;
-    return dm_classic_wire_feed_ble(&_returnWire,bytes.bytes,bytes.length,DMReject,DMEvent,DMControl,NULL,(__bridge void *)self);
+    return dm_classic_wire_feed_ble(&_returnWire,bytes.bytes,bytes.length,DMReject,DMEvent,DMControl,DMPeerAddress,(__bridge void *)self);
 }
 - (void)announceReady {
     if (_announcedReady || !_l2capReady || !_ble.ready) return;
-    struct sockaddr_in bound; socklen_t size=sizeof(bound);
-    if (getsockname(_listener,(struct sockaddr *)&bound,&size)) [self fail:@"Could not read bridge port"];
     _announcedReady=YES;
-    printf("READY %u %u\n",ntohs(bound.sin_port),_controlPort); fflush(stdout);
+    printf("READY %u %u\n",_videoPort,_controlPort); fflush(stdout);
     fprintf(stderr,"BLE side channel authenticated; Classic L2CAP carries video only (phone to Mac)\n");
 }
 - (void)bleInputReady { [self announceReady]; [self sendControl]; }
@@ -432,10 +513,11 @@ static void DMEvent(void *context, uint8_t event) { [(__bridge DMClassicBridge *
         fprintf(stderr, "Minimize command received over capture BLE for host %d\n", getppid());
         return; // Window commands may repeat; lifecycle event deduplication does not apply.
     }
+    if (event < 1 || event > 8) return;
     uint8_t mask = (uint8_t)(1u << (event - 1));
     if (_eventMask & mask) return;
     _eventMask |= mask;
-    const char *names[] = {"PHONE_ON", "SESSION_ENDED", "PHONE_LOCAL_USE", "STREAM_STARTED", "CAPTURE_FAILED"};
+    const char *names[] = {"PHONE_ON", "SESSION_ENDED", "PHONE_LOCAL_USE", "STREAM_STARTED", "CAPTURE_FAILED", "ALIVE", "MINIMIZE_WINDOW", "PHONE_IN_USE"};
     printf("EVENT %s\n", names[event - 1]); fflush(stdout);
 }
 - (void)l2capChannelData:(IOBluetoothL2CAPChannel *)channel data:(void *)data length:(size_t)length {
@@ -451,6 +533,7 @@ static void DMEvent(void *context, uint8_t event) { [(__bridge DMClassicBridge *
         for (size_t i=0;i<length;++i) if (bytes[i] != (uint8_t)(_benchmarkBytes+i)) [self fail:@"Benchmark byte loss or corruption"];
         _benchmarkBytes+=length; _benchmarkLast=_lastData; return;
     }
+    _wire.appearance = DMAppearance;
     if (!dm_classic_wire_feed_ble(&_wire, data, length, DMVideo, DMEvent, NULL, NULL, (__bridge void *)self))
         [self fail:@"Invalid Bluetooth stream or video backlog exceeded; update the Android companion and Mac app"];
     [self startBleWhenAndroidReady];
@@ -512,7 +595,7 @@ static void DMEvent(void *context, uint8_t event) { [(__bridge DMClassicBridge *
     dm_classic_wire_init_video_only(&_wire);
     dm_classic_wire_init(&_returnWire);
     const uint8_t returnMagic[]="DMBT0005";
-    dm_classic_wire_feed_ble(&_returnWire,returnMagic,8,DMReject,DMEvent,DMControl,NULL,(__bridge void *)self);
+    dm_classic_wire_feed_ble(&_returnWire,returnMagic,8,DMReject,DMEvent,DMControl,DMPeerAddress,(__bridge void *)self);
     _device = [IOBluetoothDevice deviceWithAddressString:address];
     if (!_device || !_device.isPaired) [self fail:@"Pair the phone in macOS Bluetooth settings first"];
     _listener = socket(AF_INET, SOCK_STREAM, 0);
@@ -531,6 +614,12 @@ static void DMEvent(void *context, uint8_t event) { [(__bridge DMClassicBridge *
     socklen_t controlSize = sizeof(local);
     if (getsockname(_controlListener, (struct sockaddr *)&local, &controlSize)) [self fail:@"Could not read control port"];
     _controlPort = ntohs(local.sin_port);
+    // Expose loopback listeners before radio setup so the client can display its
+    // own loading surface. READY still means both radio channels authenticated.
+    struct sockaddr_in videoBound; socklen_t videoSize = sizeof(videoBound);
+    if (getsockname(_listener, (struct sockaddr *)&videoBound, &videoSize)) [self fail:@"Could not read video port"];
+    _videoPort = ntohs(videoBound.sin_port);
+    printf("LISTENING %u %u\n", _videoPort, _controlPort); fflush(stdout);
     _acceptSource = dispatch_source_create(DISPATCH_SOURCE_TYPE_READ, _listener, 0, dispatch_get_main_queue());
     int listenerFD = _listener;
     dispatch_source_set_cancel_handler(_acceptSource, ^{ close(listenerFD); });

@@ -8,6 +8,7 @@ typedef struct {
     size_t magic_used, header_used;
     uint32_t remaining;
     uint8_t type;
+    bool (*appearance)(void *, const uint8_t *, size_t);
     bool decided, legacy, control, ble, video_only, require_video_only;
 } DMClassicWire;
 typedef bool (*DMWireVideo)(void *, const uint8_t *, size_t);

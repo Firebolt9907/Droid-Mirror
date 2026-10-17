@@ -81,6 +81,17 @@ static inline CGFloat DMScreenCornerRadius(CGFloat width) {
 @property(nonatomic) BOOL bluetoothStream;
 @property(nonatomic, copy) NSArray<NSValue *> *cameraCutouts;
 @property(nonatomic, strong) id cutoutMouseMonitor;
+@property(nonatomic, strong) id phoneGestureMonitor;
+@property(nonatomic, strong) id gestureFocusObserver;
+@property(nonatomic, strong) NSTimer *longPressTimer;
+@property(nonatomic) BOOL longPressActive;
+@property(nonatomic) NSPoint longPressPoint;
+@property(nonatomic) BOOL pinchActive;
+@property(nonatomic) NSPoint pinchCenter;
+@property(nonatomic) CGFloat pinchRadius;
+@property(nonatomic) CGFloat pinchMaxRadius;
+- (NSEvent *)handlePhoneGestureEvent:(NSEvent *)event;
+- (void)endPhoneGestures;
 - (void)updateCameraCutouts:(NSArray<NSValue *> *)cutouts;
 - (NSEvent *)handleCutoutMouseEvent:(NSEvent *)event;
 - (instancetype)initWithWindow:(NSWindow *)window;
@@ -108,6 +119,8 @@ static inline CGFloat DMScreenCornerRadius(CGFloat width) {
     [self buildToolbar];
     // Keep the phone chrome borderless while allowing the window into the Dock.
     window.styleMask = NSWindowStyleMaskBorderless | NSWindowStyleMaskResizable | NSWindowStyleMaskMiniaturizable;
+    window.collectionBehavior = NSWindowCollectionBehaviorPrimary | NSWindowCollectionBehaviorManaged |
+        NSWindowCollectionBehaviorParticipatesInCycle | NSWindowCollectionBehaviorFullScreenPrimary;
     window.opaque = NO;
     window.backgroundColor = NSColor.clearColor;
     window.hasShadow = YES;
@@ -124,6 +137,7 @@ static inline CGFloat DMScreenCornerRadius(CGFloat width) {
     if ([NSProcessInfo.processInfo.environment[@"DROIDMIRROR_SWIPE_SCROLL"] isEqualToString:@"1"]) {
         [self setupSwipeScrolling];
     }
+    [self setupPhoneGestures];
     [self setupBackgroundTimeout];
     [self setupKeyboardRemapping];
     _cutoutMouseMonitor = [NSEvent addLocalMonitorForEventsMatchingMask:
@@ -144,6 +158,9 @@ static inline CGFloat DMScreenCornerRadius(CGFloat width) {
     if (_scrollMonitor) [NSEvent removeMonitor:_scrollMonitor];
     if (_keyboardMonitor) [NSEvent removeMonitor:_keyboardMonitor];
     if (_cutoutMouseMonitor) [NSEvent removeMonitor:_cutoutMouseMonitor];
+    if (_phoneGestureMonitor) [NSEvent removeMonitor:_phoneGestureMonitor];
+    if (_gestureFocusObserver) [[NSNotificationCenter defaultCenter] removeObserver:_gestureFocusObserver];
+    [self endPhoneGestures];
     if (_resignActiveObserver) [[NSNotificationCenter defaultCenter] removeObserver:_resignActiveObserver];
     if (_becomeActiveObserver) [[NSNotificationCenter defaultCenter] removeObserver:_becomeActiveObserver];
     [_backgroundTimeoutTimer invalidate];
@@ -204,7 +221,8 @@ static inline CGFloat DMScreenCornerRadius(CGFloat width) {
         if (selfRef.ctrlTapTimer) {
             BOOL isCtrlModifierEvent = (event.type == NSEventTypeFlagsChanged && (event.keyCode == 59 || event.keyCode == 62));
             if (!isCtrlModifierEvent) {
-                [selfRef.ctrlTapTimer invalidate];
+                [selfRef endPhoneGestures];
+            [selfRef.ctrlTapTimer invalidate];
                 selfRef.ctrlTapTimer = nil;
                 selfRef.ctrlTapCount = 0;
             }
@@ -406,13 +424,107 @@ static inline CGFloat DMScreenCornerRadius(CGFloat width) {
     NSString *hostPID = NSProcessInfo.processInfo.environment[@"DROIDMIRROR_HOST_PID"];
     if (hostPID.length) {
         [[NSDistributedNotificationCenter defaultCenter]
-            postNotificationName:@"app.droidmirror.quit"
+            postNotificationName:@"app.droidmirror.inactivityTimeout"
             object:hostPID
             userInfo:nil
             deliverImmediately:YES];
     } else {
         [NSApp terminate:nil];
     }
+}
+
+// Use real touch pointers so Android apps receive long presses and pinch gestures
+// through the same control channel on every transport.
+- (void)pushPhoneFinger:(SDL_FingerID)finger type:(Uint32)type at:(NSPoint)point {
+    if (!self.sdlWindow || NSIsEmptyRect(self.screenView.bounds)) return;
+    SDL_Event event;
+    SDL_zero(event);
+    event.type = type;
+    event.tfinger.timestamp = SDL_GetTicksNS();
+    event.tfinger.windowID = SDL_GetWindowID(self.sdlWindow);
+    event.tfinger.touchID = 1;
+    event.tfinger.fingerID = finger;
+    event.tfinger.x = point.x / self.screenView.bounds.size.width;
+    event.tfinger.y = 1 - point.y / self.screenView.bounds.size.height;
+    event.tfinger.pressure = type == SDL_EVENT_FINGER_UP ? 0 : 1;
+    SDL_PushEvent(&event);
+}
+
+- (void)pushPinchType:(Uint32)type {
+    [self pushPhoneFinger:102 type:type at:NSMakePoint(self.pinchCenter.x - self.pinchRadius, self.pinchCenter.y)];
+    [self pushPhoneFinger:103 type:type at:NSMakePoint(self.pinchCenter.x + self.pinchRadius, self.pinchCenter.y)];
+}
+
+- (void)endLongPress {
+    [self.longPressTimer invalidate];
+    self.longPressTimer = nil;
+    if (!self.longPressActive) return;
+    [self pushPhoneFinger:101 type:SDL_EVENT_FINGER_UP at:self.longPressPoint];
+    self.longPressActive = NO;
+}
+
+- (void)endPhoneGestures {
+    [self endLongPress];
+    if (self.pinchActive) [self pushPinchType:SDL_EVENT_FINGER_UP];
+    self.pinchActive = NO;
+}
+
+- (void)setupPhoneGestures {
+    __weak typeof(self) weakSelf = self;
+    self.phoneGestureMonitor = [NSEvent addLocalMonitorForEventsMatchingMask:
+        NSEventMaskRightMouseDown | NSEventMaskRightMouseUp | NSEventMaskRightMouseDragged | NSEventMaskMagnify
+        handler:^NSEvent *(NSEvent *event) {
+            return weakSelf ? [weakSelf handlePhoneGestureEvent:event] : event;
+        }];
+    self.gestureFocusObserver = [[NSNotificationCenter defaultCenter]
+        addObserverForName:NSWindowDidResignKeyNotification object:self.window
+        queue:NSOperationQueue.mainQueue usingBlock:^(__unused NSNotification *note) {
+            [weakSelf endPhoneGestures];
+        }];
+}
+
+- (NSEvent *)handlePhoneGestureEvent:(NSEvent *)event {
+    if (event.window != self.window || !self.sdlWindow) return event;
+    NSPoint point = [self.screenView convertPoint:event.locationInWindow fromView:nil];
+    NSRect bounds = self.screenView.bounds;
+    if (event.type == NSEventTypeRightMouseUp || event.type == NSEventTypeRightMouseDragged) return nil;
+    if (event.type == NSEventTypeRightMouseDown) {
+        if (!NSPointInRect(point, bounds)) return event;
+        [self endPhoneGestures];
+        if (self.touchActive) [self endTrackpadTouch];
+        self.longPressPoint = point;
+        self.longPressActive = YES;
+        [self pushPhoneFinger:101 type:SDL_EVENT_FINGER_DOWN at:point];
+        __weak typeof(self) weakSelf = self;
+        self.longPressTimer = [NSTimer scheduledTimerWithTimeInterval:0.65 repeats:NO block:^(__unused NSTimer *timer) {
+            [weakSelf endLongPress];
+        }];
+        return nil;
+    }
+    if (event.type != NSEventTypeMagnify) return event;
+    if (event.phase & NSEventPhaseCancelled) {
+        [self endPhoneGestures];
+        return nil;
+    }
+    if (!self.pinchActive && !(event.phase & NSEventPhaseEnded)) {
+        if (!NSPointInRect(point, bounds) || bounds.size.width < 20) return event;
+        [self endLongPress];
+        if (self.touchActive) [self endTrackpadTouch];
+        // Keep both fingers inside the screen, including near its edges.
+        CGFloat margin = MIN(80, bounds.size.width * 0.2);
+        self.pinchCenter = NSMakePoint(MIN(NSMaxX(bounds) - margin - 1, MAX(margin + 1, point.x)),
+                                      MIN(NSMaxY(bounds) - 1, MAX(1, point.y)));
+        self.pinchMaxRadius = MIN(self.pinchCenter.x - 1, NSMaxX(bounds) - self.pinchCenter.x - 1);
+        self.pinchRadius = MIN(margin * 0.5, self.pinchMaxRadius);
+        self.pinchActive = YES;
+        [self pushPinchType:SDL_EVENT_FINGER_DOWN];
+    }
+    if (self.pinchActive) {
+        self.pinchRadius = MIN(self.pinchMaxRadius, MAX(2, self.pinchRadius * (1 + event.magnification)));
+        [self pushPinchType:SDL_EVENT_FINGER_MOTION];
+        if (event.phase & NSEventPhaseEnded) [self endPhoneGestures];
+    }
+    return nil;
 }
 
 - (void)setupSwipeScrolling {
@@ -440,6 +552,7 @@ static inline CGFloat DMScreenCornerRadius(CGFloat width) {
     self.scrollMonitor = [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskScrollWheel handler:^NSEvent *(NSEvent *event) {
         typeof(self) selfRef = weakSelf;
         if (!selfRef || event.window != selfRef.window) return event;
+        if (selfRef.pinchActive || selfRef.longPressActive) return nil;
 
         // macOS generates momentum after fingers leave the trackpad. Android
         // generates its own fling from the injected UP velocity, so forwarding
@@ -620,6 +733,12 @@ static inline CGFloat DMScreenCornerRadius(CGFloat width) {
 }
 
 - (void)positionToolbar {
+    for (NSView *view in self.window.contentView.subviews) {
+        if ([view.identifier isEqualToString:@"DroidMirrorConnecting"]) {
+            [self.toolbarWindow orderOut:nil];
+            return;
+        }
+    }
     NSRect phone = self.window.frame;
     self.screenView.layer.cornerRadius = DMScreenCornerRadius(phone.size.width);
     CGFloat width = MAX(360, phone.size.width);
@@ -662,8 +781,9 @@ static inline CGFloat DMScreenCornerRadius(CGFloat width) {
     // NSWindow's built-in shadow follows the rectangular panel bounds. Draw a
     // path-based shadow ourselves so it follows the rounded toolbar instead.
     _toolbarWindow.hasShadow = NO;
-    _toolbarWindow.hidesOnDeactivate = NO;
-    _toolbarWindow.collectionBehavior = NSWindowCollectionBehaviorFullScreenAuxiliary;
+    _toolbarWindow.hidesOnDeactivate = YES;
+    _toolbarWindow.collectionBehavior = NSWindowCollectionBehaviorAuxiliary | NSWindowCollectionBehaviorFullScreenAuxiliary |
+        NSWindowCollectionBehaviorTransient | NSWindowCollectionBehaviorIgnoresCycle;
     _toolbarContainer = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, panelWidth, panelHeight)];
     _toolbarContainer.wantsLayer = YES;
     _toolbarContainer.layer.backgroundColor = NSColor.clearColor.CGColor;
@@ -966,6 +1086,12 @@ static inline CGFloat DMScreenCornerRadius(CGFloat width) {
 }
 
 - (void)detectPINPrompt {
+    for (NSView *view in self.window.contentView.subviews) {
+        if ([view.identifier isEqualToString:@"DroidMirrorConnecting"]) {
+            [self.toolbarWindow orderOut:nil];
+            return;
+        }
+    }
     if (self.bluetoothStream || self.cameraCutouts.count) return;
     if (self.pinPopover.shown) return;
     NSString *adb = NSProcessInfo.processInfo.environment[@"ADB"] ?: @"/opt/homebrew/bin/adb";
@@ -994,8 +1120,30 @@ static void DMInstallToolbar(void) {
     for (NSWindow *window in NSApp.windows) {
         if (![window.title hasPrefix:@"DroidMirror —"]) continue;
         if (objc_getAssociatedObject(window, DMControllerKey)) continue;
+        BOOL connecting = NO;
+        for (NSView *view in window.contentView.subviews)
+            if ([view.identifier isEqualToString:@"DroidMirrorConnecting"]) connecting = YES;
+        if (connecting) continue;
         DMWindowController *controller = [[DMWindowController alloc] initWithWindow:window];
         objc_setAssociatedObject(window, DMControllerKey, controller, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+}
+
+// Stream teardown keeps the phone surface but removes session-only controls.
+void DroidMirrorSessionChrome(NSWindow *window, BOOL active) {
+    DMWindowController *controller = objc_getAssociatedObject(window, DMControllerKey);
+    if (!controller) return;
+    controller.bluetoothStream = [NSProcessInfo.processInfo.environment[@"DROIDMIRROR_TRANSPORT"] isEqualToString:@"bluetooth-classic"];
+    if (active) {
+        if (!controller.cameraCutouts.count) {
+            [window addChildWindow:controller.toolbarWindow ordered:NSWindowAbove];
+            [controller positionToolbar];
+            [controller.toolbarWindow orderFront:nil];
+        }
+    } else {
+        [controller.pinPopover close];
+        [window removeChildWindow:controller.toolbarWindow];
+        [controller.toolbarWindow orderOut:nil];
     }
 }
 

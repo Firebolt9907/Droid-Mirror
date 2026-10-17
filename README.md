@@ -7,7 +7,7 @@ setup (Shizuku authorization, a selected paired Mac and **Enable background brid
 press **Mirror on the Mac** to start privileged scrcpy capture. There is no
 per-session Android screen-share prompt. The session starts entirely over Bluetooth,
 then attempts to move video to an encrypted Iroh peer connection in the
-background, preserving the exact same scrcpy window. Video tries direct LAN first,
+background, preserving the exact same scrcpy window. Video tries direct LAN or Tailscale IP paths first,
 then an already paired wireless ADB connection, then continues over Bluetooth.
 Iroh relay servers and public discovery are disabled; Tailscale is not required.
 Hybrid video stays HEVC
@@ -26,6 +26,8 @@ using **DroidMirror → Pair Bluetooth…** (or **Settings…**, ⌘,) and the c
 from **Pair Mac (mirroring and notifications)** in the Android companion; no session
 secret or control payload travels over Classic.
 
+Mirroring refuses to start while the phone is awake and unlocked, showing **Phone is in use. Lock your phone, then try mirroring again.** This applies to Bluetooth and ADB; a sleeping phone or visible lock screen can still start mirroring. Bluetooth requires the matching updated Android companion.
+
 Bluetooth remembers the phone selected in DroidMirror. With auto-start enabled,
 launching the app starts that phone once; closing the mirror does not continually
 reopen it. An unavailable saved pairing does not select another device.
@@ -35,7 +37,7 @@ launch after updating to this version, any previously saved transport selection
 resets to Automatic. The remembered phone and other settings are retained;
 subsequent launches respect any new transport choice you make.
 
-The compiled test APK is `outputs/DroidMirror-Bluetooth-0.26-debug.apk`.
+The compiled test APK is `outputs/DroidMirror-Bluetooth-0.37-debug.apk`.
 The phone Live Activity includes **Minimize**, which uses the paired BLE
 connection to minimize the mirror window while streaming continues.
 Android now uses one background service and one enable/stop setting for mirroring
@@ -48,14 +50,15 @@ grant notification access to DroidMirror; see
 [setup and migration](Native/ANDROID-BRIDGE.md).
 Install the matching Mac and Android builds together. A phone power/screen-lock action ends the session, locks/restores the
 phone through Shizuku, and shows a separate **phone was used** popup on Mac.
-End-of-session audit notifications are posted on phone and Mac. Shell watchdog
+End-of-session audit notifications stay on the phone; the Mac does not post remote-use history banners. Phone notifications arrive live over encrypted Bluetooth, including during mirroring. Persistent/ongoing service notifications, group summaries, secret notifications, and the companion’s own notifications are excluded. Shell watchdog
 recovery covers app death and stale stream leases; physical-device behavior still
 needs validation. Mouse, keyboard, scrolling and navigation use the Bluetooth control channel through Shizuku. Audio remains available through ADB mode.
 See [setup, behavior and validation limits](Native/CLASSIC-BLUETOOTH.md).
 
-For automatic video upgrades, install matching Mac and Android 0.26 builds.
+For automatic video upgrades, install the current Mac build and Android 0.37.
 Keep the existing Bluetooth pairing and Shizuku setup. The app first tries Iroh
-using only local multicast discovery and direct encrypted LAN connections. If that
+using authenticated Bluetooth address hints plus local multicast discovery.
+This includes direct encrypted Tailscale/VPN IP connections without Iroh relays. If that
 fails, it tries already paired wireless ADB devices. Enable Wireless debugging and
 pair the Mac once if you want this fallback. If neither path works, Bluetooth
 video continues. Relays and public Iroh discovery are disabled on both devices.

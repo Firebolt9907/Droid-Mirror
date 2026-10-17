@@ -50,13 +50,28 @@ import CryptoKit
         check(try client.open(response)["text"] as? String == payload["text"] as? String)
         check(try exchange(original)["rejected"] as? Bool == true)
         reject { _ = try client.open(response) }
+        // Image-heavy notifications must fit after encryption and Base64, not
+        // just before encryption. Exercise the actual Android sealing code too.
+        let imageEvent: [String: Any] = ["type": "notification", "snapshot": true,
+            "appIcon": Data(repeating: 42, count: 2048).base64EncodedString(),
+            "contactImage": Data(repeating: 42, count: 1800).base64EncodedString(),
+            "body": String(repeating: "x", count: 400)]
+        check(try JSONSerialization.data(withJSONObject: imageEvent).count <= 5800)
+        let imageSealed = try client.seal(imageEvent)
+        check(imageSealed.count <= 8192)
+        let imageResponse = try exchange(JSONSerialization.jsonObject(with: imageSealed) as! [String: Any])
+        check(try JSONSerialization.data(withJSONObject: imageResponse).count <= 8192)
+        check(try client.open(imageResponse)["contactImage"] as? String == imageEvent["contactImage"] as? String)
         var tamperedResponse = response
         tamperedResponse["seq"] = 3
         reject { _ = try client.open(tamperedResponse) }
         let large = Data(repeating: 42, count: 8192)
-        for maximum in [20, 182, 512] {
+        for maximum in [20, 182, 512, 514, 517] {
             var assembly = BLEFragments(); var result: Data?
-            for frame in BLEFragments.split(large, id: 1, maximum: maximum) { result = assembly.accept(frame) }
+            for frame in BLEFragments.split(large, id: 1, maximum: maximum) {
+                precondition(frame.count <= min(512, maximum), "ATT attributes must fit even at MTU 517")
+                result = assembly.accept(frame)
+            }
             precondition(result == large)
         }
         precondition(BLEFragments.split(Data(repeating: 0, count: 8193), id: 1, maximum: 20).isEmpty)

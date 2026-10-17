@@ -7,7 +7,7 @@ import java.nio.charset.StandardCharsets;
 public final class BluetoothWire {
     public static final byte[] MAGIC = "DMBT0006".getBytes(StandardCharsets.US_ASCII);
     public static final int VIDEO = 0, EVENT = 1, MAX_CHUNK = 16 * 1024, VIDEO_CHUNK = 1024;
-    public static final int PHONE_ON = 1, SESSION_ENDED = 2, LOCAL_USE_FAILED = 3, STREAM_STARTED = 4, CAPTURE_FAILED = 5, ALIVE = 6, MINIMIZE_WINDOW = 7;
+    public static final int PHONE_ON = 1, SESSION_ENDED = 2, LOCAL_USE_FAILED = 3, STREAM_STARTED = 4, CAPTURE_FAILED = 5, ALIVE = 6, MINIMIZE_WINDOW = 7, PHONE_IN_USE = 8;
     // Initial/minimum Classic window; live sessions grow it from measured ACK
     // delivery. Every chunk still fits this minimum during transport changes.
     public static final int VIDEO_WINDOW_BYTES = 8 * 1024;
@@ -26,6 +26,37 @@ public final class BluetoothWire {
     public interface SideChannel { void send(byte[] record) throws IOException; }
     private volatile SideChannel sideChannel;
     private VideoWindow videoWindow;
+    private Preview preview;
+    private byte[] latestBluetoothFrame;
+    /** A bounded copy of live video. A slow candidate must never block Classic. */
+    static final class Preview {
+        private final java.util.concurrent.ArrayBlockingQueue<byte[]> records =
+            new java.util.concurrent.ArrayBlockingQueue<>(128);
+        private volatile boolean failed;
+        void offer(byte[] bytes) {
+            if (!failed && !records.offer(bytes)) { failed=true; records.clear(); }
+        }
+        byte[] poll() throws IOException {
+            if (failed) throw new IOException("Wireless warm-up could not keep up with Bluetooth");
+            try { return records.poll(20, java.util.concurrent.TimeUnit.MILLISECONDS); }
+            catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); throw new IOException(interrupted); }
+        }
+    }
+    synchronized Preview beginPreview() throws IOException {
+        if (upgraded || preview != null) throw new IOException("Video handoff already pending");
+        return preview = new Preview();
+    }
+    synchronized void endPreview(Preview candidate) { if (preview == candidate) preview=null; }
+    public synchronized void videoFrameSent() {
+        if (preview != null) preview.offer(new byte[0]);
+    }
+    public synchronized void videoFrameSent(byte[] frame) {
+        // A static screen may produce no fresh frames during discovery. Keep a
+        // bounded, complete encoded packet for candidate delivery checks only.
+        latestBluetoothFrame=!upgraded && frame.length<=128*1024 ? frame.clone() : null;
+        videoFrameSent();
+    }
+    synchronized byte[] previewFrame() { return latestBluetoothFrame; }
     public BluetoothWire(OutputStream stream) throws IOException {
         this(stream, () -> System.nanoTime() / 1_000_000);
     }
@@ -50,6 +81,10 @@ public final class BluetoothWire {
     public boolean writeStalled(long peerAge) { return peerAge > 5000 && deadline.expired(5000); }
     public void setVideoWindow(VideoWindow window) { videoWindow = window; }
     public void setSideChannel(SideChannel channel) { sideChannel = channel; }
+    public void peerAddress(byte[] record) throws IOException {
+        if (record.length != 32) throw new IOException("Invalid peer address record");
+        sideRecord(3, record, record.length);
+    }
     private void sideRecord(int type, byte[] bytes, int length) throws IOException {
         SideChannel channel = sideChannel;
         if (channel == null) throw new IOException("Authenticated BLE side channel unavailable");
@@ -57,6 +92,10 @@ public final class BluetoothWire {
         DataOutputStream record = new DataOutputStream(buffer);
         record.writeByte(type); record.writeInt(length); record.write(bytes, 0, length);
         channel.send(buffer.toByteArray());
+    }
+    public synchronized void appearance(byte[] json) throws IOException {
+        if (json == null || json.length == 0 || json.length > MAX_CHUNK) return;
+        out.writeByte(4); out.writeInt(json.length); out.write(json); out.flush();
     }
     public void video(byte[] bytes) throws IOException {
         for (int offset = 0; offset < bytes.length;) {
@@ -71,7 +110,10 @@ public final class BluetoothWire {
                     pruneReplay();
                     replay.add(new Chunk(videoBytes, java.util.Arrays.copyOfRange(bytes, offset, offset + length)));
                     videoBytes += length;
-                    try { writeVideo(out, bytes, offset, length); }
+                    try {
+                        writeVideo(out, bytes, offset, length);
+                        if (preview != null) preview.offer(java.util.Arrays.copyOfRange(bytes, offset, offset + length));
+                    }
                     catch (IOException failed) {
                         if (!upgraded) throw failed;
                         // The authenticated BLE request supplies the exact received
@@ -144,7 +186,7 @@ public final class BluetoothWire {
         sideRecord(2, bytes, length);
     }
     public void event(int event) throws IOException {
-        if (event < PHONE_ON || event > MINIMIZE_WINDOW) throw new IOException("Unknown event");
+        if (event < PHONE_ON || event > PHONE_IN_USE) throw new IOException("Unknown event");
         sideRecord(EVENT, new byte[]{(byte)event}, 1);
     }
 }

@@ -66,6 +66,7 @@ struct MirrorPreferences: Codable {
     var maxFPS = 60
     var bitRateMbps = 12
     var maxSize = 1920
+    var wirelessVideoBufferMs = 50
     var codec: VideoCodec = .h264
     var keyboard: KeyboardMode = .sdk
     var scrollMode: ScrollMode = .touchSwipe
@@ -73,7 +74,7 @@ struct MirrorPreferences: Codable {
 
     private enum CodingKeys: String, CodingKey {
         case transport, autoStart, bluetoothDeviceID, turnDeviceScreenOff, powerOffOnClose, stayAwake
-        case alwaysOnTop, forwardAudio, maxFPS, bitRateMbps, maxSize
+        case alwaysOnTop, forwardAudio, maxFPS, bitRateMbps, maxSize, wirelessVideoBufferMs
         case codec, keyboard, scrollMode, showTouches
     }
 
@@ -93,6 +94,8 @@ struct MirrorPreferences: Codable {
         maxFPS = try values.decodeIfPresent(Int.self, forKey: .maxFPS) ?? maxFPS
         bitRateMbps = try values.decodeIfPresent(Int.self, forKey: .bitRateMbps) ?? bitRateMbps
         maxSize = try values.decodeIfPresent(Int.self, forKey: .maxSize) ?? maxSize
+        wirelessVideoBufferMs = min(200, max(0,
+            try values.decodeIfPresent(Int.self, forKey: .wirelessVideoBufferMs) ?? wirelessVideoBufferMs))
         codec = try values.decodeIfPresent(VideoCodec.self, forKey: .codec) ?? codec
         keyboard = try values.decodeIfPresent(KeyboardMode.self, forKey: .keyboard) ?? keyboard
         scrollMode = try values.decodeIfPresent(ScrollMode.self, forKey: .scrollMode) ?? scrollMode

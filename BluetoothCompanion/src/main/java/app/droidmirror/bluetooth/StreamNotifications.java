@@ -7,6 +7,7 @@ import android.content.Intent;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.provider.Settings;
 
 /** One notification becomes a live update only while actual video is flowing. */
 final class StreamNotifications {
@@ -14,7 +15,7 @@ final class StreamNotifications {
     static final String MINIMIZE = "app.droidmirror.bluetooth.action.MINIMIZE_STREAM";
     static final String DISMISSED = "app.droidmirror.bluetooth.action.DISMISS_STREAM_UPDATE";
     static final String FINISHED = "app.droidmirror.bluetooth.action.STREAM_FINISHED";
-    static final String TOKEN = "session", PEER = "peerName", STARTED = "startedElapsed";
+    static final String TOKEN = "session", STARTED = "startedElapsed";
 
     static PendingIntent action(Context context, String action, String token) {
         Intent intent = new Intent(context, token.startsWith("adb-") ? AdbStreamService.class : CaptureService.class).setAction(action)
@@ -22,17 +23,16 @@ final class StreamNotifications {
         return PendingIntent.getService(context, 0, intent, PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
     }
 
-    static Notification streaming(Context context, String token, String peer, long started, boolean dismissed) {
+    static Notification streaming(Context context, String token, long started, boolean dismissed) {
         Intent details = new Intent(context, StreamDetailsActivity.class)
             .setData(Uri.parse("droidmirror://stream/" + token))
-            .putExtra(TOKEN, token).putExtra(PEER, peer).putExtra(STARTED, started);
+            .putExtra(TOKEN, token).putExtra(STARTED, started);
         PendingIntent open = PendingIntent.getActivity(context, 0, details,
             PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
-        String text = context.getString(R.string.stream_destination, peer);
+        String text = mirroringText(context);
         Notification.Builder builder = new Notification.Builder(context, "capture")
             .setSmallIcon(R.drawable.ic_screen_share)
-            .setContentTitle(context.getString(R.string.stream_title)).setContentText(text)
-            .setStyle(new Notification.BigTextStyle().bigText(text))
+            .setContentTitle(text)
             .setContentIntent(open).setOngoing(true).setOnlyAlertOnce(true)
             .setCategory(Notification.CATEGORY_STATUS).setVisibility(Notification.VISIBILITY_PRIVATE)
             .setShowWhen(false)
@@ -50,6 +50,18 @@ final class StreamNotifications {
             builder.addExtras(extras);
         }
         return builder.build();
+    }
+
+    static String mirroringText(Context context) {
+        String name = null;
+        try {
+            name = Settings.Global.getString(context.getContentResolver(), "device_name");
+        } catch (SecurityException ignored) {
+            // Some devices restrict access to the user-defined device name.
+        }
+        if (name == null || name.trim().isEmpty()) name = Build.MODEL;
+        if (name == null || name.trim().isEmpty()) name = context.getString(R.string.stream_phone_fallback);
+        return context.getString(R.string.stream_phone, name.trim());
     }
 
     static void ended(Context context, String token) {

@@ -389,10 +389,11 @@ final class BLEController: NSObject, ObservableObject {
             case "ready":
                 status = "Authenticated phone connected"
                 requestEndpoint(); send(["type": "subscribe"]); onAuthenticated?()
-            case "notification", "removed", "actionResult", "minimizeMirror": onEvent?(plain)
+            case "notification", "removed", "actionResult", "dismissResult", "minimizeMirror": onEvent?(plain)
             default: accept(try JSONSerialization.data(withJSONObject: plain))
             }
         } catch {
+            NSLog("DroidMirror BLE response rejected: %@", error.localizedDescription)
             status = "BLE authentication failed"
             if let phone { rejectedPeers[phone.identifier] = Date().addingTimeInterval(60); rebuildBLESession(phone) }
         }
@@ -506,7 +507,11 @@ extension BLEController: CBPeripheralDelegate {
             return
         }
         endpointCharacteristic = item
-        peripheral.setNotifyValue(true, for: item)
+        status = "Enabling phone notification updates…"
+        // A surviving physical link can retain Core Bluetooth's subscription
+        // cache after Android replaces its GATT server. Clear it before enabling
+        // again so the new server receives an actual descriptor write.
+        peripheral.setNotifyValue(!item.isNotifying, for: item)
     }
 
     func peripheral(_ peripheral: CBPeripheral, didWriteValueFor characteristic: CBCharacteristic, error: Error?) {
@@ -526,8 +531,12 @@ extension BLEController: CBPeripheralDelegate {
     ) {
         guard phone?.identifier == peripheral.identifier, characteristic === endpointCharacteristic, !stopped else { return }
         if let error { status = error.localizedDescription; rebuildBLESession(peripheral); return }
-        guard characteristic.isNotifying else { rebuildBLESession(peripheral); return }
+        guard characteristic.isNotifying else {
+            peripheral.setNotifyValue(true, for: characteristic)
+            return
+        }
         do {
+            status = "Authenticating notification connection…"
             guard let key = BLETrust.key() else { throw BLECryptoError.invalid }
             session = try BLESecureSession(key: key, nonce: BLETrust.random())
             try queue(JSONSerialization.data(withJSONObject: session!.hello))

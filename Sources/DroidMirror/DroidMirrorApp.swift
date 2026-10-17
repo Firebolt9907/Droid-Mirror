@@ -16,10 +16,14 @@ final class DroidMirrorAppDelegate: NSObject, NSApplicationDelegate {
             name: NSNotification.Name("app.droidmirror.quit"),
             object: String(ProcessInfo.processInfo.processIdentifier)
         )
+        DistributedNotificationCenter.default().addObserver(self, selector: #selector(showSettings(_:)),
+            name: Notification.Name("app.droidmirror.showSettings"), object: String(ProcessInfo.processInfo.processIdentifier))
+        DistributedNotificationCenter.default().addObserver(self, selector: #selector(cancelMirror(_:)),
+            name: Notification.Name("app.droidmirror.cancelMirror"), object: String(ProcessInfo.processInfo.processIdentifier))
+        DistributedNotificationCenter.default().addObserver(self, selector: #selector(inactivityTimeout(_:)),
+            name: Notification.Name("app.droidmirror.inactivityTimeout"), object: String(ProcessInfo.processInfo.processIdentifier))
+        PhoneWindowController.shared.show(model: MirrorModel.shared)
         MirrorModel.shared.refreshDevices()
-        if MirrorModel.shared.preferences.transport != .adb {
-            SettingsWindowController.shared.show(model: MirrorModel.shared)
-        }
     }
 
     @objc private func quitRequestedByMirror(_ notification: Notification) {
@@ -30,6 +34,10 @@ final class DroidMirrorAppDelegate: NSObject, NSApplicationDelegate {
         SettingsWindowController.shared.show(model: MirrorModel.shared)
     }
 
+    @objc private func inactivityTimeout(_ sender: Any?) { MirrorModel.shared.stopForInactivity() }
+
+    @objc private func cancelMirror(_ sender: Any?) { MirrorModel.shared.stop() }
+
     @objc private func pairBluetooth(_ sender: Any?) {
         let model = MirrorModel.shared
         if !model.isMirroring && !model.isStarting {
@@ -39,7 +47,7 @@ final class DroidMirrorAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        SettingsWindowController.shared.show(model: MirrorModel.shared)
+        PhoneWindowController.shared.reopen(model: MirrorModel.shared)
         return true
     }
 
@@ -115,7 +123,8 @@ struct DroidMirrorMain {
         let app = NSApplication.shared
         let delegate = DroidMirrorAppDelegate()
         app.delegate = delegate
-        app.setActivationPolicy(.regular)
+        // The renderer owns the app's one public Dock tile and menu bar.
+        app.setActivationPolicy(.accessory)
         _ = MirrorModel.shared
         app.finishLaunching()
         app.run()

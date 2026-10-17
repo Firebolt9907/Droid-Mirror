@@ -18,6 +18,19 @@ static bool control_video(void *context, const uint8_t *bytes, size_t length) {
     memcpy(out->controls + out->control_size, bytes, length); out->control_size += length; return true;
 }
 int main(int argc, char **argv) {
+    // Appearance survives arbitrary L2CAP fragmentation without reaching video or controls.
+    const uint8_t appearance[] = {'D','M','B','T','0','0','0','6',4,0,0,0,3,'{','}','\n',0,0,0,0,1,42};
+    for (size_t fragment = 1; fragment <= sizeof(appearance); ++fragment) {
+        DMClassicWire wire; dm_classic_wire_init_video_only(&wire); wire.appearance = setup;
+        Output out = {0};
+        for (size_t offset = 0; offset < sizeof(appearance); offset += fragment) {
+            size_t count = sizeof(appearance) - offset; if (count > fragment) count = fragment;
+            assert(dm_classic_wire_feed(&wire, appearance + offset, count, video, event, &out));
+        }
+        assert(dm_classic_wire_complete(&wire));
+        assert(out.setup_size == 3 && !memcmp(out.setup, "{}\n", 3));
+        assert(out.video_size == 1 && out.video[0] == 42 && out.control_size == 0 && out.event_count == 0);
+    }
     // A window command is repeatable and belongs only to the BLE return wire.
     for (uint8_t version = '3'; version <= '6'; ++version) {
         const uint8_t commands[] = {'D','M','B','T','0','0','0',version, 1,0,0,0,1,7, 1,0,0,0,1,7};
@@ -32,6 +45,16 @@ int main(int argc, char **argv) {
             if (accepted) assert(commandsOut.event_count == 2 && commandsOut.events[0] == 7 && commandsOut.events[1] == 7);
             else assert(commandsOut.event_count == 0);
         }
+    }
+    // Startup rejection must survive every BLE packet fragmentation boundary.
+    const uint8_t busy[] = {'D','M','B','T','0','0','0','5',1,0,0,0,1,8};
+    for (size_t fragment = 1; fragment <= sizeof(busy); ++fragment) {
+        DMClassicWire wire; dm_classic_wire_init(&wire); Output out = {0};
+        for (size_t offset = 0; offset < sizeof(busy); offset += fragment) {
+            size_t count = sizeof(busy) - offset; if (count > fragment) count = fragment;
+            assert(dm_classic_wire_feed_ble(&wire, busy + offset, count, video, event, control_video, setup, &out));
+        }
+        assert(out.event_count == 1 && out.events[0] == 8 && !out.video_size);
     }
     const uint8_t onlyVideo[]={'D','M','B','T','0','0','0','6',0,0,0,0,2,42,43};
     for (size_t fragment=1;fragment<=sizeof(onlyVideo);++fragment) {

@@ -45,9 +45,22 @@ public final class DisplayGuardService extends IDisplayGuard.Stub {
         }, "DisplayRecovery"));
     }
     public DisplayGuardService(Context context) { this(); }
+    @Override public byte[] phoneAppearance() { return PhoneAppearance.read(); }
     @Override public synchronized boolean startCapture(IBinder token, IStreamEvents events, ParcelFileDescriptor output, ParcelFileDescriptor controls) {
         if (token == null || owner != null || capture != null || output == null || controls == null || lease.isRestoreNeeded()) {
             if (output != null) try { output.close(); } catch (java.io.IOException ignored) {}
+            return false;
+        }
+        // Check before owning a session: rejecting local use must not lock, wake,
+        // capture, or turn off the phone the person is holding.
+        captureError = "";
+        try {
+            if (logical.inUse()) captureError = PhoneUsePolicy.ERROR;
+        } catch (Exception failure) {
+            captureError = "Could not check whether the phone is in use. Try again.";
+        }
+        if (!captureError.isEmpty()) {
+            try { output.close(); } catch (java.io.IOException ignored) {}
             return false;
         }
         IBinder.DeathRecipient recipient = () -> {

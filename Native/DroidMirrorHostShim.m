@@ -11,7 +11,6 @@ static void (*DMOriginalReplyToTerminate)(NSApplication *, SEL, BOOL);
 static BOOL DMQuitting;
 static BOOL DMFinishingQuit;
 static NSUInteger DMQuitGeneration;
-static id DMExitObserver;
 static id DMQuitObserver;
 static id DMRequestObserver;
 static NSTask *DMMirrorTask;
@@ -42,7 +41,7 @@ static void DMMenuUpdate(NSMenu *menu, SEL selector) {
 // calling convention. No guessed object offsets or accessibility access.
 __attribute__((visibility("default")))
 void DroidMirrorRequestMirror(void) {
-    if (DMQuitting || DMMirrorTask.running) return;
+    if (DMQuitting) return;
     typedef void **(*SharedAddress)(void) __attribute__((swiftcall));
     typedef void (*Refresh)(BOOL, void * __attribute__((swift_context))) __attribute__((swiftcall));
     typedef void (*Start)(void * __attribute__((swift_context))) __attribute__((swiftcall));
@@ -137,6 +136,9 @@ static void DMFixQuitMenu(NSMenu *menu) {
 }
 
 static void DMSetExecutableURL(NSTask *task, SEL selector, NSURL *url) {
+    if ([url.lastPathComponent isEqualToString:@"DroidMirrorRenderer"]) {
+        DMMirrorTask = task;
+    }
     if ([url.lastPathComponent isEqualToString:@"scrcpy"]) {
         NSURL *bundledClient = [[NSBundle.mainBundle.bundleURL
             URLByAppendingPathComponent:@"Contents/Helpers"]
@@ -209,20 +211,15 @@ static void DMInstallBundledScrcpyResolver(void) {
         DMFixQuitMenu(NSApp.mainMenu);
         [NSTimer scheduledTimerWithTimeInterval:0.5 repeats:YES block:^(__unused NSTimer *timer) {
             DMFixQuitMenu(NSApp.mainMenu);
-            DMPublishSessionState();
+            // The persistent renderer publishes whether a stream is active.
             if (!DMQuitting && !DMMirrorStarted && DMMirrorTask.running) {
                 DMMirrorStarted = YES;
                 [[NSNotificationCenter defaultCenter] postNotificationName:@"app.droidmirror.mirrorStarted"
                                                                    object:nil];
             }
         }];
-        DMExitObserver = [[NSNotificationCenter defaultCenter]
-            addObserverForName:NSTaskDidTerminateNotification object:nil queue:NSOperationQueue.mainQueue
-            usingBlock:^(NSNotification *notification) {
-                NSTask *task = notification.object;
-                if ([task.executableURL.lastPathComponent isEqualToString:@"scrcpy"])
-                    [NSApp terminate:nil];
-            }];
+        // The model handles stream completion after reading its diagnostics.
+        // Exiting here races standalone phone-use and connection-failure alerts.
         DMQuitObserver = [[NSDistributedNotificationCenter defaultCenter]
             addObserverForName:@"app.droidmirror.quit" object:nil queue:NSOperationQueue.mainQueue
             usingBlock:^(NSNotification *notification) {

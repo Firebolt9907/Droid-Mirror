@@ -3,6 +3,19 @@ import Foundation
 @main
 struct AutomaticTransportPreferencesTests {
     static func main() throws {
+        // Older saved profiles have no buffer key: adopt the smoother playback
+        // default while retaining the user's capture rate and quality choices.
+        let legacy = try JSONDecoder().decode(MirrorPreferences.self,
+            from: Data(#"{"maxFPS":30,"bitRateMbps":4,"maxSize":1280}"#.utf8))
+        precondition(legacy.wirelessVideoBufferMs == 50)
+        precondition(legacy.maxFPS == 30 && legacy.bitRateMbps == 4 && legacy.maxSize == 1280)
+        for delay in [0, 50, 100, 200] {
+            var profile = legacy
+            profile.wirelessVideoBufferMs = delay
+            let restored = try JSONDecoder().decode(MirrorPreferences.self,
+                from: JSONEncoder().encode(profile))
+            precondition(restored.wirelessVideoBufferMs == delay)
+        }
         for previous in MirrorTransport.allCases {
             try withDefaults { defaults, suite in
                 var saved = MirrorPreferences()

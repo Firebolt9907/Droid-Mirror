@@ -632,6 +632,18 @@ sc_screen_init(struct sc_screen *screen,
         goto error_destroy_fps_counter;
     }
 
+    if (SDL_GetBooleanProperty(SDL_GetWindowProperties(screen->window), "app.droidmirror.connecting", false)) {
+        // Preserve moves and resizes made while connecting. Only the phone's
+        // aspect ratio needs to be resolved when the first frame arrives.
+        struct sc_size size = sc_sdl_get_window_size(screen->window);
+        struct sc_point position = sc_sdl_get_window_position(screen->window);
+        screen->req.width = size.width;
+        screen->req.height = 0;
+        screen->req.x = position.x;
+        screen->req.y = position.y;
+        SDL_ClearProperty(SDL_GetWindowProperties(screen->window), "app.droidmirror.connecting");
+    }
+
     screen->renderer = SDL_CreateRenderer(screen->window, NULL);
     if (!screen->renderer) {
         LOGE("Could not create renderer: %s", SDL_GetError());
@@ -777,7 +789,7 @@ error_destroy_renderer:
 #endif
     SDL_DestroyRenderer(screen->renderer);
 error_destroy_window:
-    SDL_DestroyWindow(screen->window);
+    if (!getenv("DROIDMIRROR_SESSION_COMMANDS")) SDL_DestroyWindow(screen->window);
 error_destroy_fps_counter:
     sc_fps_counter_destroy(&screen->fps_counter);
 error_destroy_frame_buffer:
@@ -869,7 +881,7 @@ sc_screen_destroy(struct sc_screen *screen) {
     SDL_GL_DestroyContext(screen->gl_context);
 #endif
     SDL_DestroyRenderer(screen->renderer);
-    SDL_DestroyWindow(screen->window);
+    if (!getenv("DROIDMIRROR_SESSION_COMMANDS")) SDL_DestroyWindow(screen->window);
     sc_fps_counter_destroy(&screen->fps_counter);
     sc_frame_buffer_destroy(&screen->fb);
     sc_mutex_destroy(&screen->mutex);

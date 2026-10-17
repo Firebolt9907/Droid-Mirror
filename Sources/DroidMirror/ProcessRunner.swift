@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 
 /// Continuously drain diagnostics so a noisy child cannot block on a full pipe.
 final class ProcessDiagnostics: @unchecked Sendable {
@@ -6,23 +7,41 @@ final class ProcessDiagnostics: @unchecked Sendable {
     private let lock = NSLock()
     private var bytes = Data()
 
-    func attach(to process: Process) {
+    func attach(to process: Process, captureOutput: Bool = false) {
         process.standardError = pipe
-        pipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
-            let data = handle.availableData
-            guard let self, !data.isEmpty else { return }
-            self.lock.lock()
-            self.bytes.append(data)
-            if self.bytes.count > 8192 { self.bytes.removeFirst(self.bytes.count - 8192) }
-            self.lock.unlock()
-        }
+        if captureOutput { process.standardOutput = pipe }
+        let descriptor = pipe.fileHandleForReading.fileDescriptor
+        let flags = fcntl(descriptor, F_GETFL)
+        _ = fcntl(descriptor, F_SETFL, flags | O_NONBLOCK)
+        pipe.fileHandleForReading.readabilityHandler = { [weak self] _ in self?.drain() }
     }
 
-    func finish() -> String {
-        pipe.fileHandleForReading.readabilityHandler = nil
+    // A stream-ended notification can arrive before the readability callback.
+    // Drain nonblocking here too, so the final phone-use marker is never lost.
+    private func drain() {
+        lock.lock(); defer { lock.unlock() }
+        var buffer = [UInt8](repeating: 0, count: 4096)
+        while true {
+            let count = Darwin.read(pipe.fileHandleForReading.fileDescriptor, &buffer, buffer.count)
+            if count > 0 {
+                bytes.append(contentsOf: buffer.prefix(count))
+                if bytes.count > 8192 { bytes.removeFirst(bytes.count - 8192) }
+            } else if count < 0 && errno == EINTR {
+                continue
+            } else { break }
+        }
+    }
+    func reset() { drain(); lock.lock(); bytes.removeAll(); lock.unlock() }
+    func snapshot() -> String {
+        drain()
         lock.lock(); defer { lock.unlock() }
         return String(decoding: bytes, as: UTF8.self)
     }
+    func finish() -> String {
+        pipe.fileHandleForReading.readabilityHandler = nil
+        return snapshot()
+    }
+
 }
 
 enum ToolLocator {

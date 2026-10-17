@@ -17,8 +17,12 @@ clang -fobjc-arc -fblocks -dynamiclib -framework Foundation -framework AppKit \
 clang -fobjc-arc -fblocks -framework Foundation -framework AppKit \
   "$root/Native/HostIsolationProbe.m" -o "$app/MacOS/DroidMirrorHost"
 cp "$app/MacOS/DroidMirrorHost" "$app/Helpers/DroidMirrorBluetooth"
+cp "$app/MacOS/DroidMirrorHost" "$app/Helpers/scrcpy"
 clang "$root/Native/DroidMirrorLauncher.c" -o "$app/MacOS/DroidMirror"
 "$app/MacOS/DroidMirror" host
+failure_output=$(DROIDMIRROR_TEST_FAILED_CLIENT=1 "$app/MacOS/DroidMirror" host)
+[[ "$failure_output" == *"PASS: failed mirror leaves host alive"* ]]
+echo "$failure_output"
 xcrun swiftc -module-cache-path /private/tmp/droidmirror-swift-module-cache \
   "$root/Sources/DroidMirror/Models.swift" "$root/Sources/DroidMirror/ProcessRunner.swift" \
   "$root/Native/ToolEnvironmentTests.swift" -o "$task_build/environment-tests"

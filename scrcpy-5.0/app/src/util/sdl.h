@@ -9,6 +9,9 @@
 
 #include "coords.h"
 
+void
+sc_sdl_keep_connecting_window(SDL_Window *window);
+
 SDL_Window *
 sc_sdl_create_window(const char *title, int64_t x, int64_t y, int64_t width,
                      int64_t height, int64_t flags);

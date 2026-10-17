@@ -11,6 +11,7 @@
 <key>CFBundleShortVersionString</key><string>1.0</string>
 <key>LSUIElement</key><true/>
 <key>LSMinimumSystemVersion</key><string>14.0</string>
-<key>NSBluetoothAlwaysUsageDescription</key><string>Securely receives your paired Android phone's notifications when screen mirroring is off.</string>
+<key>NSBluetoothAlwaysUsageDescription</key><string>Securely receives your paired Android phone's notifications whether screen mirroring is open or closed.</string>
+<key>NSUserActivityTypes</key><array><string>INSendMessageIntent</string></array>
 <key>NSPrincipalClass</key><string>NSApplication</string>
 </dict></plist>

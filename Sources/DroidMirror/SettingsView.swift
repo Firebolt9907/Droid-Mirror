@@ -36,7 +36,7 @@ struct SettingsView: View {
                     Text("Experimental direct connection. Mirroring is unavailable in this build.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
-                Text("Bluetooth starts at 320p, up to 15 fps, and a 128 kbps HEVC ceiling, then upgrades video over Iroh to the picture settings below. Video tries direct LAN first, then an already-paired wireless ADB connection, then stays on Bluetooth. Relays and public Iroh discovery are disabled. Wireless ADB fallback requires Wireless debugging and one-time ADB pairing. Mouse, keyboard and navigation stay on Bluetooth. Audio requires a direct ADB session. Authorize Shizuku and enable the background bridge once in the Android companion.")
+                Text("Bluetooth starts at 320p, up to 15 fps, and a 128 kbps HEVC ceiling, then upgrades video over Iroh to the picture settings below. Video tries direct LAN or Tailscale IPs first, then an already-paired wireless ADB connection, then stays on Bluetooth. Relays and public Iroh discovery are disabled. Wireless ADB fallback requires Wireless debugging and one-time ADB pairing. Mouse, keyboard and navigation stay on Bluetooth. Audio requires a direct ADB session. Authorize Shizuku and enable the background bridge once in the Android companion.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section("iPhone-like behavior") {
@@ -61,6 +61,10 @@ struct SettingsView: View {
                     Text("1280 px").tag(1280); Text("1920 px").tag(1920); Text("Native").tag(0)
                 }
                 Stepper("Bit rate: \(model.preferences.bitRateMbps) Mbps", value: $model.preferences.bitRateMbps, in: 4...32, step: 2)
+                Stepper("Wireless video buffer: \(model.preferences.wirelessVideoBufferMs) ms",
+                        value: $model.preferences.wirelessVideoBufferMs, in: 0...200, step: 25)
+                Text("A small buffer smooths uneven Wi-Fi frame delivery by adding playback delay. Default: 50 ms; 0 ms prioritizes latency. Applies next session to wireless ADB and automatic Bluetooth / Wi-Fi sessions.")
+                    .font(.caption).foregroundStyle(.secondary)
                 if model.preferences.transport == .bluetoothClassic {
                     Text("These targets apply after the Wi-Fi handoff on your next session. Hybrid sessions keep regular HEVC throughout; input stays on BLE. Direct ADB sessions use their own selected codec and ADB input.")
                         .font(.caption).foregroundStyle(.secondary)
@@ -80,9 +84,7 @@ struct SettingsView: View {
             }
             .disabled(model.preferences.transport != .adb)
         }.formStyle(.grouped).padding(.vertical, 12)
-        .alert("DroidMirror", isPresented: Binding(get: { model.errorMessage != nil }, set: { if !$0 { model.errorMessage = nil } })) {
-            Button("OK") { model.errorMessage = nil }
-        } message: { Text(model.errorMessage ?? "") }
+
     }
 }
 

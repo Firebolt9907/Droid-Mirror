@@ -53,7 +53,7 @@ final class ShizukuDisplayClient implements AutoCloseable {
         return new Shizuku.UserServiceArgs(new ComponentName(context.getPackageName(), DisplayGuardService.class.getName()))
             // Bump when the embedded capture code changes: Shizuku daemons can
             // survive APK replacement and otherwise keep running the old code.
-            .daemon(true).processNameSuffix("display_guard").debuggable(false).version(37);
+            .daemon(true).processNameSuffix("display_guard").debuggable(false).version(39);
     }
     private final ServiceConnection connection = new ServiceConnection() {
         @Override public void onServiceConnected(ComponentName name, IBinder binder) {
@@ -79,6 +79,9 @@ final class ShizukuDisplayClient implements AutoCloseable {
         catch (RuntimeException error) { closed = true; auditKnown = true; heartbeats.shutdown();
             ready.completeExceptionally(new IllegalStateException("Shizuku unavailable")); status.accept("Shizuku guard could not start; phone display stays on."); return; }
         heartbeats.scheduleWithFixedDelay(this::update, 250, 250, TimeUnit.MILLISECONDS);
+    }
+    byte[] phoneAppearance() throws Exception {
+        return ready.get(10, TimeUnit.SECONDS).phoneAppearance();
     }
     void startVideo(ParcelFileDescriptor output, ParcelFileDescriptor controls) throws Exception {
         IDisplayGuard remote = ready.get(10, TimeUnit.SECONDS);

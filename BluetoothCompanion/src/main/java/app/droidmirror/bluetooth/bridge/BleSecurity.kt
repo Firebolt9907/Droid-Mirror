@@ -97,9 +97,12 @@ class BleFragments {
     companion object {
         fun split(data: ByteArray, id: Int, maximum: Int): List<ByteArray> {
             require(data.size in 1..8192 && maximum > 9)
-            return (data.indices step (maximum - 9)).map { offset ->
+            // MTU 517 allows 514 ATT payload bytes, but a characteristic value
+            // is still limited to 512. Larger frames get truncated on the link.
+            val capacity = minOf(maximum, 512) - 9
+            return (data.indices step capacity).map { offset ->
                 ByteBuffer.allocate(9).put(0xd2.toByte()).putInt(id).putShort(offset.toShort()).putShort(data.size.toShort()).array() +
-                    data.copyOfRange(offset, minOf(data.size, offset + maximum - 9))
+                    data.copyOfRange(offset, minOf(data.size, offset + capacity))
             }
         }
     }

@@ -15,6 +15,8 @@ classpath="$task_build:$classes:$stdlib:$json"
   "$root/Native/tests/android/util/Base64.java" \
   "$root/BluetoothCompanion/src/main/java/app/droidmirror/bluetooth/PairingKeys.java" \
   "$root/Native/tests/BLESecurityPeer.java"
+"$task_java/bin/javac" -cp "$classpath" -d "$task_build" "$root/BluetoothCompanion/tests/ConversationPayloadTest.java"
+"$task_java/bin/java" -cp "$classpath" ConversationPayloadTest
 "$task_java/bin/javac" -d "$task_build" \
   "$root/BluetoothCompanion/tests/stubs/android/content/Context.java" \
   "$root/BluetoothCompanion/tests/stubs/android/content/SharedPreferences.java" \

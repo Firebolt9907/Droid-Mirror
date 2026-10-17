@@ -14,5 +14,6 @@ interface IDisplayGuard {
     boolean upgradeVideo(IBinder owner, int maxSize, int fps, int bitRate) = 8;
     boolean restoreBluetoothVideo(IBinder owner) = 9;
     boolean grantSecureSettings() = 10;
+    byte[] phoneAppearance() = 11;
     void destroy() = 16777114;
 }

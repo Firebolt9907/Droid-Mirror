@@ -32,10 +32,19 @@ int main(void) {
             styleMask:NSWindowStyleMaskBorderless | NSWindowStyleMaskResizable
             backing:NSBackingStoreBuffered defer:NO];
         window.releasedWhenClosed = NO;
+        [window orderFront:nil];
         DMApplyDeviceCorners(window.contentView);
         DMPhoneShadow *shadow = objc_getAssociatedObject(window, DMPhoneShadowKey);
         id observer = [NSNotificationCenter.defaultCenter addObserverForName:NSWindowDidMoveNotification
-            object:window queue:nil usingBlock:^(NSNotification *note) { DMApplyDeviceCorners(window.contentView); }];
+            object:window queue:nil usingBlock:^(NSNotification *note) {
+                // AppKit still owns child movement while delivering this event.
+                // An absolute frame update here can advance the shadow twice.
+                NSRect before = shadow.panel.frame;
+                NSRect silhouetteBefore = ((DMPhoneShadowView *)shadow.panel.contentView).phoneRect;
+                DMApplyDeviceCorners(window.contentView);
+                assert(NSEqualRects(before, shadow.panel.frame));
+                assert(NSEqualRects(silhouetteBefore, ((DMPhoneShadowView *)shadow.panel.contentView).phoneRect));
+            }];
         for (NSValue *value in @[[NSValue valueWithRect:NSMakeRect(300, 250, 360, 800)],
                                  [NSValue valueWithRect:NSMakeRect(250, 150, 270, 600)],
                                  [NSValue valueWithRect:NSMakeRect(-40, 300, 360, 800)]]) {
@@ -49,6 +58,16 @@ int main(void) {
             assert(shadow.panel.ignoresMouseEvents && !window.hasShadow);
             assert(!shadow.updateScheduled);
         }
+        // Fast direction changes must coalesce using the final window position.
+        for (NSUInteger i = 0; i < 40; ++i) {
+            [window setFrameOrigin:NSMakePoint(i % 2 ? 420 : 180, 200 + i)];
+        }
+        [NSRunLoop.mainRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:.02]];
+        NSRect settledPhone = [window convertRectToScreen:
+            [window.contentView convertRect:window.contentView.bounds toView:nil]];
+        assert(NSEqualRects(settledPhone, [shadow.panel convertRectToScreen:
+            ((DMPhoneShadowView *)shadow.panel.contentView).phoneRect]));
+        assert(!shadow.updateScheduled);
         [NSNotificationCenter.defaultCenter removeObserver:observer];
         [window close];
         assert(!shadow.panel.visible);

@@ -66,9 +66,7 @@ struct ContentView: View {
         .padding(18)
         .background(WindowStyler())
         .fixedSize()
-        .alert("DroidMirror", isPresented: Binding(get: { model.errorMessage != nil }, set: { if !$0 { model.errorMessage = nil } })) {
-            Button("OK") { model.errorMessage = nil }
-        } message: { Text(model.errorMessage ?? "") }
+
         .sheet(isPresented: $showWireless) { WirelessView().environmentObject(model) }
         .onChange(of: model.isDeviceLocked) { _, locked in
             if locked { pinDigitCount = 0; showPinPad = true }

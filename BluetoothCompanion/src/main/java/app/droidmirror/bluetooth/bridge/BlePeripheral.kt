@@ -153,13 +153,19 @@ class BlePeripheral(
             @Suppress("DEPRECATION")
             server?.notifyCharacteristicChanged(device, item, confirm) == true
         }
-        if (!accepted) { indicationInFlight.remove(device); revokeSession(device) }
+        if (!accepted) {
+            android.util.Log.w("DroidMirrorNotifications", "Bluetooth indication was rejected; resetting notification session")
+            indicationInFlight.remove(device); revokeSession(device)
+        }
     }
 
     @Synchronized
     private fun enqueue(device: android.bluetooth.BluetoothDevice, value: ByteArray) {
         if (subscribed[device] != true) return
         val queue = pendingIndication.getOrPut(device) { java.util.ArrayDeque() }
+        // ATT attributes are limited to 512 bytes even when the negotiated MTU
+        // is 517. Larger indications can be truncated by the central, breaking
+        // reassembly of image-bearing notification messages.
         val frames = BleFragments.split(value, nextMessage++, (mtu[device] ?: 23) - 3)
         if (queue.sumOf { it.size } + frames.sumOf { it.size } > 262144) {
             revokeSession(device); return
@@ -302,7 +308,15 @@ class BlePeripheral(
                                 when (command.optString("type")) {
                                     "get" -> publish(device, command.optLong("request"))
                                     "state" -> onCommand(if (command.optBoolean("connected")) "CONNECTED" else "DISCONNECTED")
-                                    "subscribe" -> PhoneNotifications.live?.snapshot()?.takeLast(16)?.forEach { enqueue(device, session.seal(it)) }
+                                    "subscribe" -> {
+                                        val snapshot = PhoneNotifications.live?.snapshot()
+                                        snapshot?.forEach { enqueue(device, session.seal(it)) }
+                                    }
+                                    "dismiss" -> {
+                                        val success = PhoneNotifications.live?.dismiss(command) == true
+                                        enqueue(device, session.seal(JSONObject().put("type", "dismissResult")
+                                            .put("request", command.optString("request")).put("success", success)))
+                                    }
                                     "action" -> {
                                         val success = PhoneNotifications.live?.perform(command) == true
                                         enqueue(device, session.seal(JSONObject().put("type", "actionResult").put("request", command.optString("request")).put("success", success)))
@@ -311,9 +325,32 @@ class BlePeripheral(
                                 }
                             }
                         }
-                    }.onFailure { revokeSession(device) }
+                    }.onFailure {
+                        android.util.Log.w("DroidMirrorNotifications", "Notification handshake/command failed: ${it.javaClass.simpleName}")
+                        revokeSession(device)
+                    }
                 }
             }
+        }
+
+        @SuppressLint("MissingPermission")
+        override fun onDescriptorReadRequest(
+            device: android.bluetooth.BluetoothDevice,
+            requestId: Int,
+            offset: Int,
+            descriptor: BluetoothGattDescriptor
+        ) {
+            // CoreBluetooth may read the CCC while discovering this service.
+            // Leaving that ATT request unanswered stalls discovery until timeout.
+            val value = if (subscribed[device] == true) BluetoothGattDescriptor.ENABLE_INDICATION_VALUE
+                else BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE
+            val status = when {
+                descriptor.uuid != CCC_UUID -> BluetoothGatt.GATT_REQUEST_NOT_SUPPORTED
+                offset < 0 || offset > value.size -> BluetoothGatt.GATT_INVALID_OFFSET
+                else -> BluetoothGatt.GATT_SUCCESS
+            }
+            server?.sendResponse(device, requestId, status, offset,
+                if (status == BluetoothGatt.GATT_SUCCESS) value.copyOfRange(offset, value.size) else null)
         }
 
         @SuppressLint("MissingPermission")
@@ -326,17 +363,20 @@ class BlePeripheral(
             offset: Int,
             value: ByteArray
         ) {
-            if (descriptor.uuid == CCC_UUID && offset == 0) {
-                if (value.contentEquals(BluetoothGattDescriptor.ENABLE_INDICATION_VALUE)) {
-                    subscribed[device] = true
-                } else if (value.contentEquals(BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)) {
-                    subscribed[device] = false
-                } else {
-                    subscribed.remove(device)
+            val valid = descriptor.uuid == CCC_UUID && !preparedWrite && offset == 0 &&
+                (value.contentEquals(BluetoothGattDescriptor.ENABLE_INDICATION_VALUE) ||
+                 value.contentEquals(BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE))
+            if (valid) {
+                synchronized(this@BlePeripheral) {
+                    // Core Bluetooth can resubscribe without disconnecting the
+                    // shared physical link. Its next hello belongs to a new
+                    // authenticated session, not the old session's nonce state.
+                    revokeSession(device)
+                    if (value.contentEquals(BluetoothGattDescriptor.ENABLE_INDICATION_VALUE)) subscribed[device] = true
                 }
             }
             if (responseNeeded) server?.sendResponse(
-                device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null
+                device, requestId, if (valid) BluetoothGatt.GATT_SUCCESS else BluetoothGatt.GATT_FAILURE, 0, null
             )
         }
     }

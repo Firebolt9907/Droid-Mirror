@@ -14,5 +14,6 @@
   <key>NSBluetoothPeripheralUsageDescription</key><string>DroidMirror connects to your paired Android phone.</string>
   <key>NSLocalNetworkUsageDescription</key><string>DroidMirror finds your paired Android phone on the local network for direct encrypted video.</string>
   <key>DroidMirrorSupportsLaunchCheck</key><true/>
+  <key>LSUIElement</key><true/>
   <key>NSPrincipalClass</key><string>NSApplication</string>
 </dict></plist>

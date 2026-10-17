@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>CFBundleExecutable</key><string>DroidMirrorRenderer</string>
+  <key>CFBundleIdentifier</key><string>app.droidmirror.renderer</string>
+  <key>CFBundleName</key><string>DroidMirror</string>
+  <key>CFBundleDisplayName</key><string>DroidMirror</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>LSUIElement</key><false/>
+  <key>NSHighResolutionCapable</key><true/>
+  <key>LSMinimumSystemVersion</key><string>14.0</string>
+</dict></plist>

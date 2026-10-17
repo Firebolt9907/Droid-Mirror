@@ -166,6 +166,30 @@ static void TestDroppedADB(void) {
     puts("Dropped ADB: real socket EOF requests BLE recovery with exact offset and nonce, preserving scrcpy socket");
 }
 
+static void TestPeerAddressFragments(void) {
+    DMStartupBridge *bridge=[DMStartupBridge new];
+    assert([bridge bleInputReceived:[NSData dataWithBytes:"DMBT0005" length:8]]);
+    uint8_t envelope[37]={3,0,0,0,32};
+    memcpy(envelope+5,"DMIP0001",8); envelope[13]=4;
+    envelope[14]=100; envelope[15]=108; envelope[16]=251; envelope[17]=24;
+    envelope[30]=0xB2; envelope[31]=0x6E; // Bound UDP port 45678.
+    for (unsigned i=0;i<sizeof(envelope);++i)
+        assert([bridge bleInputReceived:[NSData dataWithBytes:envelope+i length:1]]);
+    assert(bridge.peerAddresses.count==1 && bridge.controlPending.length==0 && bridge.videoReceived==0);
+    NSData *record=bridge.peerAddresses.firstObject;
+    const uint8_t *bytes=record.bytes;
+    assert(bytes[8]==4 && bytes[9]==100 && bytes[12]==24 && ((unsigned)bytes[25]<<8|bytes[26])==45678);
+    // Repeated publications deduplicate; a new snapshot clears previous routes.
+    assert([bridge bleInputReceived:[NSData dataWithBytes:envelope length:sizeof(envelope)]]);
+    assert(bridge.peerAddresses.count==1);
+    memset(envelope+13,0,24);
+    assert([bridge bleInputReceived:[NSData dataWithBytes:envelope length:sizeof(envelope)]]);
+    assert(bridge.peerAddresses.count==0);
+    envelope[13]=9;
+    assert(![bridge bleInputReceived:[NSData dataWithBytes:envelope length:sizeof(envelope)]]);
+    puts("BLE peer addresses: fragmented Tailscale hints, deduplication, reset, invalid family and decoder isolation passed");
+}
+
 static void TestColdPeerConnection(void) {
     int listener=socket(AF_INET,SOCK_STREAM,0); assert(listener>=0);
     struct sockaddr_in address={0}; address.sin_family=AF_INET;
@@ -180,13 +204,24 @@ static void TestColdPeerConnection(void) {
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY,0), ^{
         int peer=accept(listener,NULL,NULL); assert(peer>=0);
         int yes=1; setsockopt(peer,SOL_SOCKET,SO_NOSIGPIPE,&yes,sizeof(yes));
-        // Model a relay/DNS cold start longer than the former two-second budget.
+        // Model direct discovery longer than the former two-second budget.
         [NSThread sleepForTimeInterval:3];
-        uint8_t hello[40]={0}; memcpy(hello,"DMWIFI03",8);
+        uint8_t hello[40]={0}; memcpy(hello,"DMWIFI04",8);
         assert(send(peer,hello,sizeof(hello),0)==sizeof(hello));
         uint8_t request[44]; assert(DMReadExact(peer,request,sizeof(request)));
         NSData *proof=DMUpgradeProof(bridge.pairingKey,"client",hello+8,request,12);
         assert(!memcmp(proof.bytes,request+12,32));
+        NSData *preview=DMUpgradeProof(bridge.pairingKey,"preview server",hello+8,request,12);
+        assert(send(peer,preview.bytes,32,0)==32);
+        // Deliver three preview frames over time before accepting the cutoff.
+        for (int i=0;i<3;++i) {
+            [NSThread sleepForTimeInterval:0.12];
+            const uint8_t frame[]={0,0,0,1,42,0,0,0,0};
+            assert(send(peer,frame,sizeof(frame),0)==sizeof(frame));
+        }
+        uint8_t ready; assert(DMReadExact(peer,&ready,1) && ready==1);
+        const uint32_t end=UINT32_MAX;
+        assert(send(peer,&end,4,0)==4);
         uint8_t response[48]={0};
         NSMutableData *authenticated=[bridge.wirelessProfile mutableCopy];
         [authenticated appendBytes:response length:8];
@@ -207,10 +242,28 @@ static void TestColdPeerConnection(void) {
 
 int main(void) {
     @autoreleasepool {
+        // A loading client may already have consumed/closed the listener before
+        // authentication completes. READY must use the retained bound port.
+        DMStartupBridge *earlyClient = [DMStartupBridge new];
+        DMVideoAckBLE *readyBLE = [DMVideoAckBLE new];
+        readyBLE.ready = YES;
+        earlyClient.ble = (DMBleInputTransport *)readyBLE;
+        earlyClient.listener = -1;
+        earlyClient.videoPort = 12345;
+        earlyClient.controlPort = 12346;
+        earlyClient.l2capReady = NO;
+        [earlyClient announceReady]; assert(!earlyClient.announcedReady);
+        earlyClient.l2capReady = YES;
+        [earlyClient announceReady]; assert(earlyClient.announcedReady);
+        DMClassicBridge *busyBridge = [DMClassicBridge new];
+        [busyBridge receiveEvent:8];
+        [busyBridge receiveEvent:8];
+        assert(busyBridge.eventMask == 0x80); // Distinct, deduplicated startup rejection.
         TestNativeClassicStreams();
         TestVideoAckCadence();
         TestDroppedADB();
         TestColdPeerConnection();
+        TestPeerAddressFragments();
         DMStartupDevice *device=[DMStartupDevice new];
         DMStartupBridge *bridge=[DMStartupBridge new];
         bridge.device=(IOBluetoothDevice *)device;

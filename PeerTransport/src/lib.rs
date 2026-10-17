@@ -2,14 +2,22 @@
 use anyhow::{Context, Result};
 use hmac::{Hmac, Mac};
 use iroh::{
-    Endpoint, EndpointId, SecretKey,
-    endpoint::{Connection, RecvStream, RelayMode, SendStream, presets},
+    Endpoint, EndpointAddr, EndpointId, SecretKey,
+    endpoint::{Connection, QuicTransportConfig, RecvStream, RelayMode, SendStream, presets},
 };
 use iroh_mdns_address_lookup::MdnsAddressLookup;
 use sha2::Sha256;
-use std::{net::TcpListener, thread, time::Duration};
+use std::{
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener},
+    sync::{
+        Arc, RwLock,
+        atomic::{AtomicU64, Ordering},
+    },
+    thread,
+    time::Duration,
+};
 use tokio::{
-    io::{AsyncRead, AsyncWrite, AsyncWriteExt},
+    io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf},
     sync::oneshot,
 };
 use zeroize::Zeroize;
@@ -52,6 +60,13 @@ async fn endpoint(secret: SecretKey) -> Result<Endpoint> {
     // LAN discovery only: never register with public discovery or relay services.
     let ep = Endpoint::builder(presets::Minimal)
         .relay_mode(RelayMode::Disabled)
+        // Conservative datagrams work across Android VPN interfaces as well as
+        // LAN. Do not rely on offload or path-MTU support in a tunnel driver.
+        .transport_config(QuicTransportConfig::builder()
+            .initial_mtu(1200)
+            .mtu_discovery_config(None)
+            .enable_segmentation_offload(false)
+            .build())
         .secret_key(secret)
         .alpns(vec![ALPN.to_vec()])
         .bind()
@@ -97,12 +112,38 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     let (mut input, mut output) = tokio::io::split(socket);
+    let local_bytes = Arc::new(AtomicU64::new(0));
+    let remote_bytes = Arc::new(AtomicU64::new(0));
+    let mut input = MeteredRead(&mut input, local_bytes.clone());
+    let mut recv = MeteredRead(&mut recv, remote_bytes.clone());
     // End both directions on EOF/error; do not leave a video writer blocked after teardown.
     tokio::select! {
         result = async { tokio::io::copy(&mut input, &mut send).await?; send.finish()?; Ok::<_, anyhow::Error>(()) } => result?,
         result = async { tokio::io::copy(&mut recv, &mut output).await?; output.shutdown().await?; Ok::<_, anyhow::Error>(()) } => result?,
+        _ = async {
+            for _ in 0..3 {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                diagnostic(&format!("Tunnel bytes read: local={} peer={}", local_bytes.load(Ordering::Relaxed), remote_bytes.load(Ordering::Relaxed)));
+            }
+            std::future::pending::<()>().await;
+        } => unreachable!(),
     }
     Ok(())
+}
+
+struct MeteredRead<R>(R, Arc<AtomicU64>);
+impl<R: AsyncRead + Unpin> AsyncRead for MeteredRead<R> {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        let before = buf.filled().len();
+        let result = std::pin::Pin::new(&mut self.0).poll_read(cx, buf);
+        self.1
+            .fetch_add((buf.filled().len() - before) as u64, Ordering::Relaxed);
+        result
+    }
 }
 
 #[cfg(any(test, target_os = "android"))]
@@ -114,7 +155,12 @@ fn paired(conn: &Connection, expected: EndpointId) -> bool {
     false
 }
 
-async fn desktop(ep: Endpoint, peer: EndpointId, listener: TcpListener) -> Result<()> {
+async fn desktop(
+    ep: Endpoint,
+    peer: EndpointId,
+    listener: TcpListener,
+    hints: Arc<RwLock<Vec<SocketAddr>>>,
+) -> Result<()> {
     listener.set_nonblocking(true)?;
     let listener = tokio::net::TcpListener::from_std(listener)?;
     let mut failures = 0;
@@ -122,9 +168,18 @@ async fn desktop(ep: Endpoint, peer: EndpointId, listener: TcpListener) -> Resul
         let (socket, _) = listener.accept().await?;
         socket.set_nodelay(true)?;
         // One local consumer and one QUIC stream at a time; no unbounded task spawning.
-        match tokio::time::timeout(Duration::from_secs(5), ep.connect(peer, ALPN)).await {
+        let mut address = EndpointAddr::new(peer);
+        for hint in hints.read().expect("address hints poisoned").iter() {
+            address = address.with_ip_addr(*hint);
+        }
+        match tokio::time::timeout(Duration::from_secs(5), ep.connect(address, ALPN)).await {
             Ok(Ok(conn)) => {
-                diagnostic("Paired QUIC connection established over direct LAN");
+                if let Some(path) = conn.paths().iter().find(|path| path.is_selected()) {
+                    diagnostic(&format!(
+                        "Paired QUIC connection established over direct IP: {:?}",
+                        path.remote_addr()
+                    ));
+                }
                 if let Err(error) = tunnel(socket, &conn, true).await {
                     if failures < 3 {
                         diagnostic(&format!("Video tunnel failed: {error:#}"));
@@ -186,6 +241,8 @@ async fn phone(ep: Endpoint, peer: EndpointId) -> Result<()> {
 }
 
 pub struct Bridge {
+    local: Arc<RwLock<Option<Endpoint>>>,
+    remote: Arc<RwLock<Vec<SocketAddr>>>,
     stop: Option<oneshot::Sender<()>>,
     worker: Option<thread::JoinHandle<()>>,
 }
@@ -197,6 +254,7 @@ impl Drop for Bridge {
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }
+        self.local.write().expect("local endpoint poisoned").take();
     }
 }
 
@@ -218,15 +276,21 @@ fn start(mut key: [u8; 32], is_phone: bool) -> Result<(Bridge, u16)> {
         .worker_threads(2)
         .enable_all()
         .build()?;
+    let local = Arc::new(RwLock::new(None));
+    let remote = Arc::new(RwLock::new(Vec::new()));
+    let worker_local = local.clone();
+    let worker_remote = remote.clone();
     let (stop, stopped) = oneshot::channel();
     let worker = thread::Builder::new().name("DroidMirrorIroh".into()).spawn(move || {
+        let cleanup_local = worker_local.clone();
         runtime.block_on(async move {
             // Cancellation also covers bind/discovery, so teardown never waits for a network timeout.
             tokio::select! {
                 _ = stopped => {},
                 result = async {
                     let ep = endpoint(secret).await?;
-                    if let Some(listener) = listener { desktop(ep, peer, listener).await }
+                    *worker_local.write().expect("local endpoint poisoned") = Some(ep.clone());
+                    if let Some(listener) = listener { desktop(ep, peer, listener, worker_remote).await }
                     else {
                         #[cfg(target_os = "android")]
                         { phone(ep, peer).await }
@@ -236,10 +300,13 @@ fn start(mut key: [u8; 32], is_phone: bool) -> Result<(Bridge, u16)> {
                 } => { if let Err(error) = result { diagnostic(&format!("Video transport stopped: {error:#}")); } }
             }
         });
+        cleanup_local.write().expect("local endpoint poisoned").take();
         runtime.shutdown_timeout(Duration::from_secs(1));
     })?;
     Ok((
         Bridge {
+            local,
+            remote,
             stop: Some(stop),
             worker: Some(worker),
         },
@@ -272,6 +339,57 @@ pub unsafe extern "C" fn dm_peer_start(key: *const u8, port: *mut u16) -> *mut B
     }
 }
 
+/// Accept only concrete unicast IP candidates; TLS still authenticates the paired identity.
+fn add_hint(bridge: &Bridge, family: u8, bytes: &[u8], port: u16) -> bool {
+    let mut hints = bridge.remote.write().expect("address hints poisoned");
+    if family == 0 {
+        hints.clear();
+        return true;
+    }
+    if port == 0 {
+        return false;
+    }
+    let ip = match family {
+        4 if bytes.len() >= 4 => IpAddr::V4(Ipv4Addr::new(bytes[0], bytes[1], bytes[2], bytes[3])),
+        16 if bytes.len() >= 16 => {
+            IpAddr::V6(Ipv6Addr::from(<[u8; 16]>::try_from(&bytes[..16]).unwrap()))
+        }
+        _ => return false,
+    };
+    if ip.is_loopback()
+        || ip.is_unspecified()
+        || ip.is_multicast()
+        || matches!(ip, IpAddr::V6(v6) if v6.is_unicast_link_local())
+    {
+        return false;
+    }
+    let address = SocketAddr::new(ip, port);
+    if !hints.contains(&address) && hints.len() < 32 {
+        hints.push(address);
+    }
+    true
+}
+
+/// # Safety
+/// handle must be live; bytes must point to at least 16 readable bytes unless family is zero.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dm_peer_add_address(
+    handle: *mut Bridge,
+    family: u8,
+    bytes: *const u8,
+    port: u16,
+) -> bool {
+    if handle.is_null() || (family != 0 && bytes.is_null()) {
+        return false;
+    }
+    let raw = if family == 0 {
+        &[][..]
+    } else {
+        unsafe { std::slice::from_raw_parts(bytes, 16) }
+    };
+    add_hint(unsafe { &*handle }, family, raw, port)
+}
+
 /// # Safety
 /// handle must be a live pointer returned by dm_peer_start, passed exactly once.
 #[unsafe(no_mangle)]
@@ -289,7 +407,7 @@ mod android {
     use jni::{
         JNIEnv,
         objects::{GlobalRef, JByteArray, JClass, JObject},
-        sys::jlong,
+        sys::{jlong, jstring},
     };
     // The JVM application reference lives for the process lifetime, as required
     // by Android network-interface enumeration in Iroh's netdev dependency.
@@ -341,6 +459,34 @@ mod android {
         }
     }
     #[unsafe(no_mangle)]
+    pub extern "system" fn Java_app_droidmirror_bluetooth_PeerVideoTransport_nativeAddresses(
+        env: JNIEnv,
+        _: JClass,
+        handle: jlong,
+    ) -> jstring {
+        if handle == 0 {
+            return std::ptr::null_mut();
+        }
+        let bridge = unsafe { &*(handle as *const Bridge) };
+        let endpoints = bridge.local.read().expect("local endpoint poisoned");
+        let text = endpoints
+            .as_ref()
+            .map(|ep| {
+                let mut addresses = ep.bound_sockets();
+                addresses.extend(ep.addr().ip_addrs().copied());
+                addresses
+                    .iter()
+                    .take(32)
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .unwrap_or_default();
+        env.new_string(text)
+            .map(|s| s.into_raw())
+            .unwrap_or(std::ptr::null_mut())
+    }
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_app_droidmirror_bluetooth_PeerVideoTransport_nativeStop(
         _: JNIEnv,
         _: JClass,
@@ -379,6 +525,65 @@ mod tests {
         drop(bridge);
         assert!(started.elapsed() < Duration::from_secs(3));
         assert!(std::net::TcpStream::connect(("127.0.0.1", port)).is_err());
+    }
+
+    #[tokio::test]
+    async fn explicit_hints_connect_without_multicast_or_public_discovery() {
+        use tokio::io::AsyncReadExt;
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let key = [71; 32];
+            let server = Endpoint::builder(presets::Minimal)
+                .secret_key(identity(&key, b"phone"))
+                .alpns(vec![ALPN.to_vec()])
+                .bind()
+                .await
+                .unwrap();
+            let (bridge, port) = start(key, false).unwrap();
+            // Only explicit BLE-equivalent hints locate this server: it has no discovery.
+            bridge
+                .remote
+                .write()
+                .unwrap()
+                .extend(server.addr().ip_addrs().copied());
+            let mut app = tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .unwrap();
+            let phone = tokio::spawn(async move {
+                let conn = server.accept().await.unwrap().await.unwrap();
+                assert!(paired(&conn, identity(&key, b"mac").public()));
+                let (mut send, mut recv) = prepare_stream(&conn, false).await.unwrap();
+                send.write_all(b"DMWIFI03").await.unwrap();
+                let mut ready = [0; 1];
+                recv.read_exact(&mut ready).await.unwrap();
+                assert_eq!(ready, [1]);
+                (server, conn)
+            });
+            let mut hello = [0; 8];
+            app.read_exact(&mut hello).await.unwrap();
+            assert_eq!(&hello, b"DMWIFI03");
+            app.write_all(&[1]).await.unwrap();
+            let (server, conn) = phone.await.unwrap();
+            drop(app);
+            drop(bridge);
+            conn.close(0u32.into(), b"done");
+            server.close().await;
+        })
+        .await
+        .unwrap();
+    }
+
+    #[test]
+    fn hint_validation_and_reset() {
+        let (bridge, _) = start([72; 32], false).unwrap();
+        assert!(add_hint(&bridge, 4, &[100, 108, 251, 24], 12345));
+        assert!(add_hint(&bridge, 4, &[100, 108, 251, 24], 12345));
+        assert_eq!(bridge.remote.read().unwrap().len(), 1);
+        assert!(!add_hint(&bridge, 4, &[127, 0, 0, 1], 12345));
+        assert!(!add_hint(&bridge, 4, &[224, 0, 0, 1], 12345));
+        assert!(!add_hint(&bridge, 4, &[100, 108, 251, 24], 0));
+        assert!(!add_hint(&bridge, 16, &[1; 4], 12345));
+        assert!(add_hint(&bridge, 0, &[], 0));
+        assert!(bridge.remote.read().unwrap().is_empty());
     }
 
     #[tokio::test]

@@ -5,9 +5,23 @@
 
 #include "util/log.h"
 
+static SDL_Window *connecting_window;
+
+void
+sc_sdl_keep_connecting_window(SDL_Window *window) {
+    connecting_window = window;
+    SDL_SetBooleanProperty(SDL_GetWindowProperties(window), "app.droidmirror.connecting", true);
+}
+
 SDL_Window *
 sc_sdl_create_window(const char *title, int64_t x, int64_t y, int64_t width,
                      int64_t height, int64_t flags) {
+    if (connecting_window) {
+        SDL_Window *window = connecting_window;
+        connecting_window = NULL;
+        SDL_SetWindowTitle(window, title);
+        return window;
+    }
     SDL_Window *window = NULL;
 
     SDL_PropertiesID props = SDL_CreateProperties();

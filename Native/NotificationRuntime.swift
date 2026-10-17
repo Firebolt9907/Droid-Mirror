@@ -47,13 +47,13 @@ struct NotificationFocusPolicy {
 }
 
 struct NotificationDeliveryPolicy {
-    private(set) var active = false
-    mutating func session(active: Bool) { self.active = active }
-    mutating func reconcile(hostIsRunning: Bool, hasSessionState: Bool) {
-        if !hostIsRunning { active = false }
-        else if !hasSessionState { active = true }
+    func shouldDeliver(event: [String: Any]) -> Bool {
+        // Older companions omit these fields; keep their ordinary notifications
+        // working while newer companions filter persistent items at the source.
+        let package = event["package"] as? String ?? ""
+        return package != "app.droidmirror.bluetooth" &&
+            event["ongoing"] as? Bool != true && event["persistent"] as? Bool != true
     }
-    func shouldDeliver() -> Bool { !active }
 }
 
 // The launcher execs the Swift host. LaunchServices may retain a stale -1 PID

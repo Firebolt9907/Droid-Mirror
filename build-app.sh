@@ -18,8 +18,8 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$APP/Contents/Framewor
 cargo build --locked --release --manifest-path "$ROOT/PeerTransport/Cargo.toml"
 cp "$ROOT/PeerTransport/target/release/libdroidmirror_peer.dylib" "$APP/Contents/Frameworks/libdroidmirror_peer.dylib"
 # The host and background receiver share the same pairing implementation.
-BLE_SOURCES=(Native/NotificationRuntime.swift Native/NotificationPresentationPolicy.swift
-  Native/NotificationIconAttachment.swift Native/BLEController.swift Native/BLEIntegration.swift
+BLE_SOURCES=(Native/NotificationRuntime.swift Native/NotificationPresentationPolicy.swift Native/NotificationDismissal.swift Native/NotificationActions.swift Native/NotificationConversationState.swift
+  Native/NotificationIconAttachment.swift Native/NotificationCommunicationContent.swift Native/BLEController.swift Native/BLEIntegration.swift
   Native/BLEMenu.swift Native/DiscoveryNotifications.swift Native/BLESecurity.swift
   Native/AndroidNotificationBridge.swift)
 xcrun swiftc -module-cache-path /private/tmp/droidmirror-swift-module-cache \
@@ -43,14 +43,15 @@ xcrun swiftc -module-cache-path /private/tmp/droidmirror-swift-module-cache \
 cp "$ROOT/Resources/Info.plist" "$APP/Contents/Info.plist"
 /usr/bin/clang -dynamiclib -fobjc-arc -fblocks -mmacosx-version-min=14.0 \
   -I/opt/homebrew/include -L/opt/homebrew/lib -lSDL3 \
-  -framework Cocoa -framework QuartzCore \
+  -framework CoreImage -framework Cocoa -framework QuartzCore \
   "$ROOT/Native/ScrcpyWindowStyle.m" \
   -o "$APP/Contents/Frameworks/libDroidMirrorStyleOriginal.dylib"
 # Keep the device corners, resize handling, secure overlay and keyboard layer
 # around the shared toolbar controller for every transport.
 /usr/bin/clang -dynamiclib -fobjc-arc -fblocks -mmacosx-version-min=14.0 \
-  -framework Cocoa -framework QuartzCore \
-  "$ROOT/Native/KeyboardPassthroughShim.m" "$ROOT/Native/DeviceCorners.m" \
+  -framework CoreImage -framework Cocoa -framework QuartzCore \
+  -I/opt/homebrew/include -L/opt/homebrew/lib -lSDL3 \
+  "$ROOT/Native/ConnectingPhone.m" "$ROOT/Native/KeyboardPassthroughShim.m" "$ROOT/Native/DeviceCorners.m" \
   "$ROOT/Native/CornerResize.m" "$ROOT/Native/ScrollDirection.m" "$ROOT/Native/MirrorMenu.m" \
   -o "$APP/Contents/Frameworks/libDroidMirrorStyle.dylib"
 /usr/bin/clang -mmacosx-version-min=14.0 -c "$ROOT/Native/ClassicBluetoothWire.c" -o /tmp/droidmirror-classic-wire.o
@@ -83,9 +84,14 @@ if [[ ! -f "$CLIENT_BUILD/build.ninja" ]]; then
   meson setup "$ROOT/scrcpy-5.0/build" "$ROOT/scrcpy-5.0" --buildtype=release -Dcompile_server=false -Dportable=true -Dvideotoolbox=true
 fi
 meson compile -C "$ROOT/scrcpy-5.0/build"
-cp "$ROOT/scrcpy-5.0/build/app/scrcpy" "$APP/Contents/Helpers/scrcpy"
-cp "$ROOT/scrcpy-5.0/app/data/scrcpy.png" "$APP/Contents/Helpers/scrcpy.png"
-cp "$ROOT/scrcpy-5.0/app/data/disconnected.png" "$APP/Contents/Helpers/disconnected.png"
+RENDERER="$APP/Contents/Helpers/DroidMirror Renderer.app/Contents"
+mkdir -p "$RENDERER/MacOS" "$RENDERER/Resources"
+cp "$ROOT/scrcpy-5.0/build/app/scrcpy" "$RENDERER/MacOS/DroidMirrorRenderer"
+cp "$ROOT/Resources/RendererInfo.plist" "$RENDERER/Info.plist"
+# The video engine is a private app helper, with DroidMirror identity and no Dock tile.
+rm -f "$APP/Contents/Helpers/scrcpy"
+cp "$ROOT/scrcpy-5.0/app/data/scrcpy.png" "$RENDERER/Resources/scrcpy.png"
+cp "$ROOT/scrcpy-5.0/app/data/disconnected.png" "$RENDERER/Resources/disconnected.png"
 chmod +x "$APP/Contents/MacOS/DroidMirror"
 sh "$ROOT/Native/sign-droidmirror.sh" "$APP"
 python3 "$ROOT/tools/app-bundle.py" check "$APP"

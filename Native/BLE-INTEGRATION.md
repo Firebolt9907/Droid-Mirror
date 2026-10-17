@@ -4,16 +4,43 @@ DroidMirror Android 0.19 now includes this bridge inside the companion app. See
 [Android setup and migration](ANDROID-BRIDGE.md). The separate bridge APK is no
 longer required with matching Mac and Android builds.
 
-Bridge 2.2 includes a bounded launcher-icon PNG in each encrypted notification.
-Mac validates its PNG format/dimensions and adds it as a UserNotifications image
-attachment beside the text. The OS-owned source icon/grouping remains DroidMirror.
-Unavailable/invalid/oversized icons fall back to text without blocking delivery.
+Android 0.37 sends separate sender-avatar and content-media fields. Messaging
+notifications have a native communication-avatar path, gated on the signed
+`com.apple.developer.usernotifications.communication` entitlement. The current
+local development build lacks a matching provisioning profile, so macOS retains
+the DroidMirror source icon. Adding the entitlement without that profile causes
+AMFI to reject the app at launch (verified with a disposable probe). Unprovisioned
+builds use ordinary presentation and do not donate communication interactions.
+Only actual notification pictures or image-message attachments appear on the
+trailing side. Ordinary app alerts keep the system-owned DroidMirror source icon.
+Images come from notification metadata without Contacts access or remote avatar
+downloads. The Mac validates format, byte size, and dimensions before decoding.
+Media thumbnails preserve aspect ratio. Image budgeting reserves space for
+AES-GCM, Base64, and the encrypted BLE envelope.
+Android MessagingStyle conversations include up to 12 recent messages, with
+sender names and timestamps in the supplied order, bounded to 2800 UTF-8 bytes
+of JSON. Older messages are dropped first when the wire budget is reached.
+The Mac creates a separate retained card for each incoming message, identified by
+source notification, sender, timestamp, text and occurrence. Repeated snapshots and
+action-token refreshes keep retained cards unchanged; new incoming messages create
+new cards. The receiver still resolves actions against the latest Android token. Replies restore only the card that macOS dismissed after Send, with a
+fresh delivery identifier, and create a separate “You” card showing the reply.
+That outgoing card shows sending, accepted, failed or unconfirmed state. Android
+outgoing echoes do not create duplicate cards. Older cards use the current source
+notification's action tokens. Phone removal clears every card for that source;
+closing an individual Mac card preserves its siblings, and closing the last one
+sends the Android dismissal. Delayed restoration is canceled when its card is
+removed. Message state is bounded in memory; visible cards carry their message
+and reply state in macOS notification metadata so the receiver can adopt them on
+restart. Reply restorations are coalesced so fast Android acknowledgments produce one
+card with the latest status. No separate message-history file is written. macOS still closes the
+expanded reply editor after Send.
 Notification-click focus is requested once per click; retries never re-activate
 the host or repeatedly raise its window.
 Reconnect snapshots are sorted by Android posting time and delivered with passive
 interruption level. Identical content updates are also passive; changed message
-content is active. The receiver retains only bounded in-memory content hashes for
-deduplication, not raw message text.
+content is active. The receiver uses bounded in-memory content hashes for alert
+deduplication and retains message-card state for reply restoration.
 
 DroidMirror runs its BLE client in a bundled, UI-less **DroidMirror Notifications**
 helper. The mirroring host keeps the pairing/settings menu but does not open a second
@@ -61,23 +88,38 @@ plaintext fallback. This is application-layer protection independent of BLE bond
 Radio metadata and availability are not protected; this is not a formal security audit.
 
 Confirmed-indication/write queues serialize fragments, bound memory, and reject
-invalid messages. Authentication has a deadline. A failing advertiser is temporarily
+invalid messages. Frames are capped at 512 bytes even with MTU 517, so image-bearing
+notifications survive the platform’s ATT attribute limit. Authentication has a deadline. A failing advertiser is temporarily
 quarantined on Mac to avoid immediately selecting the same untrusted peer.
 
-Android filters ongoing, group-summary, own-app and SECRET notifications. Bridge
-2.1 no longer adds its own blanket lock-screen redaction for PRIVATE notifications:
+Android filters ongoing, non-clearable, foreground-service, group-summary, own-app
+and SECRET notifications. An update that makes an existing item ineligible also
+removes its Mac copy. Bridge 2.1 no longer adds its own blanket lock-screen redaction for PRIVATE notifications:
 user-authorized forwarding uses only the content Android supplies to the listener,
 preserving Android's own sensitive-content restrictions. This means readable
 notification content can appear on Mac while the phone is locked. Content is not written to app logs,
 but macOS stores delivered notifications in Notification Center. Existing delivered
 content is not retroactively redacted when Android subsequently locks.
 The last 16 eligible notifications are synchronized when connecting. New notification
-deliveries are suppressed while a scrcpy session is running (including minimized
-sessions); suppressed updates are not queued for replay. Removals still clean up
-Notification Center. Closing scrcpy or Cmd+Q quits the mirroring host, locks the phone,
-and restores its settings as before; the helper survives and resumes notification
-delivery without a stream or an awake phone screen. Clicking a notification opens
-mirroring and sends its action after the first visible frame.
+content arrives immediately over the authenticated BLE connection, including while
+scrcpy is running or minimized. Removals clean up Notification Center. Closing
+scrcpy or Cmd+Q quits the mirroring host, locks the phone, and restores its settings
+as before; the helper survives and continues notification delivery without a stream
+or an awake phone screen. Clicking the notification body opens mirroring and sends
+the open action after the first visible frame. Replies and other buttons send
+directly over BLE without opening mirroring. Remote-use history stays on Android; the Mac
+clears history banners from earlier releases on its next launch.
+
+Mac notification categories request explicit dismissal callbacks, including for
+notifications without action buttons. Closing a Mac notification sends an encrypted
+`dismiss` command to the phone's notification listener without opening mirroring or
+unlocking the phone. Dismissals are retried in memory for up to five minutes if the
+Bluetooth link drops and are cleared on acknowledgment or phone-side removal.
+Android checks the notification's version, posting time, eligibility, and clearable
+state before cancellation, so an old Mac alert cannot intentionally dismiss a newer
+phone update. A newly paired phone never receives the old phone's queued commands.
+Automatic banner timeout and programmatic Mac removals do not trigger dismissal
+commands. Clearing a notification does not delete the underlying chat message.
 
 The helper starts on the next DroidMirror launch and stays alive until logout/reboot
 or until explicitly quit. It is not yet registered for automatic login startup.
@@ -100,7 +142,7 @@ fails or times out. This avoids repeatedly selecting a stale input connection.
 Session and window-visible events validate their actual sender PID through
 `NSRunningApplication(processIdentifier:)`. The launcher can leave the host's
 LaunchServices listing at PID -1; comparing heartbeats with that listing would
-reject all session updates and keep notification delivery suppressed. With
+reject session updates needed to target notification actions. With
 DroidMirror open, verify this regression outside the sandbox:
 
 ```sh
@@ -111,11 +153,32 @@ xcrun swiftc -module-cache-path /private/tmp/droidmirror-notification-module-cac
 Mac notifications expose up to three Android actions, including a single free-form
 RemoteInput reply where supported. Opaque notification ID/version pairs identify
 in-memory PendingIntents held only on Android; arbitrary remote intents are never
-accepted. Expired/replaced notifications reject actions. Clicking queues an action
-for up to 45 seconds, starts/focuses the host-managed stream, and waits for an actual
-rendered frame in a visible window before sending. A minimized stream is restored.
+accepted. Expired/replaced notifications reject actions. Actions queue for up to
+45 seconds and remain pending until Android acknowledges them. Replies and other
+buttons send directly over the authenticated notification connection; they do not
+require ADB, a mirroring window, or a visible frame. Only opening the source app
+starts/focuses the host-managed stream and waits for a visible frame. A minimized
+stream is restored. Unacknowledged writes are not automatically resent, because
+Android may already have sent the reply; an expired receipt asks the user to check
+the conversation before retrying. Unsent actions instead report a connection error.
 No phone unlocking or Android security restrictions are bypassed. App-specific
 PendingIntent/background-launch restrictions may still prevent an action.
+
+Reply regression checks:
+```sh
+xcrun swiftc -module-cache-path /private/tmp/droidmirror-swift-module-cache Native/NotificationActions.swift Native/NotificationActionTests.swift -o /private/tmp/droidmirror-notification-action-tests
+/private/tmp/droidmirror-notification-action-tests
+xcrun swiftc -module-cache-path /private/tmp/droidmirror-swift-module-cache Native/NotificationConversationState.swift Native/NotificationPresentationPolicy.swift Native/NotificationConversationTests.swift -o /private/tmp/droidmirror-notification-conversation-tests
+/private/tmp/droidmirror-notification-conversation-tests
+```
+Verified on-device with a temporary notification app: a reply submitted in macOS
+Notification Center arrived unchanged through Android RemoteInput while no
+mirroring host was running. The test app recorded text locally and was removed.
+The final retained-card layout was also verified with a local native probe using
+the production bridge: Notification Center retained three distinct requests for
+the restored original message, the acknowledged “You” reply, and a subsequent
+incoming message. No real conversation was messaged. Full live-phone verification
+of that final layout remains limited by a Bluetooth authentication reconnect stall.
 
 The prior Mac bridge's `dev.bleadb.bridge.macos` / `tailscaleIP` preference is
 imported on first use. DroidMirror stores its own copy under `DroidMirror.BLE.host`.
@@ -140,7 +203,7 @@ Wireless Debugging.
 Build the integrated library:
 
 ```sh
-xcrun swiftc -module-cache-path /private/tmp/droidmirror-swift-module-cache -emit-library -module-name DroidMirrorBLE -target arm64-apple-macosx14.0 -framework AppKit -framework CoreBluetooth -framework UserNotifications -framework Security Native/NotificationRuntime.swift Native/NotificationPresentationPolicy.swift Native/NotificationIconAttachment.swift Native/BLEController.swift Native/BLEIntegration.swift Native/BLEMenu.swift Native/DiscoveryNotifications.swift Native/BLESecurity.swift Native/AndroidNotificationBridge.swift -o outputs/DroidMirror.app/Contents/Frameworks/libDroidMirrorBLE.dylib
+xcrun swiftc -module-cache-path /private/tmp/droidmirror-swift-module-cache -emit-library -module-name DroidMirrorBLE -target arm64-apple-macosx14.0 -framework AppKit -framework CoreBluetooth -framework UserNotifications -framework Security Native/NotificationRuntime.swift Native/NotificationPresentationPolicy.swift Native/NotificationDismissal.swift Native/NotificationIconAttachment.swift Native/NotificationCommunicationContent.swift Native/BLEController.swift Native/BLEIntegration.swift Native/BLEMenu.swift Native/DiscoveryNotifications.swift Native/BLESecurity.swift Native/AndroidNotificationBridge.swift -o outputs/DroidMirror.app/Contents/Frameworks/libDroidMirrorBLE.dylib
 ```
 
 Run the no-device subprocess tests:
@@ -149,3 +212,9 @@ Run the no-device subprocess tests:
 xcrun swiftc -module-cache-path /private/tmp/droidmirror-swift-module-cache -target arm64-apple-macosx14.0 -framework AppKit -framework CoreBluetooth Native/NotificationRuntime.swift Native/BLESecurity.swift Native/BLEController.swift Native/BLEProcessTests.swift -o /private/tmp/droidmirror-ble-tests
 /private/tmp/droidmirror-ble-tests
 ```
+
+Android 0.37 clears per-client authentication and queued indications when the
+notification subscription changes. The Mac toggles a cached subscription off
+before enabling it again. This lets the UI-less receiver authenticate anew when
+Android replaces its GATT server or the helper restarts while another Bluetooth
+service keeps the physical link alive.

@@ -23,7 +23,6 @@ public final class CaptureService extends Service {
     private volatile ParcelFileDescriptor socket;
     private static final class SessionState {
         final String token = UUID.randomUUID().toString();
-        String peerName;
         volatile long startedElapsed;
         volatile boolean promotionDismissed;
         volatile ParcelFileDescriptor inputPipe;
@@ -94,7 +93,7 @@ public final class CaptureService extends Service {
     private Notification notification(String text) {
         SessionState state = current;
         if (state != null && state.streamStarted.get() && !state.stopped)
-            return StreamNotifications.streaming(this, state.token, state.peerName, state.startedElapsed, state.promotionDismissed);
+            return StreamNotifications.streaming(this, state.token, state.startedElapsed, state.promotionDismissed);
         PendingIntent open = PendingIntent.getActivity(this, 0, new Intent(this, CaptureActivity.class), PendingIntent.FLAG_IMMUTABLE);
         BridgeRuntime runtime = bridge;
         return new Notification.Builder(this, "capture").setSmallIcon(android.R.drawable.ic_menu_camera)
@@ -233,8 +232,6 @@ public final class CaptureService extends Service {
             if (Build.VERSION.SDK_INT >= 31 && checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED)
                 throw new SecurityException("Nearby Devices permission was revoked");
             String peer = getSharedPreferences("ready", MODE_PRIVATE).getString("peer", "");
-            String name = getSystemService(BluetoothManager.class).getAdapter().getRemoteDevice(peer).getName();
-            state.peerName = name == null || name.trim().isEmpty() ? getString(R.string.stream_peer_fallback) : name;
             wire = new BluetoothWire(new FileOutputStream(socket.getFileDescriptor()), SystemClock::elapsedRealtime, BluetoothWire.videoChunkForMtu(listener.transmitMtu())); state.wire = wire;
             // Bound data queued ahead of the receiver; socket writes can otherwise
             // enqueue seconds of old video even though the radio is reliable.
@@ -267,10 +264,13 @@ public final class CaptureService extends Service {
                             if (state.stopped || guard == null) throw new IOException("Video session ended before quality upgrade");
                             if (profile==null) guard.restoreBluetoothVideo(); else guard.upgradeVideo(profile);
                         });
-                        if (!state.stopped) state.peerTransport = new PeerVideoTransport(this, BlePairing.key(this, peer));
+                        if (!state.stopped) state.peerTransport = new PeerVideoTransport(this, BlePairing.key(this, peer), state.wire);
                     }
                 }
                 catch (IOException unavailable) { android.util.Log.d("DroidMirrorBluetooth", "Wireless upgrade unavailable", unavailable); }
+                // Optional appearance must never prevent capture on unsupported OEMs.
+                try { wire.appearance(state.guard.phoneAppearance()); }
+                catch (Exception unavailable) { android.util.Log.d("DroidMirrorAppearance", "Appearance unavailable", unavailable); }
                 state.guard.startVideo(output, remoteControls);
             }
             ByteArrayOutputStream header = new ByteArrayOutputStream();
@@ -291,6 +291,7 @@ public final class CaptureService extends Service {
                     sendingMillis += SystemClock.elapsedRealtime() - sendingStarted;
                     bytesSent += frame.length;
                     if ((frameHeader[0] & 0x40) == 0) {
+                        wire.videoFrameSent(frame);
                         ++frames;
                         long now = SystemClock.elapsedRealtime(), duration = now - statsStarted;
                         if (duration >= 5000) {
@@ -320,7 +321,7 @@ public final class CaptureService extends Service {
         } catch (Exception error) {
             android.util.Log.w("DroidMirrorBluetooth", "Bluetooth capture failed", error);
             if (wire != null && !state.streamStarted.get()) {
-                try { wire.event(BluetoothWire.CAPTURE_FAILED); Thread.sleep(100); }
+                try { wire.event(PhoneUsePolicy.startupFailure(error)); Thread.sleep(100); }
                 catch (IOException | InterruptedException ignored) {}
             }
             status("Bluetooth session unavailable: " + error.getMessage());

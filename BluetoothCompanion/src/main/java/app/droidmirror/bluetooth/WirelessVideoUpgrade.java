@@ -9,6 +9,7 @@ import java.security.SecureRandom;
 /** Active-session-only local endpoint reached through the paired Iroh tunnel. */
 final class WirelessVideoUpgrade implements AutoCloseable {
     private final LocalServerSocket listener;
+    private final Thread worker;
     private volatile LocalSocket candidate;
     private volatile boolean closed;
     private volatile byte[] activeNonce;
@@ -22,26 +23,66 @@ final class WirelessVideoUpgrade implements AutoCloseable {
     WirelessVideoUpgrade(BluetoothWire wire, byte[] key, QualityUpgrade quality) throws IOException {
         this.wire=wire; this.quality=quality;
         listener = new LocalServerSocket("droidmirror_video_upgrade");
-        new Thread(() -> {
+        worker = new Thread(() -> {
             try {
                 while (!closed) {
                     LocalSocket socket = listener.accept();
                     candidate = socket;
                     if (closed) { socket.close(); break; }
                     boolean committed = false;
+                    BluetoothWire.Preview preview = null;
+                    java.util.concurrent.CountDownLatch warmupDone = new java.util.concurrent.CountDownLatch(1);
                     try {
                         socket.setSoTimeout(2000);
                         DataInputStream input = new DataInputStream(socket.getInputStream());
                         OutputStream output = socket.getOutputStream();
                         byte[] nonce = new byte[32]; new SecureRandom().nextBytes(nonce);
-                        output.write("DMWIFI03".getBytes(java.nio.charset.StandardCharsets.US_ASCII));
+                        output.write("DMWIFI04".getBytes(java.nio.charset.StandardCharsets.US_ASCII));
                         output.write(nonce); output.flush();
                         byte[] requested = new byte[WirelessVideoProfile.WIRE_SIZE]; input.readFully(requested);
                         byte[] proof = new byte[32]; input.readFully(proof);
                         if (!MessageDigest.isEqual(proof, WirelessUpgradeAuth.proof(key, "client", nonce, requested))) continue;
                         WirelessVideoProfile profile = WirelessVideoProfile.parse(requested);
+                        preview=wire.beginPreview();
+                        Thread deadline=new Thread(() -> {
+                            try {
+                                if (!warmupDone.await(10,java.util.concurrent.TimeUnit.SECONDS)) abort(socket);
+                            } catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); }
+                        },"WirelessWarmupDeadline");
+                        deadline.setDaemon(true); deadline.start();
+                        // Authenticate the warm-up separately from the eventual cutoff.
+                        // Socket writes happen on this worker, never the Classic writer.
+                        output.write(WirelessUpgradeAuth.proof(key, "preview server", nonce, requested));
+                        output.flush();
+                        DataOutputStream warmup=new DataOutputStream(output);
+                        long until=System.nanoTime()+8_000_000_000L;
+                        long lastWarmup=System.nanoTime();
+                        while (input.available()==0) {
+                            if (closed || System.nanoTime()>=until) throw new IOException("Wireless video warm-up timed out");
+                            byte[] record=preview.poll();
+                            if (record!=null) {
+                                warmup.writeInt(record.length); warmup.write(record); warmup.flush();
+                                lastWarmup=System.nanoTime();
+                            } else if (System.nanoTime()-lastWarmup>=100_000_000L) {
+                                // Recheck delivery even while capture is idle. These
+                                // copies stay on the candidate and never reach the decoder.
+                                byte[] frame=wire.previewFrame();
+                                if(frame!=null) {
+                                    for(int offset=0;offset<frame.length;) {
+                                        int length=Math.min(8192,frame.length-offset);
+                                        warmup.writeInt(length); warmup.write(frame,offset,length); offset+=length;
+                                    }
+                                    warmup.writeInt(0); warmup.flush();
+                                }
+                                lastWarmup=System.nanoTime();
+                            }
+                        }
+                        if (input.readUnsignedByte()!=1) throw new IOException("Wireless warm-up rejected");
+                        wire.endPreview(preview); preview=null;
+                        warmup.writeInt(-1); warmup.flush();
                         activeNonce=nonce;
                         committed = wire.upgrade(output, key, nonce, requested);
+                        warmupDone.countDown();
                         if (committed) {
                             // The receiver must drain the old Classic cutoff first.
                             // Only then may larger frames and bitrate enter Wi-Fi.
@@ -60,10 +101,13 @@ final class WirelessVideoUpgrade implements AutoCloseable {
                             }
                         }
                     } catch (IOException unavailable) {
+                        if (!closed) System.err.println("DroidMirror video candidate " + (committed ? "disconnected: " : "not ready: ") + unavailable.getMessage());
                         // Probes are harmless before commit. After commit, the
                         // Mac restarts Classic video through the authenticated BLE path.
                         if (committed) abort(socket);
                     } finally {
+                        warmupDone.countDown();
+                        if (preview!=null) wire.endPreview(preview);
                         abort(socket);
                         if (candidate==socket) candidate=null;
                     }
@@ -77,7 +121,8 @@ final class WirelessVideoUpgrade implements AutoCloseable {
             } catch (IOException stopped) {
                 // Closing the session interrupts accept/read/write.
             } finally { try { listener.close(); } catch (IOException ignored) {} }
-        }, "WirelessVideoUpgrade").start();
+        }, "WirelessVideoUpgrade");
+        worker.start();
     }
 
     void fallback(byte[] nonce, long received) {
@@ -108,7 +153,15 @@ final class WirelessVideoUpgrade implements AutoCloseable {
 
     @Override public void close() {
         closed = true;
+        // close(fd) does not cancel another thread's blocking accept on Android.
+        // That syscall can retain the abstract name and break every later session.
+        try { android.system.Os.shutdown(listener.getFileDescriptor(), android.system.OsConstants.SHUT_RDWR); }
+        catch (android.system.ErrnoException ignored) { }
         try { listener.close(); } catch (IOException ignored) {}
         abort(candidate);
+        if (Thread.currentThread()!=worker) {
+            try { worker.join(250); }
+            catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); }
+        }
     }
 }

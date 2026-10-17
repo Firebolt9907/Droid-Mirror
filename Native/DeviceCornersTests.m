@@ -1,4 +1,5 @@
 #import "DeviceCorners.h"
+#import "PhoneAppearance.h"
 #import <QuartzCore/QuartzCore.h>
 #import <assert.h>
 #import <math.h>
@@ -6,6 +7,8 @@
 int main(void) {
     @autoreleasepool {
         [NSApplication sharedApplication];
+        assert(DMPixelCornerRadius(1080, YES) == 0);
+        assert(DMUpdateDeviceGeometryFromDisplayDump(@"DisplayDeviceInfo{phone, 1080 x 2400, position=TopLeft, radius=104, position=BottomLeft, radius=102, type INTERNAL}"));
         for (NSNumber *value in @[@180, @360, @720, @1080]) {
             CGFloat width = value.doubleValue;
             CGFloat height = width * 2400.0 / 1080.0;
@@ -54,6 +57,22 @@ int main(void) {
         assert(DMUpdateDeviceGeometryFromDisplayDump(@"DisplayDeviceInfo{square phone, 1440 x 3200, cutout DisplayCutout{insets=Rect(0, 160 - 0, 0)}, position=TopLeft, radius=0, position=BottomLeft, radius=0, type INTERNAL}"));
         assert(DMPixelCornerRadius(720, YES) == 0 && DMPixelCornerRadius(720, NO) == 0);
         assert(!DMUpdateDeviceGeometryFromDisplayDump(@"DisplayDeviceInfo{missing radii, 1440 x 3200, cutout DisplayCutout{insets=Rect(0, 160 - 0, 0)}, type INTERNAL}"));
+        NSString *cache = [NSTemporaryDirectory() stringByAppendingPathComponent:NSUUID.UUID.UUIDString];
+        setenv("DROIDMIRROR_APPEARANCE_CACHE", cache.UTF8String, 1);
+        unsetenv("DROIDMIRROR_SERIAL");
+        DMCachePhoneAppearance(@{@"displayDump": other, @"wallpaper": @"old-image"});
+        DMRefreshDeviceCornersFromPhone(nil);
+        assert(fabs(DMPixelCornerRadius(720, YES) - DMCornerExtentForRadius(60)) < 1e-12);
+        DMCachePhoneAppearance(@{@"deviceName": @"Test phone"});
+        assert([DMReadPhoneAppearance()[@"wallpaper"] isEqual:@"old-image"]);
+        setenv("DROIDMIRROR_APPEARANCE_CACHE", [cache stringByAppendingString:@"-other"].UTF8String, 1);
+        DMRefreshDeviceCornersFromPhone(nil);
+        assert(DMPixelCornerRadius(720, YES) == 0 && DMPixelCornerRadius(720, NO) == 0);
+        setenv("DROIDMIRROR_APPEARANCE_CACHE", cache.UTF8String, 1);
+        DMRefreshDeviceCornersFromPhone(nil);
+        assert(fabs(DMPixelCornerRadius(720, NO) - DMCornerExtentForRadius(59)) < 1e-12);
+        [NSFileManager.defaultManager removeItemAtPath:cache error:nil];
+        unsetenv("DROIDMIRROR_APPEARANCE_CACHE");
         NSLog(@"PASS: reported radius conversion, matched diagonal roundness, square phones, padding independence, resize and shadows");
     }
     return 0;

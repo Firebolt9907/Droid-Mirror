@@ -22,6 +22,12 @@ final class LogicalDisplayPower {
         try { return (boolean)type.getMethod("isDisplayInteractive", int.class).invoke(power, 0); }
         catch (NoSuchMethodException older) { return (boolean)type.getMethod("isInteractive").invoke(power); }
     }
+    boolean inUse() throws Exception {
+        if (!interactive()) return false;
+        if (window == null) window = service("window", "android.view.IWindowManager");
+        return !(boolean)Class.forName("android.view.IWindowManager")
+            .getMethod("isKeyguardLocked").invoke(window);
+    }
     void keepAwake() throws Exception {
         if (power == null) power = service("power", "android.os.IPowerManager");
         Class<?> type = Class.forName("android.os.IPowerManager");
