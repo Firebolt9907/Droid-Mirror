@@ -8,10 +8,15 @@ final class ClassicBluetoothTransport {
     private var generation = UUID()
     private var monitor: Task<Void, Never>?
     private var consumedLines = 0
+    private var commands: FileHandle?
+    private var upgradeTask: Task<Void, Never>?
+    private var wirelessActive = false
+    private var forwards: [String: String] = [:]
     var onEvent: ((Event) -> Void)?
     enum Event: String {
         case phoneOn = "PHONE_ON", sessionEnded = "SESSION_ENDED", phoneLocalUse = "PHONE_LOCAL_USE"
         case streamStarted = "STREAM_STARTED", captureFailed = "CAPTURE_FAILED"
+        case wirelessActive = "WIFI_ACTIVE", bluetoothActive = "BLUETOOTH_ACTIVE"
     }
     private func pollEvents() {
         guard let outputURL, let data = try? Data(contentsOf: outputURL), data.count <= 16_384 else { return }
@@ -19,9 +24,64 @@ final class ClassicBluetoothTransport {
         let completed = max(0, lines.count - 1)
         if completed > consumedLines {
             for line in lines[consumedLines..<completed] {
-                if line.hasPrefix("EVENT "), let event = Event(rawValue: String(line.dropFirst(6))) { onEvent?(event) }
+                if line.hasPrefix("EVENT "), let event = Event(rawValue: String(line.dropFirst(6))) {
+                    if event == .streamStarted { attemptWirelessUpgrade() }
+                    if event == .wirelessActive { wirelessActive = true; upgradeTask?.cancel(); upgradeTask=nil }
+                    if event == .bluetoothActive { wirelessActive=false; attemptWirelessUpgrade() }
+                    onEvent?(event)
+                }
             }
             consumedLines = completed
+        }
+    }
+
+    private func attemptWirelessUpgrade() {
+        guard upgradeTask == nil, let adb = ToolLocator.find("adb") else { return }
+        let token = generation
+        upgradeTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(3))
+            while !Task.isCancelled {
+                guard let self, token == self.generation, !self.wirelessActive, self.process?.isRunning == true else { return }
+                // ADB auto-connects previously paired wireless-debugging services.
+                // Never use USB or a model-name match to select an upgrade target.
+                let devices = (try? await ProcessRunner.output(adb, ["devices"], timeout: 3)) ?? ""
+                guard token == self.generation, !Task.isCancelled else { return }
+                // ADB discards forwards when a wireless device disconnects. Drop
+                // stale ports so the next connection can allocate a working one.
+                if let listing = try? await ProcessRunner.output(adb, ["forward", "--list"], timeout: 3) {
+                    guard token == self.generation, !Task.isCancelled else { return }
+                    let active = Set(listing.split(separator: "\n").map {
+                        $0.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
+                    })
+                    self.forwards = self.forwards.filter { serial, port in
+                        active.contains("\(serial) tcp:\(port) localabstract:droidmirror_video_upgrade")
+                    }
+                }
+                for line in devices.split(separator: "\n") {
+                    let fields = line.split(whereSeparator: { $0.isWhitespace })
+                    guard fields.count >= 2, fields[1] == "device" else { continue }
+                    let serial = String(fields[0])
+                    guard serial.contains(":") || serial.hasSuffix("._adb-tls-connect._tcp") else { continue }
+                    var port = self.forwards[serial]
+                    if port == nil, self.forwards.count < 32 {
+                        port = try? await ProcessRunner.output(adb, ["-s", serial, "forward", "tcp:0", "localabstract:droidmirror_video_upgrade"], timeout: 3)
+                            .trimmingCharacters(in: .whitespacesAndNewlines)
+                        if let port, UInt16(port) != nil {
+                            if token != self.generation || Task.isCancelled {
+                                _ = try? await ProcessRunner.output(adb, ["-s", serial, "forward", "--remove", "tcp:\(port)"], timeout: 3)
+                                return
+                            }
+                            self.forwards[serial] = port
+                        }
+                    }
+                    guard token == self.generation, !Task.isCancelled, !self.wirelessActive, self.process?.isRunning == true else { return }
+                    if let port, let value = UInt16(port), value > 0 {
+                        try? self.commands?.write(contentsOf: Data("UPGRADE \(value)\n".utf8))
+                        try? await Task.sleep(for: .seconds(3))
+                    }
+                }
+                try? await Task.sleep(for: .seconds(10))
+            }
         }
     }
     private func monitorEvents() {
@@ -45,7 +105,6 @@ final class ClassicBluetoothTransport {
         guard let outputURL, let data = try? Data(contentsOf: outputURL), data.count <= 16_384 else { return "" }
         return String(decoding: data, as: UTF8.self).split(separator: "\n").suffix(4).joined(separator: "\n")
     }
-
     static func pairedDevices() async throws -> [AndroidDevice] {
         guard let helperPath else { throw RunnerError.failed("Bluetooth helper missing. Rebuild DroidMirror with build-app.sh.") }
         let text = try await ProcessRunner.output(helperPath, ["--list"], timeout: 5)
@@ -63,9 +122,13 @@ final class ClassicBluetoothTransport {
         }
         guard let helper = helperPath else { throw RunnerError.failed("Bluetooth helper missing. Rebuild DroidMirror.") }
         _ = try await ProcessRunner.output(helper, ["--pair", address], timeout: 60, input: key)
+        UserDefaults.standard.set(true, forKey: "DroidMirror.BLE.enabled")
+        UserDefaults.standard.synchronize()
+        DistributedNotificationCenter.default().postNotificationName(
+            Notification.Name("app.droidmirror.receiverConfiguration"), object: nil, userInfo: nil, deliverImmediately: true)
     }
 
-    func connect(address: String) async throws -> Ports {
+    func connect(address: String, wirelessMaxSize: Int = 1920, wirelessFPS: Int = 60, wirelessBitRate: Int = 12_000_000) async throws -> Ports {
         stop()
         guard let helper = Self.helperPath else { throw RunnerError.failed("Bluetooth helper missing. Rebuild DroidMirror with build-app.sh.") }
         let token = generation
@@ -75,13 +138,22 @@ final class ClassicBluetoothTransport {
         let child = Process()
         child.executableURL = URL(fileURLWithPath: helper)
         child.arguments = [address]
-        child.standardInput = FileHandle.nullDevice
+        var environment = ToolProcessEnvironment.clean()
+        environment["DROIDMIRROR_WIFI_MAX_SIZE"] = String(wirelessMaxSize)
+        environment["DROIDMIRROR_WIFI_FPS"] = String(wirelessFPS)
+        environment["DROIDMIRROR_WIFI_BIT_RATE"] = String(wirelessBitRate)
+        child.environment = environment
+        let input = Pipe()
+        child.standardInput = input
+        commands = input.fileHandleForWriting
+        wirelessActive = false
         child.standardOutput = handle
         child.standardError = handle
         outputURL = url; outputHandle = handle; process = child; consumedLines = 0
         do {
             try child.run()
-            for _ in 0..<200 {
+            // Baseband, L2CAP and BLE each have a bounded startup phase.
+            for _ in 0..<500 {
                 guard token == generation else { throw CancellationError() }
                 let data = (try? Data(contentsOf: url)) ?? Data()
                 guard data.count <= 16_384 else { throw RunnerError.failed("Bluetooth helper returned too much output") }
@@ -95,7 +167,7 @@ final class ClassicBluetoothTransport {
                 }
                 if !child.isRunning {
                     if text.contains("EVENT CAPTURE_FAILED") {
-                        throw RunnerError.failed("Privileged capture unavailable. Authorize Shizuku and enable Mac connections once on Android.")
+                        throw RunnerError.failed("HEVC capture unavailable. Authorize Shizuku, enable Mac connections, and check this phone's HEVC encoder support.")
                     }
                     throw RunnerError.failed(text.nilIfEmpty ?? "Bluetooth connection failed")
                 }
@@ -111,6 +183,16 @@ final class ClassicBluetoothTransport {
     func stop() {
         pollEvents()
         monitor?.cancel(); monitor = nil
+        upgradeTask?.cancel(); upgradeTask = nil
+        try? commands?.close(); commands = nil
+        let oldForwards = forwards; forwards.removeAll()
+        if !oldForwards.isEmpty, let adb = ToolLocator.find("adb") {
+            Task {
+                for (serial, port) in oldForwards {
+                    _ = try? await ProcessRunner.output(adb, ["-s", serial, "forward", "--remove", "tcp:\(port)"], timeout: 3)
+                }
+            }
+        }
         generation = UUID()
         if process?.isRunning == true { process?.terminate() }
         process = nil

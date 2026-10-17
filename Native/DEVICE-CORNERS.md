@@ -30,7 +30,14 @@ per segment; endpoints are exact. This is a superellipse profile, not a claim
 to reproduce Apple's proprietary continuous-corner geometry. Coordinates account
 for the surface layer's orientation.
 Only the stream is clipped: the separate toolbar keeps its existing shape. Mask
-and layer shadow share their geometry and the native window shadow is invalidated.
+and shadow share their geometry. A transparent, nonactivating child panel behind
+the stream draws a broad ambient shadow (60-point blur, 18-point downward offset)
+and a tighter contact shadow (16-point blur, 4-point downward offset). Its 120-point
+margin keeps the blur outside the clipped SDL surface. It ignores mouse events,
+follows the parent window, hides in full screen, and disappears when the mirror
+closes. Moving the phone reuses the drawing; resizing or changing the corner
+profile refreshes the silhouette. The native window shadow is disabled to avoid
+doubling it.
 The controller applies the mask after the original layout method on every resize.
 No Accessibility API, capture of other apps, new permission or layout crop is used.
 

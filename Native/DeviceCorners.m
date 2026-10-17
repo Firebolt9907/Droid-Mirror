@@ -2,6 +2,7 @@
 #import <QuartzCore/QuartzCore.h>
 #import <math.h>
 #import <signal.h>
+#import <objc/runtime.h>
 
 // Pixel 8 fallback, replaced with the connected phone's physical display data.
 static CGFloat DMTopCornerRatio = 104.0 / 1080.0;
@@ -126,6 +127,124 @@ CGPoint DMSuperellipseCornerPoint(CGFloat extent, CGFloat progress) {
                        extent * (1 - pow(sin(angle), power)));
 }
 
+// A separate, click-through child gives the blur room outside SDL's clipped
+// surface without changing video coordinates or the window's resize hit areas.
+static const CGFloat DMPhoneShadowInset = 120;
+static void *DMPhoneShadowKey = &DMPhoneShadowKey;
+
+@interface DMPhoneShadowView : NSView
+@property(nonatomic) NSRect phoneRect;
+@end
+@implementation DMPhoneShadowView
+- (BOOL)isOpaque { return NO; }
+- (void)drawRect:(NSRect)dirtyRect {
+    CGContextRef context = NSGraphicsContext.currentContext.CGContext;
+    NSRect phone = self.phoneRect;
+    CGPathRef path = DMCreatePixelScreenPath(phone.size, NO);
+    CGContextSaveGState(context);
+    CGContextTranslateCTM(context, phone.origin.x, phone.origin.y);
+    CGContextSetFillColorWithColor(context, NSColor.blackColor.CGColor);
+    // A wide ambient shadow adds depth; a tighter contact shadow defines the edge.
+    CGContextSetShadowWithColor(context, CGSizeMake(0, -18), 60,
+        [NSColor colorWithWhite:0 alpha:0.38].CGColor);
+    CGContextAddPath(context, path);
+    CGContextFillPath(context);
+    CGContextSetShadowWithColor(context, CGSizeMake(0, -4), 16,
+        [NSColor colorWithWhite:0 alpha:0.22].CGColor);
+    CGContextAddPath(context, path);
+    CGContextFillPath(context);
+    CGContextRestoreGState(context);
+    CGPathRelease(path);
+}
+@end
+
+@interface DMPhoneShadowPanel : NSPanel
+@end
+@implementation DMPhoneShadowPanel
+- (BOOL)canBecomeKeyWindow { return NO; }
+- (BOOL)canBecomeMainWindow { return NO; }
+@end
+
+@interface DMPhoneShadow : NSObject
+@property(nonatomic, weak) NSWindow *host;
+@property(nonatomic, strong) DMPhoneShadowPanel *panel;
+@property(nonatomic, strong) id closeObserver;
+@property(nonatomic) NSSize drawnSize;
+@property(nonatomic) NSRect drawnPhoneRect;
+@property(nonatomic) CGFloat topRadius;
+@property(nonatomic) CGFloat bottomRadius;
+- (instancetype)initWithWindow:(NSWindow *)window;
+- (void)updateForScreen:(NSView *)screen;
+@end
+
+@implementation DMPhoneShadow
+- (instancetype)initWithWindow:(NSWindow *)window {
+    if (!(self = [super init])) return nil;
+    _host = window;
+    _panel = [[DMPhoneShadowPanel alloc] initWithContentRect:NSZeroRect
+        styleMask:NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel
+        backing:NSBackingStoreBuffered defer:NO];
+    _panel.releasedWhenClosed = NO;
+    _panel.opaque = NO;
+    _panel.backgroundColor = NSColor.clearColor;
+    _panel.hasShadow = NO;
+    _panel.ignoresMouseEvents = YES;
+    _panel.hidesOnDeactivate = NO;
+    _panel.animationBehavior = NSWindowAnimationBehaviorNone;
+    _panel.collectionBehavior = NSWindowCollectionBehaviorFullScreenAuxiliary |
+        NSWindowCollectionBehaviorIgnoresCycle;
+    _panel.contentView = [[DMPhoneShadowView alloc] initWithFrame:NSZeroRect];
+    __weak typeof(self) weakSelf = self;
+    _closeObserver = [NSNotificationCenter.defaultCenter addObserverForName:NSWindowWillCloseNotification
+        object:window queue:nil usingBlock:^(__unused NSNotification *note) {
+            [weakSelf.panel orderOut:nil];
+        }];
+    return self;
+}
+
+- (void)dealloc {
+    if (_closeObserver) [NSNotificationCenter.defaultCenter removeObserver:_closeObserver];
+    [_host removeChildWindow:_panel];
+    [_panel orderOut:nil];
+}
+
+- (void)updateForScreen:(NSView *)screen {
+    NSWindow *window = self.host;
+    window.hasShadow = NO; // The explicit silhouette supplies both shadow layers.
+    if (window.styleMask & NSWindowStyleMaskFullScreen) {
+        [window removeChildWindow:self.panel];
+        [self.panel orderOut:nil];
+        return;
+    }
+    NSRect phone = [window convertRectToScreen:[screen convertRect:screen.bounds toView:nil]];
+    NSScreen *screenForWindow = window.screen;
+    NSRect shadowFrame = NSInsetRect(phone, -DMPhoneShadowInset, -DMPhoneShadowInset);
+    // A transparent child panel that extends behind the menu bar can expose a
+    // straight compositor edge there. Keep the shadow surface in the desktop
+    // area and position its silhouette relative to the clipped panel frame.
+    NSRect panelFrame = shadowFrame;
+    if (screenForWindow) {
+        NSRect desktopFrame = screenForWindow.frame;
+        desktopFrame.size.height = MAX(0, NSMaxY(screenForWindow.visibleFrame) - NSMinY(desktopFrame));
+        panelFrame = NSIntersectionRect(shadowFrame, desktopFrame);
+    }
+    DMPhoneShadowView *shadowView = (DMPhoneShadowView *)self.panel.contentView;
+    shadowView.phoneRect = NSOffsetRect(phone, -NSMinX(panelFrame), -NSMinY(panelFrame));
+    [self.panel setFrame:panelFrame display:NO];
+    CGFloat top = DMPixelCornerRadius(phone.size.width, YES);
+    CGFloat bottom = DMPixelCornerRadius(phone.size.width, NO);
+    if (!NSEqualSizes(self.drawnSize, phone.size) || !NSEqualRects(self.drawnPhoneRect, shadowView.phoneRect)
+        || self.topRadius != top || self.bottomRadius != bottom) {
+        self.drawnSize = phone.size;
+        self.drawnPhoneRect = shadowView.phoneRect;
+        self.topRadius = top;
+        self.bottomRadius = bottom;
+        self.panel.contentView.needsDisplay = YES;
+    }
+    if (self.panel.parentWindow != window) [window addChildWindow:self.panel ordered:NSWindowBelow];
+}
+@end
+
 void DMApplyDeviceCorners(NSView *screen) {
     if (!screen || NSIsEmptyRect(screen.bounds)) return;
     screen.wantsLayer = YES;
@@ -144,5 +263,13 @@ void DMApplyDeviceCorners(NSView *screen) {
     layer.shadowPath = path;
     [CATransaction commit];
     CGPathRelease(path);
-    [screen.window invalidateShadow];
+    NSWindow *window = screen.window;
+    if (window) {
+        DMPhoneShadow *shadow = objc_getAssociatedObject(window, DMPhoneShadowKey);
+        if (!shadow) {
+            shadow = [[DMPhoneShadow alloc] initWithWindow:window];
+            objc_setAssociatedObject(window, DMPhoneShadowKey, shadow, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+        [shadow updateForScreen:screen];
+    }
 }

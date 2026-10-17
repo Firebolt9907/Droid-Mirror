@@ -8,6 +8,9 @@ static void hex(const uint8_t *bytes,size_t length,char *output) {
 int main(int argc,char **argv) {
     uint8_t session[32],challenge[16],plain[488]={1,0,0,0,8},packet[512],proof[32]; char output[1025];
     for(int i=0;i<32;++i) session[i]=(uint8_t)i;
+    uint8_t notification[32]; dm_ble_notification_pairing_key(session, notification); hex(notification, 32, output);
+    assert(!strcmp(output, "612462f4f9c5c73d3d61fca80066dd8f099333d036948bdc116a3cb7d2fcf17b"));
+    assert(memcmp(session, notification, 32));
     uint8_t derived[32]; dm_ble_session_key(session,session,derived); hex(derived,32,output);
     assert(!strcmp(output,"7b06af8f972ce57eea27ba74bbdf6d1f6114e67d71b6eb05a17459f282840200"));
     DMBleInputKeys keys; dm_ble_input_keys(session,&keys); for(int i=0;i<16;++i) challenge[i]=(uint8_t)i; dm_ble_input_proof(&keys,challenge,proof);

@@ -1,5 +1,9 @@
 # Integrated wireless ADB discovery
 
+DroidMirror Android 0.19 now includes this bridge inside the companion app. See
+[Android setup and migration](ANDROID-BRIDGE.md). The separate bridge APK is no
+longer required with matching Mac and Android builds.
+
 Bridge 2.2 includes a bounded launcher-icon PNG in each encrypted notification.
 Mac validates its PNG format/dimensions and adds it as a UserNotifications image
 attachment beside the text. The OS-owned source icon/grouping remains DroidMirror.
@@ -14,12 +18,12 @@ deduplication, not raw message text.
 DroidMirror runs its BLE client in a bundled, UI-less **DroidMirror Notifications**
 helper. The mirroring host keeps the pairing/settings menu but does not open a second
 BLE connection. It uses the
-BLE ADB Bridge v2.0 protocol from the sibling project
-`../referenced-chatgpt-conversation-this-is-an/`. Install the new Android APK:
+BLE ADB Bridge v2.0 protocol now included in `BluetoothCompanion`. Install the
+matching DroidMirror Android APK:
 v1.9's plaintext protocol is intentionally not accepted by this build.
 
-Launch DroidMirror and approve its Bluetooth permission once. The Android BLE
-ADB Bridge must be running, and the Mac must already be paired for Wireless
+Launch DroidMirror and approve its Bluetooth permission once. The Android DroidMirror
+background bridge must be enabled, and the Mac must already be paired for Wireless
 Debugging. Pair encrypted BLE once using the steps below. The bridge sends the changing port; DroidMirror runs `adb connect`
 using its saved phone address. The existing device refresh/auto-start flow then
 launches scrcpy. BLE carries encrypted discovery, notifications and notification
@@ -27,21 +31,25 @@ actions, but not video or keyboard input.
 
 ## Pairing and notification setup
 
-1. Install `outputs/BLE-ADB-Bridge-2.2.apk` on Android, preserving the existing app.
-2. Connect using already-authorized USB or wireless ADB.
-3. On Android, tap **Allow Mac pairing for 60 seconds**.
-4. On Mac, select **DroidMirror > Wireless ADB over Bluetooth > Pair phone using authorized ADB…**.
-5. On Android, tap **Allow notification forwarding** and explicitly enable its
+1. Install `outputs/DroidMirror-Bluetooth-0.19-debug.apk` on Android and enable
+   **Notifications and wireless ADB → Enable background bridge**. Stop the old bridge.
+2. On Android, select your paired Mac and tap **Pair Mac (mirroring and notifications)**.
+3. On Mac, choose **DroidMirror → Pair Bluetooth…**, select this phone, paste the
+   Android code and click **Pair Mac**. One action provisions both input and
+   notification/discovery credentials; no ADB provisioning or pairing window is needed.
+4. On Android, tap **Allow notification forwarding** and explicitly enable its
    notification-listener access in Settings. Allow DroidMirror notifications on Mac.
+5. Authorize Shizuku in the Android app. DroidMirror uses its shell service to grant
+   its own secure-settings permission and checks the result before reporting success.
 
-ADB provisions a random 256-bit shared secret through stdin, not command-line
-arguments. The Android provider requires shell/root UID, the DUMP permission,
-and the phone's user-opened pairing window. Mac stores the secret in Keychain;
-Android encrypts its copy using an Android Keystore key. Re-pairing revokes
-existing BLE sessions. One phone identity is supported at a time.
-Provisioning inherits the confidentiality of the selected ADB transport: use USB,
-modern TLS Wireless Debugging, or a trusted encrypted tunnel, not plaintext legacy
-ADB TCP over an untrusted network.
+The shared 256-bit pairing code stays in the existing per-Mac Android input pairing
+store and per-phone Mac Keychain item. Notification credentials are derived with
+HMAC-SHA256 and the label `DroidMirror notifications pairing v1`, and the Mac stores
+that derived credential for its background notification helper. Re-pair once when
+upgrading from the separate provisioning flow. Old independent notification trust
+is ignored on Android, and the exported ADB pairing provider has been removed.
+One notification phone identity is supported at a time. Granting Android notification
+access remains a separate explicit OS permission.
 
 ## Security and actions
 

@@ -413,6 +413,10 @@ execute_server(struct sc_server *server,
         // By default, cleanup is true
         ADD_PARAM("cleanup=false");
     }
+    const char *transport = getenv("DROIDMIRROR_TRANSPORT");
+    if (transport && !strcmp(transport, "adb")) {
+        ADD_PARAM("droidmirror_session=true");
+    }
     if (!params->power_on) {
         // By default, power_on is true
         ADD_PARAM("power_on=false");

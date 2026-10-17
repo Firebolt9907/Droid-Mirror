@@ -10,6 +10,7 @@ src = [
     'src/clock.c',
     'src/compat.c',
     'src/control_msg.c',
+    'src/camera_cutout.c',
     'src/controller.c',
     'src/decoder.c',
     'src/demuxer.c',
@@ -151,7 +152,10 @@ dependencies = [
 ]
 
 if host_machine.system() == 'darwin'
-    dependencies += dependency('appleframeworks', modules: ['CoreVideo'])
+    add_languages('objc', required: true)
+    add_project_arguments('-fobjc-arc', language: 'objc')
+    src += ['src/video_filter.m']
+    dependencies += dependency('appleframeworks', modules: ['CoreVideo', 'Metal', 'MetalFX', 'Foundation'])
 endif
 
 if v4l2_support
@@ -307,6 +311,7 @@ if get_option('buildtype') == 'debug'
         ['test_control_msg_serialize', [
             'tests/test_control_msg_serialize.c',
             'src/control_msg.c',
+    'src/camera_cutout.c',
             'src/util/str.c',
             'src/util/strbuf.c',
         ]],

@@ -7,7 +7,6 @@ import android.content.Intent;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
-import android.os.SystemClock;
 
 /** One notification becomes a live update only while actual video is flowing. */
 final class StreamNotifications {
@@ -17,7 +16,7 @@ final class StreamNotifications {
     static final String TOKEN = "session", PEER = "peerName", STARTED = "startedElapsed";
 
     static PendingIntent action(Context context, String action, String token) {
-        Intent intent = new Intent(context, CaptureService.class).setAction(action)
+        Intent intent = new Intent(context, token.startsWith("adb-") ? AdbStreamService.class : CaptureService.class).setAction(action)
             .setData(Uri.parse("droidmirror://stream/" + token)).putExtra(TOKEN, token);
         return PendingIntent.getService(context, 0, intent, PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
     }
@@ -35,12 +34,12 @@ final class StreamNotifications {
             .setStyle(new Notification.BigTextStyle().bigText(text))
             .setContentIntent(open).setOngoing(true).setOnlyAlertOnce(true)
             .setCategory(Notification.CATEGORY_STATUS).setVisibility(Notification.VISIBILITY_PRIVATE)
-            .setWhen(System.currentTimeMillis() - Math.max(0, SystemClock.elapsedRealtime() - started))
-            .setShowWhen(true).setUsesChronometer(true)
+            .setShowWhen(false)
             .setDeleteIntent(action(context, DISMISSED, token))
             .addAction(new Notification.Action.Builder(null, context.getString(R.string.stream_disconnect),
                 action(context, DISCONNECT, token)).build());
         if (Build.VERSION.SDK_INT >= 36) {
+            builder.setShortCriticalText(context.getString(R.string.stream_short_status));
             // Public 36.1 extra: older Android 16 releases safely ignore the promotion request.
             // Using the documented extra also avoids calling a 36.1 method on base API 36.
             Bundle extras = new Bundle();

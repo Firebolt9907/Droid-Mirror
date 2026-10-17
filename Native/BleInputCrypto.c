@@ -2,6 +2,10 @@
 #include <CommonCrypto/CommonHMAC.h>
 #include <CommonCrypto/CommonCryptor.h>
 #include <string.h>
+void dm_ble_notification_pairing_key(const uint8_t pairing[32], uint8_t notification[32]) {
+    const char label[] = "DroidMirror notifications pairing v1";
+    CCHmac(kCCHmacAlgSHA256, pairing, 32, label, sizeof(label) - 1, notification);
+}
 void dm_ble_session_key(const uint8_t pairing[32], const uint8_t nonce[32], uint8_t session[32]) {
     const char label[]="DroidMirror BLE session v1";
     uint8_t data[sizeof(label)-1+32]; memcpy(data,label,sizeof(label)-1); memcpy(data+sizeof(label)-1,nonce,32);

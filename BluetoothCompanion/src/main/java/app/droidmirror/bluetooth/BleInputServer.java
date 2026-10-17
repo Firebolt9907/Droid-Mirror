@@ -135,10 +135,16 @@ final class BleInputServer implements AutoCloseable {
             } catch (RuntimeException error) { fail(); }
         }
         @Override public void onConnectionStateChange(BluetoothDevice device, int status, int state) {
-            if (state == BluetoothProfile.STATE_DISCONNECTED) challenges.remove(device.getAddress());
+            if (state == BluetoothProfile.STATE_DISCONNECTED) {
+                challenges.remove(device.getAddress());
+                BleLinkMtu.disconnected(device.getAddress());
+            } else if (state == BluetoothProfile.STATE_CONNECTED && selected(device)) {
+                mtu = BleLinkMtu.get(device.getAddress());
+            }
             if (device.equals(authenticatedPeer) && (state == BluetoothProfile.STATE_DISCONNECTED || status != BluetoothGatt.GATT_SUCCESS)) fail();
         }
         @Override public void onMtuChanged(BluetoothDevice device, int value) {
+            BleLinkMtu.negotiated(device.getAddress(), value);
             if (selected(device)) mtu = value;
         }
         @Override public void onPhyUpdate(BluetoothDevice device, int tx, int rx, int status) {
@@ -196,6 +202,8 @@ final class BleInputServer implements AutoCloseable {
                     byte[] plain = crypto.open(value);
                     boolean newPeer = authenticatedPeer == null;
                     authenticatedPeer = device;
+                    BleLinkMtu.observedWrite(device.getAddress(), value.length);
+                    mtu = BleLinkMtu.get(device.getAddress());
                     if (newPeer) {
                         advertiser.stopAdvertising(advertising);
                         try {

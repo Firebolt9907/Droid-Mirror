@@ -39,9 +39,13 @@ public class SurfaceEncoder implements AsyncProcessor {
 
     private final SurfaceCapture capture;
     private final Streamer streamer;
+    private Runnable firstFrameListener;
+
+    public void setFirstFrameListener(Runnable listener) { firstFrameListener = listener; }
+
     private final String encoderName;
-    private final List<CodecOption> codecOptions;
-    private final int videoBitRate;
+    private List<CodecOption> codecOptions;
+    private int videoBitRate;
     private final int maxSize;
     private final float maxFps;
     private final boolean downsizeOnError;
@@ -51,6 +55,10 @@ public class SurfaceEncoder implements AsyncProcessor {
     private boolean firstFrameSent;
     private int consecutiveErrors;
     private long maxFrameAgeUs;
+    private int maxAdaptiveBitRate;
+
+    /** Optional ceiling for bandwidth probing on freshness-controlled transports. */
+    public void setMaxAdaptiveBitRate(int value) { maxAdaptiveBitRate = value; }
 
     /** Opt in only for transports where queued historical frames are undesirable. */
     public void setMaxFrameAgeUs(long value) { maxFrameAgeUs = value; }
@@ -61,6 +69,18 @@ public class SurfaceEncoder implements AsyncProcessor {
     private final CaptureControl captureControl = new CaptureControl();
 
     private VideoConstraints videoConstraints;
+    private static final class VideoProfile {
+        final Options options; final long frameAgeUs;
+        VideoProfile(Options options,long frameAgeUs) { this.options=options; this.frameAgeUs=frameAgeUs; }
+    }
+    private final java.util.concurrent.atomic.AtomicReference<VideoProfile> pendingProfile = new java.util.concurrent.atomic.AtomicReference<>();
+
+    /** Called from Binder; codec and capture changes run only on the encoder thread. */
+    public void requestVideoProfile(Options options) { requestVideoProfile(options,0); }
+    public void requestVideoProfile(Options options, long frameAgeUs) {
+        pendingProfile.set(new VideoProfile(options,frameAgeUs));
+        captureControl.reset(CaptureControl.RESET_REASON_CLIENT_RESIZED);
+    }
 
     public SurfaceEncoder(SurfaceCapture capture, Streamer streamer, Options options) {
         this.capture = capture;
@@ -117,6 +137,23 @@ public class SurfaceEncoder implements AsyncProcessor {
                     // The reasons for the previous failed encoding must be preserved when retrying
                     resetReasons |= retainedResetReasons;
                     retainedResetReasons = 0;
+                }
+
+                VideoProfile request = pendingProfile.getAndSet(null);
+                if (request != null) {
+                    Options profile=request.options;
+                    VideoConstraints updated = videoConstraints.withMaxSize(profile.getMaxSize());
+                    if (!capture.applyNewVideoConstraints(updated)) throw new IOException("Capture rejected hybrid video constraints");
+                    videoConstraints = updated;
+                    videoBitRate = profile.getVideoBitRate();
+                    codecOptions = profile.getVideoCodecOptions();
+                    // Each transport profile carries its own codec settings and
+                    // freshness policy, including when returning to Bluetooth.
+                    maxFrameAgeUs = request.frameAgeUs;
+                    format = createFormat(codec.getMimeType(), videoBitRate, profile.getMaxFps(), codecOptions);
+                    resetReasons |= CaptureControl.RESET_REASON_CLIENT_RESIZED;
+                    Ln.i("Hybrid video profile: max-size=" + profile.getMaxSize() + ", max-fps=" + profile.getMaxFps()
+                            + ", bit-rate=" + videoBitRate);
                 }
 
                 capture.prepare();
@@ -258,7 +295,9 @@ public class SurfaceEncoder implements AsyncProcessor {
         MediaCodec.BufferInfo bufferInfo = new MediaCodec.BufferInfo();
         FrameFreshness freshness = maxFrameAgeUs > 0 ? new FrameFreshness(maxFrameAgeUs) : null;
         int currentBitRate = videoBitRate;
-        BitrateRecovery bitrateRecovery = new BitrateRecovery(videoBitRate);
+        BitrateRecovery bitrateRecovery = freshness != null && maxAdaptiveBitRate > videoBitRate
+                ? new BitrateRecovery(videoBitRate, maxAdaptiveBitRate, 2000000)
+                : new BitrateRecovery(videoBitRate);
 
         boolean eos;
         do {
@@ -292,7 +331,7 @@ public class SurfaceEncoder implements AsyncProcessor {
                                 parameters.putInt(MediaCodec.PARAMETER_KEY_VIDEO_BITRATE, recovered);
                                 codec.setParameters(parameters);
                                 currentBitRate = recovered;
-                                Ln.i("Bluetooth video " + (backlogged ? "queue building; adjusting to " : "recovered; restoring ")
+                                Ln.i("Bluetooth video " + (backlogged ? "queue building; adjusting to " : "healthy; increasing ")
                                         + recovered + " bit/s");
                             }
                         }
@@ -305,6 +344,10 @@ public class SurfaceEncoder implements AsyncProcessor {
 
                     ByteBuffer codecBuffer = codec.getOutputBuffer(outputBufferId);
                     streamer.writePacket(codecBuffer, bufferInfo);
+                    if (!isConfig && firstFrameListener != null) {
+                        firstFrameListener.run();
+                        firstFrameListener = null;
+                    }
                 }
             } finally {
                 if (outputBufferId >= 0) {

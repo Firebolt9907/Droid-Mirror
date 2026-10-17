@@ -45,7 +45,7 @@ final class MirrorModel: ObservableObject {
             do {
                 try await ClassicBluetoothTransport.pair(address: device.id, code: code)
                 bluetoothPairingCode = ""
-                status = "BLE paired. Ready to mirror."
+                status = "Mirroring and notifications paired. Allow notification forwarding in Android’s DroidMirror app."
             } catch { errorMessage = error.localizedDescription }
         }
     }
@@ -68,7 +68,6 @@ final class MirrorModel: ObservableObject {
     private var originalLockAfterTimeout: String?
     private var rotationSerial: String?
     private var isTerminatingApplication = false
-    private static let preferencesKey = "DroidMirror.preferences.v1"
 
     var selectedDevice: AndroidDevice? {
         devices.first { $0.id == selectedID }
@@ -78,7 +77,7 @@ final class MirrorModel: ObservableObject {
     var scrcpyPath: String? { ToolLocator.find("scrcpy") }
 
     init() {
-        preferences = Self.loadPreferences()
+        preferences = MirrorPreferencesStore.load()
         selectedID = preferences.transport == .bluetoothClassic ? preferences.bluetoothDeviceID : nil
         refreshTimer = .scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
             Task { @MainActor in
@@ -88,16 +87,8 @@ final class MirrorModel: ObservableObject {
         }
     }
 
-    private static func loadPreferences() -> MirrorPreferences {
-        guard let data = UserDefaults.standard.data(forKey: preferencesKey),
-              let preferences = try? JSONDecoder().decode(MirrorPreferences.self, from: data)
-        else { return MirrorPreferences() }
-        return preferences
-    }
-
     private func savePreferences() {
-        guard let data = try? JSONEncoder().encode(preferences) else { return }
-        UserDefaults.standard.set(data, forKey: Self.preferencesKey)
+        MirrorPreferencesStore.save(preferences)
     }
 
     @Published private(set) var wifiAwareStatus = "Check this Mac for Wi-Fi Aware support."
@@ -244,9 +235,17 @@ final class MirrorModel: ObservableObject {
         status = "Connecting over Bluetooth Classic…"
         phoneTakenOver = false
         sessionEndedOnPhone = false
+        let wifiMaxSize = preferences.maxSize
+        let wifiFPS = preferences.maxFPS
+        let wifiBitRate = preferences.bitRateMbps
         classicBluetooth.onEvent = { [weak self] event in
             guard let self else { return }
             switch event {
+            case .wirelessActive:
+                let resolution = wifiMaxSize == 0 ? "native resolution" : "\(wifiMaxSize) px"
+                self.status = "Wi-Fi · \(resolution) · up to \(wifiFPS) fps · \(wifiBitRate) Mbps target"
+            case .bluetoothActive:
+                self.status = "Bluetooth · up to 16 fps · 256 kbps target"
             case .streamStarted: SessionNotifications.shared.began()
             case .phoneOn, .phoneLocalUse:
                 if !self.phoneTakenOver {
@@ -254,14 +253,15 @@ final class MirrorModel: ObservableObject {
                     SessionNotifications.shared.localUse(restored: event == .phoneOn)
                 }
             case .captureFailed:
-                self.errorMessage = "Privileged capture unavailable. Authorize Shizuku and enable Mac connections once in the Android companion."
+                self.errorMessage = "HEVC capture unavailable. Authorize Shizuku, enable Mac connections, and check that this phone supports HEVC encoding."
             case .sessionEnded:
                 self.sessionEndedOnPhone = true
                 self.status = "Remote session ended"
             }
         }
         do {
-            let ports = try await classicBluetooth.connect(address: device.id)
+            let ports = try await classicBluetooth.connect(address: device.id, wirelessMaxSize: wifiMaxSize,
+                                                           wirelessFPS: wifiFPS, wirelessBitRate: wifiBitRate * 1_000_000)
             guard preferences.transport == .bluetoothClassic, !isTerminatingApplication else {
                 classicBluetooth.stop()
                 return
@@ -278,7 +278,7 @@ final class MirrorModel: ObservableObject {
                 environment.removeValue(forKey: key)
             }
             environment["DROIDMIRROR_TRANSPORT"] = "bluetooth-classic"
-            environment["DROIDMIRROR_CONNECTION_LABEL"] = "Bluetooth"
+            environment["DROIDMIRROR_CONNECTION_LABEL"] = "Bluetooth controls"
             configureMirrorUI(environment: &environment)
             process.environment = environment
             process.standardOutput = FileHandle.nullDevice
@@ -348,7 +348,6 @@ final class MirrorModel: ObservableObject {
             : false
         let shouldForwardAudio = preferences.forwardAudio &&
             !androidAudioWasAlreadyPlaying && !macAudioWasAlreadyPlaying
-
         let process = Process()
         let pipe = Pipe()
         process.executableURL = URL(fileURLWithPath: scrcpyPath)
@@ -380,20 +379,22 @@ final class MirrorModel: ObservableObject {
             Task { @MainActor in
                 guard let self else { return }
                 self.log = output
+                let localUse = output.contains("DROIDMIRROR_LOCAL_USE")
+                if localUse { SessionNotifications.shared.localUse(restored: true) }
                 await SessionNotifications.shared.ended()
-                await self.restoreDeviceStateAndLock()
+                await self.restoreDeviceStateAndLock(preserveLockScreen: localUse)
                 self.stopLockMonitoring()
                 self.stopToolbarPositioning()
                 self.mirrorProcess = nil
                 self.isMirroring = false
                 self.isDeviceLocked = false
-                self.status = process.terminationStatus == 0 ? "Mirror closed" : "Mirror stopped unexpectedly"
-                if process.terminationStatus != 0 {
+                self.status = localUse ? "Phone in use — mirror closed" : (process.terminationStatus == 0 ? "Mirror closed" : "Mirror stopped unexpectedly")
+                if process.terminationStatus != 0 && !localUse {
                     self.errorMessage = output.split(separator: "\n").suffix(4).joined(separator: "\n").nilIfEmpty ?? "scrcpy exited with code \(process.terminationStatus)"
                 }
-                // The stream is the app now. Closing it (including Command-Q
-                // while scrcpy is focused) closes the wrapper as well.
-                if !self.isTerminatingApplication {
+                // Keep the phone-use alert visible after local takeover. Ordinary
+                // stream closure (including Command-Q) closes the wrapper too.
+                if !self.isTerminatingApplication && !localUse {
                     NSApp.terminate(nil)
                 }
             }
@@ -466,7 +467,7 @@ final class MirrorModel: ObservableObject {
         _ = try? await ProcessRunner.output(adbPath, base + ["put", "system", "user_rotation", "0"])
     }
 
-    private func restoreDeviceStateAndLock() async {
+    private func restoreDeviceStateAndLock(preserveLockScreen: Bool = false) async {
         guard let adbPath, let serial = rotationSerial else { return }
         let auto = originalAutoRotate
         let rotation = originalUserRotation
@@ -490,6 +491,8 @@ final class MirrorModel: ObservableObject {
             guard parts.count == 2 else { continue }
             _ = try? await ProcessRunner.output(adbPath, base + ["put", parts[0], parts[1], value])
         }
+
+        if preserveLockScreen { return }
 
         // Temporarily remove Android's post-sleep grace period so closing the
         // mirror always locks immediately, then restore the user's preference.

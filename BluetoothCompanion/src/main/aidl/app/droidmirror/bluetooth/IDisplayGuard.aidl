@@ -11,5 +11,8 @@ interface IDisplayGuard {
     String getLastError() = 5;
     boolean startCapture(IBinder owner, IStreamEvents observer, in ParcelFileDescriptor output, in ParcelFileDescriptor controls) = 6;
     void localUse(IBinder owner) = 7;
+    boolean upgradeVideo(IBinder owner, int maxSize, int fps, int bitRate) = 8;
+    boolean restoreBluetoothVideo(IBinder owner) = 9;
+    boolean grantSecureSettings() = 10;
     void destroy() = 16777114;
 }

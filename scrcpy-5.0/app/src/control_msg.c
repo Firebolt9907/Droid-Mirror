@@ -125,6 +125,11 @@ sc_control_msg_serialize(const struct sc_control_msg *msg, uint8_t *buf) {
             sc_write32be(&buf[24], msg->inject_touch_event.action_button);
             sc_write32be(&buf[28], msg->inject_touch_event.buttons);
             return 32;
+        case SC_CONTROL_MSG_TYPE_WHEEL_SCROLL:
+            write_position(&buf[1], &msg->wheel_scroll.position);
+            sc_write32be(&buf[13], (uint32_t)msg->wheel_scroll.dx);
+            sc_write32be(&buf[17], (uint32_t)msg->wheel_scroll.dy);
+            return 21;
         case SC_CONTROL_MSG_TYPE_INJECT_SCROLL_EVENT:
             write_position(&buf[1], &msg->inject_scroll_event.position);
             // Accept values in the range [-16, 16].
@@ -194,6 +199,7 @@ sc_control_msg_serialize(const struct sc_control_msg *msg, uint8_t *buf) {
                                       SC_CONTROL_MSG_SCAN_FILE_PATH_MAX_LENGTH);
             return 1 + len;
         };
+        case SC_CONTROL_MSG_TYPE_GET_CAMERA_CUTOUT:
         case SC_CONTROL_MSG_TYPE_EXPAND_NOTIFICATION_PANEL:
         case SC_CONTROL_MSG_TYPE_EXPAND_SETTINGS_PANEL:
         case SC_CONTROL_MSG_TYPE_COLLAPSE_PANELS:
@@ -264,6 +270,10 @@ sc_control_msg_log(const struct sc_control_msg *msg) {
                      msg->inject_scroll_event.vscroll,
                      (long) msg->inject_scroll_event.buttons);
             break;
+        case SC_CONTROL_MSG_TYPE_WHEEL_SCROLL:
+            LOG_CMSG("wheel distance=%" PRIi32 ",%" PRIi32,
+                     msg->wheel_scroll.dx, msg->wheel_scroll.dy);
+            break;
         case SC_CONTROL_MSG_TYPE_BACK_OR_SCREEN_ON:
             LOG_CMSG("back-or-screen-on %s",
                      KEYEVENT_ACTION_LABEL(msg->inject_keycode.action));
@@ -285,6 +295,9 @@ sc_control_msg_log(const struct sc_control_msg *msg) {
         case SC_CONTROL_MSG_TYPE_RESIZE_DISPLAY:
             LOG_CMSG("resize display %" PRIu16 "x%" PRIu16,
                      msg->resize_display.width, msg->resize_display.height);
+            break;
+        case SC_CONTROL_MSG_TYPE_GET_CAMERA_CUTOUT:
+            LOG_CMSG("get camera cutout");
             break;
         case SC_CONTROL_MSG_TYPE_EXPAND_NOTIFICATION_PANEL:
             LOG_CMSG("expand notification panel");

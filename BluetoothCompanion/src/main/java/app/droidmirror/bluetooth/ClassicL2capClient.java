@@ -27,7 +27,7 @@ final class ClassicL2capClient implements AutoCloseable {
     };
     ClassicL2capClient(Context context) {
         args = new Shizuku.UserServiceArgs(new ComponentName(context.getPackageName(), ClassicL2capService.class.getName()))
-            .daemon(true).processNameSuffix("classic_l2cap").debuggable(false).version(4);
+            .daemon(true).processNameSuffix("classic_l2cap").debuggable(false).version(5);
         Shizuku.bindUserService(args, connection);
     }
     void listen(String peer) throws Exception {

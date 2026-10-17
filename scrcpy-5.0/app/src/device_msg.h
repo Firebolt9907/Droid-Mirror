@@ -2,6 +2,7 @@
 #define SC_DEVICEMSG_H
 
 #include "common.h"
+#include "camera_cutout.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -15,11 +16,13 @@ enum sc_device_msg_type {
     DEVICE_MSG_TYPE_CLIPBOARD,
     DEVICE_MSG_TYPE_ACK_CLIPBOARD,
     DEVICE_MSG_TYPE_UHID_OUTPUT,
+    DEVICE_MSG_TYPE_CAMERA_CUTOUT,
 };
 
 struct sc_device_msg {
     enum sc_device_msg_type type;
     union {
+        struct sc_camera_cutout camera_cutout;
         struct {
             char *text; // owned, to be freed by free()
         } clipboard;

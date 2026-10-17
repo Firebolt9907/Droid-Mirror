@@ -4,5 +4,12 @@ set -eu
 # across updates. Ad-hoc signatures bind Keychain ACLs to changing binary hashes.
 task_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 signing_identity=${DROIDMIRROR_SIGNING_IDENTITY:-045FAB101B6F8C94BA65ED2909CE8DAFAF01468A}
-codesign --force --deep --sign "$signing_identity" "$task_root/outputs/DroidMirror.app"
-codesign --verify --deep --strict "$task_root/outputs/DroidMirror.app"
+app_path=${1:-"$task_root/outputs/DroidMirror.app"}
+staging=$(mktemp -d "$(dirname "$app_path")/.droidmirror-sign.XXXXXX")
+trap 'rm -rf "$staging"' EXIT HUP INT TERM
+signed_app="$staging/DroidMirror.app"
+# Signing modifies executable files. Give every signed file a fresh inode first.
+/usr/bin/ditto "$app_path" "$signed_app"
+codesign --force --deep --sign "$signing_identity" "$signed_app"
+codesign --verify --deep --strict "$signed_app"
+python3 "$task_root/tools/app-bundle.py" publish "$signed_app" "$app_path"

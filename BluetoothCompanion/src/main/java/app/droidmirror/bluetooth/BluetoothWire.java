@@ -8,10 +8,20 @@ public final class BluetoothWire {
     public static final byte[] MAGIC = "DMBT0006".getBytes(StandardCharsets.US_ASCII);
     public static final int VIDEO = 0, EVENT = 1, MAX_CHUNK = 16 * 1024, VIDEO_CHUNK = 1024;
     public static final int PHONE_ON = 1, SESSION_ENDED = 2, LOCAL_USE_FAILED = 3, STREAM_STARTED = 4, CAPTURE_FAILED = 5, ALIVE = 6;
-    // Leave room for measured BLE ACK delays and keyframe bursts on the shared radio.
-    public static final int VIDEO_WINDOW_BYTES = 24 * 1024;
+    // Initial/minimum Classic window; live sessions grow it from measured ACK
+    // delivery. Every chunk still fits this minimum during transport changes.
+    public static final int VIDEO_WINDOW_BYTES = 8 * 1024;
     private final int videoChunk;
-    private final DataOutputStream out;
+    private DataOutputStream out;
+    private final DataOutputStream classic;
+    private static final class Chunk {
+        final long offset; final byte[] bytes;
+        Chunk(long offset, byte[] bytes) { this.offset=offset; this.bytes=bytes; }
+    }
+    // Retain only the bounded, unacknowledged transport window, not a second stream.
+    private final java.util.ArrayDeque<Chunk> replay = new java.util.ArrayDeque<>();
+    private long videoBytes, upgradeCutoff;
+    private volatile boolean upgraded;
     private final WriteDeadline deadline;
     public interface SideChannel { void send(byte[] record) throws IOException; }
     private volatile SideChannel sideChannel;
@@ -34,6 +44,7 @@ public final class BluetoothWire {
         // Coalesce the envelope
         // header and payload rather than sending five tiny header packets.
         out = new DataOutputStream(new BufferedOutputStream(stream, MAX_CHUNK + 5));
+        classic = out;
         out.write(MAGIC); out.flush();
     }
     public boolean writeStalled(long peerAge) { return peerAge > 5000 && deadline.expired(5000); }
@@ -48,15 +59,84 @@ public final class BluetoothWire {
         channel.send(buffer.toByteArray());
     }
     public void video(byte[] bytes) throws IOException {
-        for (int offset = 0; offset < bytes.length; offset += videoChunk) {
-            int length = Math.min(videoChunk, bytes.length - offset);
+        for (int offset = 0; offset < bytes.length;) {
+            // A handoff commits before the receiver confirms the larger window;
+            // fallback can also shrink it while this writer is waiting on ACKs.
+            // Every reservation must fit either transport's capacity.
+            int length = Math.min(upgraded ? Math.min(MAX_CHUNK, VIDEO_WINDOW_BYTES) : videoChunk, bytes.length - offset);
             if (videoWindow != null) videoWindow.reserve(length);
             synchronized (this) {
                 deadline.begin();
-                try { out.writeByte(VIDEO); out.writeInt(length); out.write(bytes, offset, length); out.flush(); }
-                finally { deadline.end(); }
+                try {
+                    pruneReplay();
+                    replay.add(new Chunk(videoBytes, java.util.Arrays.copyOfRange(bytes, offset, offset + length)));
+                    videoBytes += length;
+                    try { writeVideo(out, bytes, offset, length); }
+                    catch (IOException failed) {
+                        if (!upgraded) throw failed;
+                        // The authenticated BLE request supplies the exact received
+                        // offset. Wait without holding this monitor so it can replay.
+                        long until=System.nanoTime()+8_000_000_000L;
+                        while (upgraded) {
+                            long remaining=until-System.nanoTime();
+                            if (remaining<=0) throw new IOException("BLE video fallback timed out",failed);
+                            try { wait(Math.max(1,remaining/1_000_000)); }
+                            catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); throw new IOException(interrupted); }
+                        }
+                    }
+                } finally { deadline.end(); }
+            }
+            offset += length;
+        }
+    }
+    private void writeVideo(DataOutputStream target, byte[] bytes, int offset, int length) throws IOException {
+        target.writeByte(VIDEO); target.writeInt(length); target.write(bytes,offset,length); target.flush();
+    }
+    private void pruneReplay() {
+        long ack=videoWindow==null ? 0 : videoWindow.acknowledgedBytes();
+        while (!replay.isEmpty() && replay.peek().offset+replay.peek().bytes.length<=ack) replay.remove();
+    }
+    /** Resume precisely after the last payload byte accepted by the Mac. */
+    public synchronized boolean fallback(long received) throws IOException {
+        if (!upgraded) return false;
+        // Classic bytes committed before the handoff always precede replay on
+        // the same ordered L2CAP channel, including failed receiver confirmation.
+        received=Math.max(received,upgradeCutoff);
+        long first=replay.isEmpty() ? videoBytes : replay.peek().offset;
+        if (received<first || received>videoBytes) throw new IOException("Invalid Bluetooth resume offset");
+        out=classic;
+        for (Chunk chunk : replay) {
+            int start=(int)Math.max(0,received-chunk.offset);
+            for (int offset=start;offset<chunk.bytes.length;) {
+                int length=Math.min(videoChunk,chunk.bytes.length-offset);
+                writeVideo(classic,chunk.bytes,offset,length); offset+=length;
             }
         }
+        if (videoWindow!=null) videoWindow.useBluetoothCapacity();
+        upgraded=false; pruneReplay(); notifyAll();
+        return true;
+    }
+    /** Sparse transport heartbeat; never enters scrcpy's video decoder. */
+    public synchronized void wirelessHeartbeat() throws IOException {
+        if (!upgraded) return;
+        out.writeByte(EVENT); out.writeInt(1); out.writeByte(ALIVE); out.flush();
+    }
+    public boolean isWireless() { return upgraded; }
+    // Commit only between complete envelope records. The decoder sees the same byte stream.
+    public synchronized boolean upgrade(OutputStream stream, byte[] key, byte[] nonce, byte[] profile) throws IOException {
+        if (upgraded) return false;
+        DataOutputStream next = new DataOutputStream(stream);
+        byte[] offset = java.nio.ByteBuffer.allocate(8).putLong(videoBytes).array();
+        next.write(offset);
+        byte[] authenticated = java.nio.ByteBuffer.allocate(profile.length + 8).put(profile).put(offset).array();
+        next.write(WirelessUpgradeAuth.proof(key, "server", nonce, authenticated));
+        next.write(MAGIC); next.flush();
+        upgradeCutoff=videoBytes; out = next; upgraded = true;
+        return true;
+    }
+    public void enableWirelessThroughput() {
+        if (!upgraded) throw new IllegalStateException("Wireless video is not connected");
+        if (videoWindow != null) videoWindow.useWirelessCapacity();
     }
     public void control(byte[] bytes, int length) throws IOException {
         if (length <= 0 || length > MAX_CHUNK) throw new IOException("Invalid control reply size");

@@ -22,6 +22,9 @@ struct sc_texture {
     bool mipmaps;
 
     struct sc_interop *interop;
+#ifdef __APPLE__
+    struct sc_video_filter *filter;
+#endif
 };
 
 bool

@@ -16,10 +16,10 @@ struct SettingsView: View {
                     }.disabled(model.isMirroring || model.isStarting)
                     HStack {
                         SecureField("BLE pairing code from Android", text: $model.bluetoothPairingCode)
-                        Button("Pair BLE") { model.pairBluetooth() }
+                        Button("Pair Mac") { model.pairBluetooth() }
                             .disabled(model.selectedDevice == nil || model.bluetoothPairingCode.isEmpty)
                     }.disabled(model.isMirroring || model.isStarting)
-                    Text("Once per phone: open Show BLE pairing code in the Android companion and paste the code here. Classic carries video; BLE carries all other communication.")
+                    Text("Once per phone: open Pair Mac (mirroring and notifications) in DroidMirror on Android and paste its code here. This pairs mirroring, notification forwarding and ADB discovery together. Allow notification forwarding on Android once.")
                         .font(.caption).foregroundStyle(.secondary)
                     HStack {
                         Button("Refresh") { model.refreshDevices() }.disabled(model.isStarting || model.isMirroring)
@@ -36,7 +36,7 @@ struct SettingsView: View {
                     Text("Experimental direct connection. Mirroring is unavailable in this build.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
-                Text("Bluetooth uses the Android companion at 480p, up to 16 fps, and 256 kbps target H.264. Authorize Shizuku and enable Mac connections once on Android; future streams start from the Mac. Mouse, keyboard and navigation use Bluetooth. Audio requires ADB. For screen-off, enable Shizuku recovery in the Android companion.")
+                Text("Bluetooth starts at 480p, up to 16 fps, and 256 kbps HEVC, then upgrades to the picture settings below when paired wireless ADB becomes available. Enable Wireless debugging and pair this Mac once. Mouse, keyboard and navigation stay on Bluetooth. Audio requires a direct ADB session. Authorize Shizuku and enable the background bridge once in the Android companion.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section("iPhone-like behavior") {
@@ -46,9 +46,13 @@ struct SettingsView: View {
                 Toggle("Forward audio when no media is already playing", isOn: $model.preferences.forwardAudio)
             }
             .disabled(model.preferences.transport != .adb)
-            Section("Picture (ADB)") {
-                Picker("Codec", selection: $model.preferences.codec) {
-                    ForEach(VideoCodec.allCases) { Text($0.label).tag($0) }
+            Section("Picture (Wi-Fi / ADB)") {
+                if model.preferences.transport == .bluetoothClassic {
+                    LabeledContent("Codec", value: "HEVC (H.265)")
+                } else {
+                    Picker("Codec", selection: $model.preferences.codec) {
+                        ForEach(VideoCodec.allCases) { Text($0.label).tag($0) }
+                    }
                 }
                 Picker("Frame rate", selection: $model.preferences.maxFPS) {
                     Text("30 fps").tag(30); Text("60 fps").tag(60); Text("90 fps").tag(90)
@@ -57,8 +61,12 @@ struct SettingsView: View {
                     Text("1280 px").tag(1280); Text("1920 px").tag(1920); Text("Native").tag(0)
                 }
                 Stepper("Bit rate: \(model.preferences.bitRateMbps) Mbps", value: $model.preferences.bitRateMbps, in: 4...32, step: 2)
+                if model.preferences.transport == .bluetoothClassic {
+                    Text("These targets apply after the Wi-Fi handoff on your next session. Hybrid sessions keep regular HEVC throughout; input stays on BLE. Direct ADB sessions use their own selected codec and ADB input.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
             }
-            .disabled(model.preferences.transport != .adb)
+            .disabled(model.preferences.transport == .wifiAware)
             Section("Input") {
                 Picker("Scrolling", selection: $model.preferences.scrollMode) {
                     ForEach(ScrollMode.allCases) { Text($0.label).tag($0) }

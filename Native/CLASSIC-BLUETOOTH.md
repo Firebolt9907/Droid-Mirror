@@ -27,7 +27,7 @@ the phone's full display size when alignment needs correction (1080×2400 on Pix
 
 ## Install and set up once
 
-The compiled Android test APK is `outputs/DroidMirror-Bluetooth-0.9-debug.apk`,
+The compiled Android test APK is `outputs/DroidMirror-Bluetooth-0.10-debug.apk`,
 with a SHA-256 checksum beside it. It uses the same signing certificate as 0.1/0.2/0.3/0.4
 and can be installed over them. It is a debug build, not a store release.
 
@@ -35,7 +35,7 @@ and can be installed over them. It is a debug build, not a store release.
 2. Install/start Shizuku 13 or newer. Its startup may require wireless debugging
    or root. Grant Shizuku access in **DroidMirror Bluetooth**.
 3. Grant Nearby Devices and notification access. Select the paired Mac, choose
-   whether to turn the phone panel off, and tap **Enable Mac connections** once.
+   whether to turn the phone panel off, and tap **Enable background bridge** once.
    Only that bonded Mac is accepted. The ongoing notification shows readiness.
 4. Pull/rebuild the Mac app as below. Allow its Bluetooth and notifications
    permissions, select the phone and press **Mirror**. Close the mirror to stop.
@@ -44,7 +44,7 @@ and can be installed over them. It is a debug build, not a store release.
 Configuration and selected peer are saved on Android. The listener is a
 `connectedDevice` foreground service with `START_STICKY` and a boot receiver;
 it does not use the `mediaProjection` foreground-service type. Closing the phone
-setup activity does not end readiness or capture. **Disable Mac connections**
+setup activity does not end readiness or capture. **Stop background bridge**
 turns off background readiness. Shizuku permissions/startup have no fixed weekly
 schedule: reboots, revocation and Shizuku itself determine when attention is
 needed. Android force-stop prevents automatic restart until an explicit launch;
@@ -57,7 +57,7 @@ so unlocking/input from Mac still requires the existing ADB mode.
 
 ## Silent Tasker restart (Android 0.4)
 
-Complete phone setup once and leave **Enable Mac connections** enabled. Create a
+Complete phone setup once and leave **Enable background bridge** enabled. Create a
 Tasker **Bluetooth Connected** profile for your Mac with a **Send Intent** entry task:
 
 | Field | Value |
@@ -171,7 +171,7 @@ brew install meson ninja pkg-config sdl3 ffmpeg libusb
 open outputs/DroidMirror.app
 ```
 
-Build and install both matching 0.9 endpoints. Open **Show BLE pairing code** on
+Build and install both matching 0.10 endpoints. Open **Show BLE pairing code** on
 Android, then paste that private code into **Settings → Connection → Pair BLE**
 on the selected Mac once. Older endpoints cannot use the video-only protocol. The parser retains legacy
 fixtures for protocol tests; the current app requires the matching transport.
@@ -180,17 +180,26 @@ notification helper's Keychain identity; the build script signs ad-hoc.
 
 ## Video and control events
 
-The Bluetooth profile starts with H.264 at a 256,000 bit/s target, up to 16 fps and about a
-480-pixel short edge, aligned down to 16 pixels while preserving aspect ratio.
-The encoder uses constant bitrate without hard quantization limits, no B-frames,
-and gradual intra refresh when supported. Repeated idle frames refine settled text
+The hybrid Bluetooth profile requires regular HEVC (H.265 Main, 8-bit), starting at
+256,000 bit/s and probing up to a 1,500,000 bit/s ceiling, up to 16 fps and about a
+480-pixel short-edge limit. It chooses an exact-ratio size compatible with the
+encoder alignment instead of rounding width and height separately (468×1040
+on the Pixel 8).
+The encoder requests constant bitrate where advertised (otherwise VBR), without
+hard quantization limits or B-frames, and gradual intra refresh only when advertised.
+The bitrate is a target: the Pixel 8 driver reports VBR despite its CBR capability.
+Companion 0.15 and the matching Mac build are required; HEVC is retained after the
+Wi-Fi handoff, while input stays on BLE. Direct ADB mode retains its own codec
+selection and ADB input. See [HEVC handoff validation](WIRELESS-HANDOFF.md). Repeated idle frames refine settled text
 without forcing large periodic keyframes. The actual frame rate may be lower
 on a constrained link. Automatic downsizing on encoder errors is
 disabled so recovery cannot lower the configured resolution. The
 radio negotiates Classic/EDR itself; the app cannot force an EDR PHY rate.
 
-Direct Classic BR/EDR L2CAP uses fixed private PSM `0x1001`. The Mac opens it
-without SDP discovery. `ClassicL2capService` owns Android's authenticated,
+Direct Classic BR/EDR L2CAP uses fixed private PSM `0xD001`. The Mac opens it
+without SDP discovery. Both apps must use this PSM; the old `0x1001` can already
+belong to Android system Bluetooth and route sessions away from DroidMirror.
+`ClassicL2capService` owns Android's authenticated,
 encrypted socket through the hidden `BluetoothAdapter.listenUsingL2capOn(int)`
 API, invoked in the Shizuku shell process. The public `listenUsingL2capChannel()`
 API is LE-only and is not used. Only the selected bonded Mac is accepted.
@@ -247,12 +256,29 @@ Mac-to-phone plaintext records are type 0 (raw scrcpy control) or type 1 (eight-
 cumulative video count; legacy empty heartbeat also recognized). Return records
 are type 1 (one-byte PHONE_ON=1, SESSION_ENDED=2, PHONE_LOCAL_USE=3, STREAM_STARTED=4,
 CAPTURE_FAILED=5, ALIVE=6) or type 2 (scrcpy control replies), with four-byte lengths.
-The Mac keeps video and control on separate local sockets. Heartbeats/ACKs run at
-250 ms with a 24 KiB video window. Unsent cumulative ACKs coalesce to the newest
+The Mac keeps video and control on separate local sockets. During active Classic
+video, cumulative ACKs run at 40 ms (on the 20 ms bridge timer). The video window
+starts at 8 KiB and adapts up to 64 KiB using delivered payload bytes and observed
+ACK spacing. Every 500 ms of active delivery, it budgets 150 ms of payload plus
+ACK feedback headroom and a 25% margin. Upward estimates are smoothed and window
+growth is capped at 8 KiB per sample; reduced throughput contracts the window
+without smoothing the drop. Idle heartbeats do not count as bandwidth samples,
+and Wi-Fi fallback resets the estimate. This permits higher bitrate without a
+fixed small window starving the radio. It measures delivered traffic, not unused
+link capacity; encoder probes supply the additional traffic to discover headroom.
+Idle heartbeats and Wi-Fi ACKs remain at 250 ms. Use matching Mac and companion
+builds. The preview APK is `outputs/DroidMirror-Bluetooth-low-latency-debug.apk`;
+use it with `outputs/DroidMirror.app`. The portable regression suite
+(`bash Native/test-wireless-upgrade.sh`) checks delivery estimates, bandwidth
+probing, ACK timing, window backpressure and handoff/fallback accounting. Actual
+radio throughput and end-to-end latency still require a connected phone test.
+Unsent cumulative ACKs coalesce to the newest
 count under CoreBluetooth backpressure. The newest ACK is prioritized between
 complete input envelopes, so sustained mouse traffic cannot keep it behind the
 whole input backlog. Sustained mouse MOVE/hover positions are limited to 60 Hz, keeping the newest unsent
-position for the same pointer and button state. Clicks, releases, keys, scrolling
+position in each 16.7 ms source-time bucket for the same pointer and button state.
+Earlier buckets remain queued during radio backpressure, preserving the motion
+history Android needs for fling velocity; only samples within a bucket coalesce. Clicks, releases, keys, scrolling
 and pointer/state changes are ordering barriers; a final position flushes before
 a barrier. Other input retains its exact order. Complete scrcpy messages are
 reassembled across arbitrary TCP fragments before applying this policy. Ready
@@ -284,8 +310,11 @@ required. Invalid future or over-ten-second-old timestamps are rejected.
 
 macOS 26's legacy IOBluetooth opening shim loses its pending channel on this
 machine. The helper uses runtime-checked Classic-peer completion selectors to
-retain the actual CBL2CAPChannel and wrap it for the existing stream delegate;
-older implementations retain the public IOBluetooth path. This is an experimental
+retain the actual CBL2CAPChannel, opens its native input/output streams, and feeds
+the existing video parser directly. Re-wrapping the returned channel in
+IOBluetoothL2CAPChannel caused acceptance timeouts or a closed Android pipe on
+macOS 27; that adapter is removed. The reverse stream stays open without writing
+application payload. Older implementations retain the public IOBluetooth path. This is an experimental
 compatibility dependency, alongside Android's hidden Classic listener API.
 
 The loopback listener accepts one client and is not authenticated local IPC; a
@@ -296,8 +325,8 @@ blocked for five seconds when peer heartbeats have also expired. Live peer input
 keeps ordinary radio backpressure from being mistaken for a dead connection.
 The Mac bounds pending video to 128 KiB with a one-second
 pending deadline. The encoder discards frames more than two seconds old only with keyframe recovery,
-reducing bitrate when the stream falls behind. After ten seconds of continuous
-healthy output, bitrate grows by 25% toward the configured target; idle gaps do
+reducing bitrate when the stream falls behind. After two seconds of continuous
+healthy Bluetooth output, bitrate grows by 25% toward the 1.5 Mbps ceiling; idle gaps do
 not count as healthy throughput. `DroidMirrorPerformance` logs relay FPS, encoded
 kbps and time spent sending every five seconds, without saving video.
 This is a recovery threshold, not
@@ -390,14 +419,21 @@ sleeping/locked startup before relying on unattended mirroring.
 
 ## Adaptive quality
 
-Capture dimensions stay fixed. When an encoded frame is more than 400 ms old,
-MediaCodec bitrate decreases by 25%, at most once a second, with a floor of half
-the configured target (128 kbps for this profile). Ten seconds of continuous
-healthy output raises it by 25% toward the target. Idle gaps do not count as healthy
-throughput. Frames older than two seconds trigger safe keyframe recovery instead
-of forwarding a stale inter-frame chain. Repeated recovery also respects the
-quality floor. These bounds prevent the earlier repeated collapse to 32 kbps;
-they cannot guarantee latency when available live throughput is below the floor.
+Capture dimensions stay fixed. Bluetooth starts at 256 kbps, then raises the
+encoder bitrate by 25% after each two seconds of continuous current output, up
+to a 1.5 Mbps ceiling. The previous 256 kbps ceiling left faster links unused.
+This is an operating ceiling, not a claim about measured radio capacity. When
+an encoded frame is more than 400 ms old, bitrate decreases by 25%, at most once
+a second, with a 128 kbps floor independent of the higher probing ceiling.
+Frames older than two seconds trigger safe keyframe recovery and halve bitrate
+without crossing that floor. Idle gaps do not count as healthy throughput.
+After congestion clears, upward probing resumes. Wi-Fi retains its explicit
+profile, and ordinary ADB encoding does not enable this controller.
+
+The relay logs `window`, `inFlight`, `deliveredKbps`, `ackWaitMs` and encoded kbps
+so a physical test can distinguish an ACK-limited sender from an overloaded
+encoder. These are control policies, not end-to-end latency guarantees: transport
+and decoding add delay, and links below the quality floor may still fall behind.
 
 ## Encoder-independent Classic throughput test
 
@@ -413,7 +449,7 @@ This explicitly starts a shell-only generated-data listener on separate PSM
 a persistent pipe with a 4 KiB relay buffer. There is no encoder, decoder, BLE
 application window or per-packet Binder call. The diagnostic payload is a checked
 byte sequence, never screen content. It is available only via the explicit shell
-benchmark entry point; ordinary mirrors still require video-only records on `0x1001`.
+benchmark entry point; ordinary mirrors still require video-only records on `0xD001`.
 The Mac checks the full sequence, reports actual received bytes/rate, and the script
 rejects a result unless sender and receiver byte totals agree. An interrupted
 connection is an invalid sample. The receiver duration spans first to last data,

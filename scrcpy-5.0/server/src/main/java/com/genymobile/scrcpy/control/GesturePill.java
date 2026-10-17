@@ -2,7 +2,7 @@ package com.genymobile.scrcpy.control;
 
 /** Click policy in physical display pixels, independent of Android for regression tests. */
 final class GesturePill {
-    static final long CLICK_MS = 350;
+    static final long CLICK_MS = 180;
     static final long MAX_HOLD_MS = 250;
 
     private GesturePill() { }

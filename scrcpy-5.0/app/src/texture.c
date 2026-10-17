@@ -6,6 +6,9 @@
 #include <libavutil/pixdesc.h>
 
 #include "util/log.h"
+#ifdef __APPLE__
+#include "video_filter.h"
+#endif
 
 bool
 sc_texture_init(struct sc_texture *tex, SDL_Renderer *renderer, bool mipmaps,
@@ -53,17 +56,38 @@ sc_texture_init(struct sc_texture *tex, SDL_Renderer *renderer, bool mipmaps,
 
     LOGI("Interop: %s", tex->interop->name);
 
+#ifdef __APPLE__
+    tex->filter = sc_video_filter_new();
+    SDL_Window *window = SDL_GetRenderWindow(renderer);
+    if (window) {
+        SDL_PropertiesID properties = SDL_GetWindowProperties(window);
+        bool supported = sc_video_filter_supports_spatial(renderer);
+        SDL_SetBooleanProperty(properties, SC_SPATIAL_SUPPORTED_PROP, supported);
+        // Default on for each window, preserving a live toggle across texture resets.
+        if (!SDL_HasProperty(properties, SC_SPATIAL_FILTER_PROP)) {
+            SDL_SetBooleanProperty(properties, SC_SPATIAL_FILTER_PROP, supported);
+        }
+    }
+#endif
+
     return true;
 }
 
 void
 sc_texture_destroy(struct sc_texture *tex) {
+#ifdef __APPLE__
+    sc_video_filter_delete(tex->filter);
+#endif
     sc_interop_delete(tex->interop);
 }
 
 SDL_Texture *
 sc_texture_get(struct sc_texture *tex) {
     assert(tex->interop);
+#ifdef __APPLE__
+    SDL_Texture *filtered = sc_video_filter_get(tex->filter, tex->renderer);
+    if (filtered) return filtered;
+#endif
     return tex->interop->texture;
 }
 
@@ -127,11 +151,18 @@ sc_texture_update(struct sc_texture *tex, const AVFrame *frame) {
     }
 
     assert(interop->ops && interop->ops->import);
-    return interop->ops->import(interop, frame);
+    bool ok = interop->ops->import(interop, frame);
+#ifdef __APPLE__
+    if (ok) sc_video_filter_set_frame(tex->filter, frame);
+#endif
+    return ok;
 }
 
 void
 sc_texture_reset(struct sc_texture *tex) {
+#ifdef __APPLE__
+    sc_video_filter_set_frame(tex->filter, NULL);
+#endif
     struct sc_interop *interop = tex->interop;
     if (interop) {
         assert(interop->ops && interop->ops->reset);

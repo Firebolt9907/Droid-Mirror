@@ -37,6 +37,15 @@ enum ToolLocator {
     }
 }
 
+enum ToolProcessEnvironment {
+    static func clean(_ inherited: [String: String] = ProcessInfo.processInfo.environment) -> [String: String] {
+        var environment = inherited
+        environment.removeValue(forKey: "DYLD_INSERT_LIBRARIES")
+        environment.removeValue(forKey: "DROIDMIRROR_HOST_PID")
+        return environment
+    }
+}
+
 enum ProcessRunner {
     private final class CompletionGate: @unchecked Sendable {
         private let lock = NSLock()
@@ -75,6 +84,7 @@ enum ProcessRunner {
                 continuation.resume(throwing: RunnerError.failed("Could not create command output file"))
                 return
             }
+            process.environment = ToolProcessEnvironment.clean()
             process.executableURL = URL(fileURLWithPath: executable)
             process.arguments = arguments
             let inputPipe = input == nil ? nil : Pipe()

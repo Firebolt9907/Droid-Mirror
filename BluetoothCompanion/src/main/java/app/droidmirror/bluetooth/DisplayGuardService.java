@@ -87,6 +87,23 @@ public final class DisplayGuardService extends IDisplayGuard.Stub {
         return session.heartbeat(token);
     }
     private void closeCapture() { if (capture != null) capture.close(); }
+    @Override public synchronized boolean upgradeVideo(IBinder token, int maxSize, int fps, int bitRate) {
+        if (token == null || owner != token || !session.owns(token) || capture == null) return false;
+        try {
+            capture.upgradeVideo(new WirelessVideoProfile(maxSize, fps, bitRate));
+            return true;
+        } catch (Exception invalid) {
+            android.util.Log.w("DroidMirrorCapture", "Wi-Fi quality request failed", invalid);
+            return false;
+        }
+    }
+    @Override public synchronized boolean restoreBluetoothVideo(IBinder token) {
+        if (token==null || owner!=token || !session.owns(token) || capture==null) return false;
+        try { capture.restoreBluetoothVideo(); return true; }
+        catch (RuntimeException failed) {
+            android.util.Log.w("DroidMirrorCapture","Bluetooth quality restore failed",failed); return false;
+        }
+    }
     @Override public synchronized boolean heartbeat(IBinder token) {
         boolean alive = session.heartbeat(token);
         if (alive && lease.owns(token)) lease.heartbeat(token);
@@ -105,6 +122,20 @@ public final class DisplayGuardService extends IDisplayGuard.Stub {
     @Override public synchronized boolean restoreDisplay() {
         session.finish(owner, RemoteSession.RECOVERY);
         closeCapture(); boolean restored = lease.recover(); unlinkOwner(); return restored;
+    }
+    @Override public boolean grantSecureSettings() {
+        // Fixed package and permission: this is not an arbitrary privileged command API.
+        int user = android.os.Binder.getCallingUid() / 100000;
+        Process command = null;
+        try {
+            command = new ProcessBuilder("/system/bin/cmd", "package", "grant", "--user", Integer.toString(user),
+                "app.droidmirror.bluetooth", "android.permission.WRITE_SECURE_SETTINGS")
+                .redirectErrorStream(true).redirectOutput(new java.io.File("/dev/null")).start();
+            if (!command.waitFor(5, TimeUnit.SECONDS)) { command.destroyForcibly(); return false; }
+            return command.exitValue() == 0;
+        } catch (java.io.IOException failure) { return false; }
+        catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); return false; }
+        finally { if (command != null) command.destroy(); }
     }
     @Override public synchronized String getLastError() { return captureError.isEmpty() ? lease.getLastError() : captureError; }
     private boolean ended(Object token, int cause) {

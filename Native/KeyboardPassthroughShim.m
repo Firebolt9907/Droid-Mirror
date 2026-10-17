@@ -383,6 +383,10 @@ static void DMObserveScrcpyTermination(void) {
         DMEnsureMirrorQuitMenu(NSApp, DMMirrorQuit);
         [NSTimer scheduledTimerWithTimeInterval:0.5 repeats:YES block:^(__unused NSTimer *timer) {
             DMEnsureMirrorQuitMenu(NSApp, DMMirrorQuit);
+            // SDL may rebuild the main menu; keep the live video toggle reachable.
+            if ([DMSecureController respondsToSelector:NSSelectorFromString(@"ensureVideoMenu")]) {
+                ((void (*)(id, SEL))objc_msgSend)(DMSecureController, NSSelectorFromString(@"ensureVideoMenu"));
+            }
         }];
         [[NSNotificationCenter defaultCenter]
             addObserverForName:NSApplicationWillTerminateNotification

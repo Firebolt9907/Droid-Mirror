@@ -64,6 +64,7 @@ sc_controller_init(struct sc_controller *controller, sc_socket control_socket,
     controller->stopped = false;
     const char *transport = getenv("DROIDMIRROR_TRANSPORT");
     controller->timed_touch = transport && !strcmp(transport, "bluetooth-classic");
+    if (controller->timed_touch) LOGI("Bluetooth touch source timestamps enabled");
 
     controller->resize_display.width = 0;
     controller->resize_display.height = 0;

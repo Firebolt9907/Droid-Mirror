@@ -8,6 +8,8 @@
 #include "android/input.h"
 #include "android/keycodes.h"
 #include "events.h"
+#include "wheel_protocol.h"
+#include <math.h>
 #include "input_events.h"
 #include "screen.h"
 #include "shortcut_mod.h"
@@ -1042,6 +1044,18 @@ static void
 sc_input_manager_process_mouse_wheel(struct sc_input_manager *im,
                                      const SDL_MouseWheelEvent *event) {
     if (im->camera || !im->kp || im->screen->paused || im->disconnected) {
+        return;
+    }
+
+    if (event->which == SC_DROIDMIRROR_WHEEL_MOUSE_ID && im->controller) {
+        // Only tagged discrete wheels use phone-side playback. Trackpads never
+        // receive this tag, so their normal touch/scroll path stays untouched.
+        if (im->mouse_buttons_state || !isfinite(event->x) || !isfinite(event->y)) return;
+        struct sc_position anchor = sc_input_manager_get_position(im,event->mouse_x,event->mouse_y);
+        struct sc_position target = sc_input_manager_get_position(im,event->mouse_x + event->x*24,event->mouse_y + event->y*24);
+        struct sc_control_msg msg = {.type=SC_CONTROL_MSG_TYPE_WHEEL_SCROLL,
+            .wheel_scroll={.position=anchor,.dx=target.point.x-anchor.point.x,.dy=target.point.y-anchor.point.y}};
+        if (msg.wheel_scroll.dx || msg.wheel_scroll.dy) sc_controller_push_msg(im->controller,&msg);
         return;
     }
 

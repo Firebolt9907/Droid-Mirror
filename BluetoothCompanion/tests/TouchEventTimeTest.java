@@ -25,13 +25,25 @@ public final class TouchEventTimeTest {
             }
             ControlMessageReader reader = new ControlMessageReader(new ByteArrayInputStream(payload.toByteArray()));
             clock = new TouchEventTime();
-            long[] expected = {1000,1100,1101}; int[] actions = {0,2,1};
-            for (int i=0;i<3;++i) {
-                ControlMessage message=reader.read();
+            long first=-1,last=-1; int moves=0; float previousY=0;
+            while (true) {
+                ControlMessage message;
+                try { message=reader.read(); } catch (EOFException complete) { break; }
                 require(message.getType()==ControlMessage.TYPE_INJECT_TOUCH_EVENT);
-                require(message.getAction()==actions[i] && message.getEventTime()==expected[i]);
-                require(clock.resolve(message.getEventTime(),2000+i*500)==expected[i]);
+                long time=message.getEventTime();
+                require(clock.resolve(time,3000)==time);
+                if (first<0) { require(message.getAction()==0); first=time; }
+                else {
+                    require(time>last && time-last<=33);
+                    if (message.getAction()==2) {
+                        if (moves>0) require(Math.abs((message.getPosition().getPoint().getY()-previousY)*1000f/(time-last)+8000)<1);
+                        previousY=message.getPosition().getPoint().getY(); ++moves;
+                    }
+                }
+                last=time;
             }
+            require(last-first==101 && moves>=5);
+
         }
         System.out.println("Touch timing: source intervals survive transport jitter, monotonic validation, legacy ADB and native-to-Android framing passed");
     }

@@ -1,5 +1,6 @@
 package app.droidmirror.bluetooth;
 
+import app.droidmirror.bluetooth.bridge.BridgeRuntime;
 import android.Manifest;
 import android.app.*;
 import android.bluetooth.*;
@@ -15,6 +16,8 @@ import java.util.concurrent.atomic.*;
 /** Persistent, paired-Mac listener. Capture begins when the Mac connects, never from a phone share prompt. */
 public final class CaptureService extends Service {
     private volatile boolean shutdown;
+    private volatile BridgeRuntime bridge;
+    private volatile String captureStatus = "Select a paired Mac to enable mirroring";
     private volatile ClassicL2capClient listener;
     private volatile String listenerPeer;
     private volatile ParcelFileDescriptor socket;
@@ -26,12 +29,13 @@ public final class CaptureService extends Service {
         volatile ParcelFileDescriptor inputPipe;
         volatile ParcelFileDescriptor controlPipe;
         volatile BluetoothWire wire;
+        volatile WirelessVideoUpgrade wirelessUpgrade;
         volatile BleInputServer ble;
         volatile ShizukuDisplayClient guard;
         volatile boolean stopped;
         volatile boolean hasGuard;
         volatile long lastPeerSeen;
-        final VideoWindow videoWindow = new VideoWindow(BluetoothWire.VIDEO_WINDOW_BYTES, 5000);
+        final VideoWindow videoWindow = VideoWindow.bluetooth(5000);
         final AtomicInteger endEvent = new AtomicInteger();
         final AtomicBoolean streamStarted = new AtomicBoolean();
         final AtomicBoolean auditPosted = new AtomicBoolean();
@@ -57,15 +61,16 @@ public final class CaptureService extends Service {
     private ScheduledExecutorService watchdog;
     private final Object notificationLock = new Object();
 
-    enum ReadyResult { START_REQUESTED, NOT_CONFIGURED, PERMISSION_REQUIRED, BACKGROUND_RESTRICTED, FAILED }
+    public enum ReadyResult { START_REQUESTED, NOT_CONFIGURED, PERMISSION_REQUIRED, BACKGROUND_RESTRICTED, FAILED }
 
-    static ReadyResult enableIfConfigured(Context context) {
+    public static ReadyResult enableIfConfigured(Context context) {
         android.content.SharedPreferences settings = context.getSharedPreferences("ready", MODE_PRIVATE);
-        if (!settings.getBoolean("enabled", false) || settings.getString("peer", "").isEmpty()) return ReadyResult.NOT_CONFIGURED;
+        if (!BackgroundBridgePreferences.enabled(context)) return ReadyResult.NOT_CONFIGURED;
         if (Build.VERSION.SDK_INT >= 31 && (context.checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED
                 || context.checkSelfPermission(Manifest.permission.BLUETOOTH_ADVERTISE) != PackageManager.PERMISSION_GRANTED)) return ReadyResult.PERMISSION_REQUIRED;
         try {
-            byte[] pairing = BlePairing.key(context, settings.getString("peer", ""));
+            byte[] pairing = settings.getString("peer", "").isEmpty() ? new byte[0]
+                : BlePairing.key(context, settings.getString("peer", ""));
             java.util.Arrays.fill(pairing, (byte)0);
         } catch (IOException error) {
             android.util.Log.w("DroidMirrorReady", "Could not initialize BLE pairing", error);
@@ -90,14 +95,20 @@ public final class CaptureService extends Service {
         if (state != null && state.streamStarted.get() && !state.stopped)
             return StreamNotifications.streaming(this, state.token, state.peerName, state.startedElapsed, state.promotionDismissed);
         PendingIntent open = PendingIntent.getActivity(this, 0, new Intent(this, CaptureActivity.class), PendingIntent.FLAG_IMMUTABLE);
+        BridgeRuntime runtime = bridge;
         return new Notification.Builder(this, "capture").setSmallIcon(android.R.drawable.ic_menu_camera)
-            .setContentTitle("DroidMirror Bluetooth").setContentText(text).setContentIntent(open)
+            .setContentTitle("DroidMirror background bridge")
+            .setContentText(text + (runtime == null ? "" : " · " + runtime.getStatus())).setContentIntent(open)
             .setOngoing(true).setOnlyAlertOnce(true).build();
     }
     private void status(String text) {
         android.util.Log.i("DroidMirrorStatus", text);
+        captureStatus = text;
+        refreshNotification();
+    }
+    private void refreshNotification() {
         synchronized (notificationLock) {
-            if (!shutdown) getSystemService(NotificationManager.class).notify(1, notification(text));
+            if (!shutdown) getSystemService(NotificationManager.class).notify(1, notification(captureStatus));
         }
     }
     @Override public int onStartCommand(Intent intent, int flags, int id) {
@@ -105,19 +116,30 @@ public final class CaptureService extends Service {
                 || StreamNotifications.DISMISSED.equals(intent.getAction()))) {
             notificationAction(intent);
             // A stale PendingIntent must not start readiness after a process death.
-            if (server == null) { stopSelfResult(id); return START_NOT_STICKY; }
+            if (bridge == null && server == null) { stopSelfResult(id); return START_NOT_STICKY; }
             return START_STICKY;
         }
-        if (!getSharedPreferences("ready", MODE_PRIVATE).getBoolean("enabled", false)) { stopSelf(); return START_NOT_STICKY; }
-        if (Build.VERSION.SDK_INT >= 31 && checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
+        if (!BackgroundBridgePreferences.enabled(this)) { stopSelf(); return START_NOT_STICKY; }
+        if (Build.VERSION.SDK_INT >= 31 && (checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED
+                || checkSelfPermission(Manifest.permission.BLUETOOTH_ADVERTISE) != PackageManager.PERMISSION_GRANTED)) {
             stopSelf(); return START_NOT_STICKY;
         }
         NotificationManager notifications = getSystemService(NotificationManager.class);
-        notifications.createNotificationChannel(new NotificationChannel("capture", "Bluetooth readiness", NotificationManager.IMPORTANCE_LOW));
+        notifications.createNotificationChannel(new NotificationChannel("capture", "DroidMirror background bridge", NotificationManager.IMPORTANCE_LOW));
         synchronized (notificationLock) {
-            if (Build.VERSION.SDK_INT >= 29) startForeground(1, notification("Ready for your paired Mac"), ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE);
-            else startForeground(1, notification("Ready for your paired Mac"));
+            if (Build.VERSION.SDK_INT >= 29) startForeground(1, notification(captureStatus), ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE);
+            else startForeground(1, notification(captureStatus));
         }
+        if (bridge == null) {
+            bridge = new BridgeRuntime(this, this::refreshNotification);
+            try { bridge.start(); }
+            catch (RuntimeException error) {
+                bridge.close(); bridge = null;
+                android.util.Log.w("DroidMirrorBluetooth", "Discovery could not start", error);
+            }
+        }
+        // Discovery and notification forwarding work before a capture Mac is selected.
+        if (getSharedPreferences("ready", MODE_PRIVATE).getString("peer", "").isEmpty()) return START_STICKY;
         if (server != null) {
             if (listener != null && !getSharedPreferences("ready", MODE_PRIVATE).getString("peer", "").equals(listenerPeer)) listener.close();
             return START_STICKY;
@@ -223,6 +245,16 @@ public final class CaptureService extends Service {
                 startControls(state,state.ble.input(),wire);
                 status("Waiting for authenticated BLE input");
                 if (!state.ble.awaitInput()) throw new IOException("BLE input connection timed out");
+                try {
+                    synchronized (CaptureService.this) {
+                        if (!state.stopped) state.wirelessUpgrade = new WirelessVideoUpgrade(state.wire, BlePairing.key(this, peer), profile -> {
+                            ShizukuDisplayClient guard = state.guard;
+                            if (state.stopped || guard == null) throw new IOException("Video session ended before quality upgrade");
+                            if (profile==null) guard.restoreBluetoothVideo(); else guard.upgradeVideo(profile);
+                        });
+                    }
+                }
+                catch (IOException unavailable) { android.util.Log.d("DroidMirrorBluetooth", "Wireless upgrade unavailable", unavailable); }
                 state.guard.startVideo(output, remoteControls);
             }
             ByteArrayOutputStream header = new ByteArrayOutputStream();
@@ -235,7 +267,8 @@ public final class CaptureService extends Service {
                     byte[] frameHeader = new byte[12]; input.readFully(frameHeader);
                     if ((frameHeader[0] & 0x80) != 0) { sendVideo(wire, frameHeader); continue; }
                     int size = ((frameHeader[8] & 255) << 24) | ((frameHeader[9] & 255) << 16) | ((frameHeader[10] & 255) << 8) | (frameHeader[11] & 255);
-                    if (size <= 0 || size > VideoWire.MAX_PACKET) throw new IOException("Invalid video frame size");
+                    int maxPacket = 8 * 1024 * 1024;
+                    if (size <= 0 || size > maxPacket) throw new IOException("Invalid video frame size");
                     byte[] frame = new byte[12 + size]; System.arraycopy(frameHeader, 0, frame, 0, 12); input.readFully(frame, 12, size);
                     long sendingStarted = SystemClock.elapsedRealtime();
                     sendVideo(wire, frame);
@@ -247,7 +280,8 @@ public final class CaptureService extends Service {
                         if (duration >= 5000) {
                             android.util.Log.i("DroidMirrorPerformance", "relay fps=" + (frames * 1000.0 / duration)
                                 + " kbps=" + (bytesSent * 8.0 / duration) + " sendBlockedMs=" + sendingMillis
-                                + " ackWaitMs=" + state.videoWindow.takeWaitMillis() + " inFlight=" + state.videoWindow.inFlightBytes());
+                                + " ackWaitMs=" + state.videoWindow.takeWaitMillis() + " inFlight=" + state.videoWindow.inFlightBytes()
+                                + " window=" + state.videoWindow.capacityBytes() + " deliveredKbps=" + state.videoWindow.deliveredBytesPerSecond() * 8 / 1000);
                             statsStarted = now; frames = bytesSent = sendingMillis = 0;
                         }
                         if (!state.streamStarted.get()) {
@@ -292,6 +326,11 @@ public final class CaptureService extends Service {
                         if (guard != null) guard.peerAlive();
                         // Never block incoming input/lease heartbeats behind video output.
                         state.heartbeatReply.set(true);
+                    } else if (type == 2 && count == 40) {
+                        byte[] nonce=new byte[32]; input.readFully(nonce);
+                        long received=input.readLong();
+                        WirelessVideoUpgrade upgrade=state.wirelessUpgrade;
+                        if (upgrade!=null) upgrade.fallback(nonce,received);
                     } else if (type == 0 && count > 0 && count <= bytes.length) {
                         input.readFully(bytes, 0, count);
                         state.lastPeerSeen = SystemClock.elapsedRealtime();
@@ -336,6 +375,7 @@ public final class CaptureService extends Service {
             boolean wasStreaming = state.streamStarted.get() && !state.stopped;
             state.stopped = true;
             state.videoWindow.close();
+            if (state.wirelessUpgrade != null) state.wirelessUpgrade.close();
             if (state.ble != null) state.ble.close();
             ShizukuDisplayClient active = state.guard; state.guard = null;
             if (active != null) active.close(); else if (!state.hasGuard && state.streamStarted.get()) auditEnd(state, false);
@@ -355,6 +395,7 @@ public final class CaptureService extends Service {
     }
     @Override public void onDestroy() {
         shutdown = true;
+        if (bridge != null) { bridge.close(); bridge = null; }
         stopSession();
         if (listener != null) listener.close();
         if (watchdog != null) watchdog.shutdownNow();

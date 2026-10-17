@@ -1,8 +1,15 @@
-plugins { id 'com.android.application' version '8.9.1' }
+plugins {
+    id 'com.android.application' version '8.9.1'
+    id 'org.jetbrains.kotlin.android' version '2.3.20'
+}
 android {
     namespace 'app.droidmirror.bluetooth'
     buildFeatures { aidl true }
     compileSdk 36
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
     sourceSets {
         main.java.srcDirs += '../scrcpy-5.0/server/src/main/java'
         main.aidl.srcDirs += '../scrcpy-5.0/server/src/main/aidl'
@@ -11,8 +18,8 @@ android {
         applicationId 'app.droidmirror.bluetooth'
         minSdk 26
         targetSdk 35
-        versionCode 9
-        versionName '0.9'
+        versionCode 20
+        versionName '0.20'
     }
 }
 
@@ -21,3 +28,5 @@ dependencies {
     implementation 'dev.rikka.shizuku:api:13.1.5'
     implementation 'dev.rikka.shizuku:provider:13.1.5'
 }
+
+kotlin { compilerOptions { jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17 } }

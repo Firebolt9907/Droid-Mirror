@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 
 @main struct SecurityTests {
     static func main() throws {
@@ -20,7 +21,9 @@ import Foundation
         func reject(_ body: () throws -> Void) {
             do { try body(); fatalError("Expected rejection") } catch { }
         }
-        let key = Data(repeating: 7, count: 32), nonce = Data(repeating: 11, count: 32)
+        let key = Data(HMAC<SHA256>.authenticationCode(for: Data("DroidMirror notifications pairing v1".utf8),
+            using: SymmetricKey(data: Data(repeating: 7, count: 32))))
+        let nonce = Data(repeating: 11, count: 32)
         let client = try BLESecureSession(key: key, nonce: nonce)
         let challenge = try exchange(client.hello)
         let wrong = try BLESecureSession(key: Data(repeating: 8, count: 32), nonce: nonce)

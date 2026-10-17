@@ -22,9 +22,37 @@ static NSData *Drain(DMBleInputQueue *queue, NSUInteger size) {
     while (queue.hasWork) { NSData *part=[queue takePacket:size]; assert(part.length); [out appendData:part]; }
     return out;
 }
+static NSData *Wheel(int32_t dx, int32_t dy) {
+    uint8_t p[21]={24};
+    uint32_t x=CFSwapInt32HostToBig(232), y=CFSwapInt32HostToBig(528);
+    memcpy(p+1,&x,4); memcpy(p+5,&y,4);
+    p[9]=1; p[10]=208; p[11]=4; p[12]=32;
+    x=CFSwapInt32HostToBig((uint32_t)dx); y=CFSwapInt32HostToBig((uint32_t)dy);
+    memcpy(p+13,&x,4); memcpy(p+17,&y,4);
+    return Envelope([NSData dataWithBytes:p length:21]);
+}
 int main(int argc, char **argv) {
     @autoreleasepool {
         DMBleInputQueue *queue=[DMBleInputQueue new];
+        assert([queue appendRecords:Wheel(10,-120)] && [queue appendRecords:Wheel(-3,20)]);
+        NSData *wheel=Drain(queue,488); assert([wheel isEqual:Wheel(7,-100)]);
+        if (argc>2) assert([wheel writeToFile:[NSString stringWithUTF8String:argv[2]] atomically:YES]);
+        // Edges are barriers, and partially transmitted commands are immutable.
+        assert([queue appendRecords:Wheel(1,2)]);
+        assert([queue appendRecords:Touch(0,0,1)]);
+        assert([queue appendRecords:Wheel(3,4)]);
+        assert(Drain(queue,488).length==26+37+26);
+        assert([queue appendRecords:Wheel(INT32_MAX,0)] && [queue appendRecords:Wheel(1,0)]);
+        assert(Drain(queue,488).length==52); // No signed overflow while summing.
+        assert([queue appendRecords:Wheel(1,2)]);
+        NSMutableData *partial=[[queue takePacket:7] mutableCopy];
+        assert([queue appendRecords:Wheel(3,4)]); [partial appendData:Drain(queue,5)];
+        NSMutableData *expectedWheel=[Wheel(1,2) mutableCopy]; [expectedWheel appendData:Wheel(3,4)];
+        assert([partial isEqual:expectedWheel]);
+        uint8_t cameraRequest=25;
+        NSData *cutoutRequest=Envelope([NSData dataWithBytes:&cameraRequest length:1]);
+        assert([queue appendRecords:cutoutRequest]);
+        assert([Drain(queue,488) isEqual:cutoutRequest]);
         NSData *first=Text(1000,7), *second=Text(31,9);
         assert([queue appendRecords:first] && [queue appendRecords:second]);
         NSMutableData *sent=[NSMutableData dataWithData:[queue takePacket:100]];
@@ -39,24 +67,24 @@ int main(int argc, char **argv) {
         for (int i=0;i<10;++i) assert([queue appendRecords:Text(20,(uint8_t)i)]);
         assert([queue takePacket:488].length==250 && !queue.hasWork);
 
-        // A 1000 Hz producer emits at most 60 positions per second. Every
-        // position sent is the freshest available; a new down/up/key is a barrier.
+        // A 1000 Hz producer is reduced by source-time buckets, not by radio
+        // completion times. Backpressure must not erase the gesture trajectory.
         __block NSTimeInterval now=0;
         queue=[[DMBleInputQueue alloc] initWithClock:^{ return now; }];
-        NSUInteger emitted=0;
         for (int i=0;i<1000;++i) {
             now=i/1000.0; assert([queue appendRecords:Touch(2,(uint32_t)i,1)]);
-            NSData *packet=[queue takePacket:488];
-            if (packet) {
-                ++emitted; uint32_t x; memcpy(&x,(const uint8_t *)packet.bytes+15,4);
-                assert(CFSwapInt32BigToHost(x)==(uint32_t)i);
-            }
-            assert(queue.pendingBytes<=37);
         }
-        assert(emitted>=58 && emitted<=60 && queue.motionDelay>0);
-        now+=0.020; assert([queue takePacket:488].length==37);
-        assert(!queue.hasWork);
-        assert([queue appendRecords:Touch(2,1001,1)]);
+        assert(queue.pendingBytes==60*37);
+        now=2; NSData *reduced=Drain(queue,488); assert(reduced.length==60*37);
+        uint32_t previous=0;
+        for (NSUInteger i=0;i<60;++i) {
+            uint32_t x; memcpy(&x,(const uint8_t *)reduced.bytes+i*37+15,4); x=CFSwapInt32BigToHost(x);
+            assert(x>previous && x-previous<=17); previous=x;
+        }
+        assert(previous==999); // Newest sample in every source bucket survives.
+        assert([queue appendRecords:Touch(2,1000,1)]);
+        assert([queue takePacket:488].length==37);
+        now=2.001; assert([queue appendRecords:Touch(2,1001,1)]);
         assert(![queue takePacket:488]);
         NSData *up=Touch(1,1002,1); assert([queue appendRecords:up]);
         NSData *edges=[queue takePacket:488]; assert(edges.length==74);
@@ -80,19 +108,24 @@ int main(int argc, char **argv) {
         for (int i=0;i<102;++i) {
             NSData *touch=Touch(i==0 ? 0 : i==101 ? 1 : 2,(uint32_t)i,1);
             NSMutableData *raw=[[touch subdataWithRange:NSMakeRange(5,32)] mutableCopy];
-            ((uint8_t *)raw.mutableBytes)[0]=23;
+            uint8_t *sample=raw.mutableBytes; sample[0]=23;
+            uint32_t y=CFSwapInt32HostToBig(1000-i*8); memcpy(sample+14,&y,4);
+            sample[18]=1; sample[19]=208; sample[20]=4; sample[21]=32; // 464x1056
+
             uint64_t timestamp=CFSwapInt64HostToBig((uint64_t)(5000+i));
             [raw appendBytes:&timestamp length:8];
             assert([queue appendRecords:Envelope(raw)]);
         }
-        NSData *timed=Drain(queue,488); assert(timed.length==135);
-        uint64_t times[3];
-        for (NSUInteger i=0;i<3;++i) {
+        NSData *timed=Drain(queue,488); assert(timed.length>=7*45 && timed.length<=9*45);
+        uint64_t firstTime=0, lastTime=0;
+        for (NSUInteger i=0;i<timed.length/45;++i) {
             const uint8_t *p=(const uint8_t *)timed.bytes+i*45;
             assert(p[0]==0 && p[5]==23);
-            memcpy(&times[i],p+37,8); times[i]=CFSwapInt64BigToHost(times[i]);
+            uint64_t time; memcpy(&time,p+37,8); time=CFSwapInt64BigToHost(time);
+            if (!i) firstTime=time; else assert(time>lastTime && time-lastTime<=33);
+            lastTime=time;
         }
-        assert(times[0]==1000 && times[1]==1100 && times[2]==1101);
+        assert(firstTime==1000 && lastTime==1101);
         if (argc==2) assert([timed writeToFile:[NSString stringWithUTF8String:argv[1]] atomically:YES]);
         (void)timedRaw;
 
@@ -128,6 +161,21 @@ int main(int argc, char **argv) {
         for (int i=0;i<31;++i) assert([queue appendRecords:Text(4096,0)]);
         assert(![queue appendRecords:Text(4096,0)]);
         [queue clear]; assert(!queue.hasWork && queue.pendingBytes==0);
+        // A BLE fallback signal must wait for an in-progress envelope, then
+        // precede ordinary input and remain intact across small ATT packets.
+        for (NSUInteger mtu=1;mtu<=32;mtu++) {
+            [queue clear]; NSData *first=Text(20,3), *next=Text(10,4);
+            assert([queue appendRecords:first]);
+            NSMutableData *actual=[[queue takePacket:3] mutableCopy];
+            [queue acknowledgeVideo:42]; [queue requestBluetoothVideo:42 nonce:[NSMutableData dataWithLength:32]];
+            assert([queue appendRecords:next]); [actual appendData:Drain(queue,mtu)];
+            NSMutableData *expected=[first mutableCopy];
+            uint8_t fallback[45]={2,0,0,0,40}; fallback[44]=42;
+            uint8_t ack[]={1,0,0,0,8,0,0,0,0,0,0,0,42};
+            [expected appendBytes:fallback length:45]; [expected appendBytes:ack length:13];
+            [expected appendData:next]; assert([actual isEqual:expected]);
+        }
+        [queue requestBluetoothVideo:42 nonce:[NSMutableData dataWithLength:32]]; [queue clear]; assert(!queue.hasWork);
         puts("BLE queue: 60 Hz sustained motion, source gesture timestamps and clock mapping, ATT packing, TCP fragmentation, ordering, ACK priority and bounds passed");
     }
 }

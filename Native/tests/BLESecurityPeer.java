@@ -1,5 +1,6 @@
-import dev.bleadb.bridge.BleSecureSession;
-import dev.bleadb.bridge.BleFragments;
+import app.droidmirror.bluetooth.bridge.BleSecureSession;
+import app.droidmirror.bluetooth.PairingKeys;
+import app.droidmirror.bluetooth.bridge.BleFragments;
 import org.json.JSONObject;
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
@@ -9,7 +10,7 @@ import java.util.Arrays;
 public final class BLESecurityPeer {
     public static void main(String[] args) throws Exception {
         byte[] key = new byte[32]; Arrays.fill(key, (byte) 7);
-        BleSecureSession session = new BleSecureSession(key);
+        BleSecureSession session = new BleSecureSession(PairingKeys.notifications(key));
         byte[] payload = new byte[8192]; Arrays.fill(payload, (byte) 42);
         BleFragments assembly = new BleFragments();
         byte[] result = null;

@@ -1,4 +1,5 @@
 #include "screen.h"
+#include "camera_cutout.h"
 
 #include <assert.h>
 #include <string.h>
@@ -300,11 +301,11 @@ sc_screen_render(struct sc_screen *screen, bool update_content_rect) {
     const SDL_FRect *srcrect = NULL;
     SDL_FRect frame_rect;
     if (!screen->is_icon_active) {
-        struct sc_size frame_size = sc_texture_get_frame_size(&screen->tex);
         frame_rect.x = 0;
         frame_rect.y = 0;
-        frame_rect.w = frame_size.width;
-        frame_rect.h = frame_size.height;
+        // Display effects may return a larger texture than the decoded frame.
+        // Input coordinates and window geometry still use the decoded size.
+        SDL_GetTextureSize(texture, &frame_rect.w, &frame_rect.h);
         srcrect = &frame_rect;
     }
 
@@ -338,6 +339,13 @@ sc_screen_render(struct sc_screen *screen, bool update_content_rect) {
         dstrect->y = (int32_t) dstrect->y;
         ok = SDL_RenderTextureRotated(renderer, texture, srcrect, dstrect,
                                       angle, NULL, flip);
+    }
+
+    sc_camera_cutout_update_window(renderer, &geometry,
+        (!screen->is_icon_active && !screen->camera) ? screen->frame_size : (struct sc_size){0, 0},
+        orientation);
+    if (!screen->is_icon_active && !screen->camera) {
+        sc_camera_cutout_render(renderer, &geometry, screen->frame_size, orientation);
     }
 
     if (!ok) {
@@ -531,6 +539,8 @@ sc_screen_init(struct sc_screen *screen,
     screen->secure_check_at = 0;
     screen->paused = false;
     screen->resume_frame = NULL;
+    screen->camera_cutout_requested = false;
+    sc_camera_cutout_set(NULL);
     screen->orientation = SC_ORIENTATION_0;
     screen->disconnected = false;
     screen->disconnect_started = false;
@@ -992,6 +1002,10 @@ sc_screen_apply_frame(struct sc_screen *screen, bool can_resize) {
     assert(screen->video);
     assert(screen->window_shown);
 
+    if (!screen->camera_cutout_requested && screen->controller && !screen->camera) {
+        struct sc_control_msg request = {.type = SC_CONTROL_MSG_TYPE_GET_CAMERA_CUTOUT};
+        screen->camera_cutout_requested = sc_controller_push_msg(screen->controller, &request);
+    }
     sc_fps_counter_add_rendered_frame(&screen->fps_counter);
 
     AVFrame *frame = screen->frame;

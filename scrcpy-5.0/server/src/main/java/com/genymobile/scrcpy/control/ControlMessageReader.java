@@ -36,6 +36,9 @@ public class ControlMessageReader {
             }
             case ControlMessage.TYPE_INJECT_TOUCH_EVENT:
                 return parseInjectTouchEvent();
+            case ControlMessage.TYPE_WHEEL_SCROLL:
+                Position anchor = parsePosition();
+                return ControlMessage.createWheelScroll(anchor,dis.readInt(),dis.readInt());
             case ControlMessage.TYPE_INJECT_SCROLL_EVENT:
                 return parseInjectScrollEvent();
             case ControlMessage.TYPE_BACK_OR_SCREEN_ON:
@@ -46,6 +49,7 @@ public class ControlMessageReader {
                 return parseSetClipboard();
             case ControlMessage.TYPE_SET_DISPLAY_POWER:
                 return parseSetDisplayPower();
+            case ControlMessage.TYPE_GET_CAMERA_CUTOUT:
             case ControlMessage.TYPE_EXPAND_NOTIFICATION_PANEL:
             case ControlMessage.TYPE_EXPAND_SETTINGS_PANEL:
             case ControlMessage.TYPE_COLLAPSE_PANELS:

@@ -51,7 +51,7 @@ try:
             received+=len(block); payload.extend(block)
             if not header:
                 if len(payload)<69: continue
-                if payload[0]!=0 or payload[65:69]!=b'h264': raise ValueError('Invalid video header')
+                if payload[0]!=0 or payload[65:69]!=b'h265': raise ValueError('Expected a hybrid HEVC video header')
                 del payload[:69]; header=True
             while len(payload)>=12:
                 if payload[0]&0x80:

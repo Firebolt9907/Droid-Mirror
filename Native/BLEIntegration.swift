@@ -117,8 +117,6 @@ private final class BLEIntegration: NSObject {
         let configure = NSMenuItem(title: "Set phone IP address…", action: #selector(configureHost(_:)), keyEquivalent: "")
         configure.target = self
         sub.addItem(configure)
-        let pair = NSMenuItem(title: "Pair phone using authorized ADB…", action: #selector(pairPhone(_:)), keyEquivalent: "")
-        pair.target = self; sub.addItem(pair)
         sub.addItem(.separator())
         let status = NSMenuItem(title: "Starting Bluetooth…", action: nil, keyEquivalent: "")
         let endpoint = NSMenuItem(title: "Waiting for endpoint", action: nil, keyEquivalent: "")
@@ -194,57 +192,4 @@ private final class BLEIntegration: NSObject {
         controller?.connectADB(force: true)
     }
 
-    @objc private func pairPhone(_ sender: Any?) {
-        guard let adb = BLEController.findADB() else { return }
-        let alert = NSAlert()
-        alert.messageText = "Pair encrypted Bluetooth"
-        alert.informativeText = "On your phone, open BLE ADB Bridge and tap Allow Mac pairing for 60 seconds. This uses an already-authorized ADB connection to provision a private key."
-        alert.addButton(withTitle: "Continue"); alert.addButton(withTitle: "Cancel")
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-        DispatchQueue.global(qos: .userInitiated).async {
-            let task = Process(); task.executableURL = adb; task.arguments = ["devices"]
-            let result = (try? BLEController.runBounded(task, timeout: 8)) ?? ""
-            let devices = result.split(separator: "\n").compactMap { line -> String? in
-                let columns = line.split(whereSeparator: { $0.isWhitespace })
-                return columns.count == 2 && columns[1] == "device" ? String(columns[0]) : nil
-            }
-            DispatchQueue.main.async {
-                guard !devices.isEmpty else { self.pairResult(false); return }
-                var serial = devices[0]
-                if devices.count > 1 {
-                    let choice = NSAlert(); choice.messageText = "Choose the phone to pair"
-                    let popup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 350, height: 26))
-                    popup.addItems(withTitles: devices); choice.accessoryView = popup
-                    choice.addButton(withTitle: "Pair"); choice.addButton(withTitle: "Cancel")
-                    guard choice.runModal() == .alertFirstButtonReturn else { return }
-                    serial = popup.titleOfSelectedItem ?? serial
-                }
-                DispatchQueue.global(qos: .userInitiated).async {
-                    var success = false
-                    do {
-                        let key = try BLETrust.random()
-                        let task = Process(); task.executableURL = adb; task.arguments = ["-s", serial, "shell", "sh"]
-                        // Key is supplied through stdin, never process arguments or logs.
-                        let command = "content call --uri content://dev.bleadb.bridge.pairing --method pair --arg '\(key.base64EncodedString())'\n"
-                        let output = try BLEController.runBounded(task, timeout: 10, input: Data(command.utf8))
-                        if output.contains("status=paired-v2") { try BLETrust.save(key); success = true }
-                    } catch { /* No key or remote command output is logged. */ }
-                    DispatchQueue.main.async { self.pairResult(success) }
-                }
-            }
-        }
-    }
-    private func pairResult(_ success: Bool) {
-        if success {
-            NotificationRuntime.preferences.set(true, forKey: enabledKey)
-            NotificationRuntime.preferences.synchronize()
-            if NotificationRuntime.background { controller?.stop(); subscriptions.removeAll(); start() }
-            else { NotificationRuntime.post("app.droidmirror.receiverConfiguration") }
-        }
-        let alert = NSAlert()
-        alert.messageText = success ? "Encrypted Bluetooth paired" : "Pairing did not complete"
-        alert.informativeText = success ? "Enable DroidMirror notification forwarding in Android's notification access settings." :
-            "Install BLE ADB Bridge 2.0, authorize ADB, then open the phone's 60-second pairing window and try again."
-        alert.runModal()
-    }
 }

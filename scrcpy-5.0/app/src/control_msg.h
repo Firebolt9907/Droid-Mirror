@@ -50,6 +50,8 @@ enum sc_control_msg_type {
     SC_CONTROL_MSG_TYPE_CAMERA_ZOOM_OUT,
     SC_CONTROL_MSG_TYPE_RESIZE_DISPLAY,
     SC_CONTROL_MSG_TYPE_SCAN_FILE,
+    SC_CONTROL_MSG_TYPE_GET_CAMERA_CUTOUT = 25,
+    SC_CONTROL_MSG_TYPE_WHEEL_SCROLL = 24, // 23 is the timestamped Bluetooth touch extension.
 };
 
 enum sc_copy_key {
@@ -85,6 +87,7 @@ struct sc_control_msg {
             float vscroll;
             enum android_motionevent_buttons buttons;
         } inject_scroll_event;
+        struct { struct sc_position position; int32_t dx, dy; } wheel_scroll;
         struct {
             enum android_keyevent_action action; // action for the BACK key
             // screen may only be turned on on ACTION_DOWN

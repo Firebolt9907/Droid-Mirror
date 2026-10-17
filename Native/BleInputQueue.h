@@ -9,6 +9,7 @@
 - (void)synchronizePhoneClock:(uint64_t)phone macClock:(uint64_t)mac;
 - (BOOL)appendRecords:(NSData *)bytes;
 - (void)acknowledgeVideo:(uint64_t)count;
+- (void)requestBluetoothVideo:(uint64_t)count nonce:(NSData *)nonce;
 - (NSData *)takePacket:(NSUInteger)maximum;
 - (void)clear;
 @end

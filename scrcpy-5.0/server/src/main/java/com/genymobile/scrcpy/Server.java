@@ -102,12 +102,17 @@ public final class Server {
 
         List<AsyncProcessor> asyncProcessors = new ArrayList<>();
 
+        AdbStreamSession session = null;
         DesktopConnection connection = DesktopConnection.open(scid, tunnelForward, video, audio, control, sendDummyByte);
         try {
             if (options.getSendDeviceMeta()) {
                 connection.sendDeviceMeta(Device.getDeviceName());
             }
 
+            if (options.getDroidMirrorSession() && video && options.getVideoSource() == VideoSource.DISPLAY
+                    && options.getDisplayId() == 0 && options.getNewDisplay() == null) {
+                session = new AdbStreamSession(cleanUp);
+            }
             Controller controller = null;
 
             if (control) {
@@ -152,6 +157,7 @@ public final class Server {
                     surfaceCapture = new CameraCapture(options);
                 }
                 SurfaceEncoder surfaceEncoder = new SurfaceEncoder(surfaceCapture, videoStreamer, options);
+                if (session != null) surfaceEncoder.setFirstFrameListener(session::frameSent);
                 asyncProcessors.add(surfaceEncoder);
 
                 if (controller != null) {
@@ -175,7 +181,12 @@ public final class Server {
                 asyncProcessor.stop();
             }
 
-            connection.shutdown();
+            try {
+                connection.shutdown();
+            } finally {
+                // A socket close racing local takeover must not skip phone recovery.
+                if (session != null) session.close();
+            }
 
             try {
                 if (cleanUp != null) {

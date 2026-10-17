@@ -11,7 +11,8 @@ import java.lang.reflect.InvocationTargetException;
 /** Shell-owned authenticated Classic L2CAP socket; app receives a video-only write pipe. */
 @SuppressLint({"PrivateApi", "BlockedPrivateApi", "SoonBlockedPrivateApi", "DiscouragedPrivateApi"})
 public final class ClassicL2capService extends IClassicL2cap.Stub {
-    static final int PSM = 0x1001;
+    // 0x1001 can already belong to Android's system Bluetooth service.
+    static final int PSM = 0xD001;
     private IBinder owner;
     private IBinder.DeathRecipient death;
     private String peer;
@@ -49,7 +50,7 @@ public final class ClassicL2capService extends IClassicL2cap.Stub {
             token.linkToDeath(death, 0);
             if (!token.isBinderAlive()) throw new IOException("Listener owner died");
             error = "";
-            android.util.Log.i("DroidMirrorL2cap", "Authenticated Classic L2CAP listener ready on PSM 0x1001");
+            android.util.Log.i("DroidMirrorL2cap", "Authenticated Classic L2CAP listener ready on PSM 0xD001");
             return true;
         } catch (SecurityException denied) {
             error = "Classic L2CAP Bluetooth permission denied: " + denied.getMessage();

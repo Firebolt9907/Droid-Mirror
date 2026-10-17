@@ -48,6 +48,12 @@ public final class Size {
         assert alignment > 0 : "Alignment must be positive";
         assert (alignment & (alignment - 1)) == 0 : "Alignment must be a power-of-two";
 
+        if (preserveAspectRatio) {
+            int[] exact = ExactAspectRatio.fit(width, height, maxSize, alignment,
+                    caps == null ? null : (w, h) -> caps.isSizeSupported(w, h));
+            return new Size(exact[0], exact[1]);
+        }
+
         if (caps == null) {
             int w, h;
             if (maxSize > 0 && (width > maxSize || height > maxSize)) {

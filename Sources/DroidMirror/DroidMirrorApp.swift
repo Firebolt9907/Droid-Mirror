@@ -1,4 +1,5 @@
 import AppKit
+import Darwin
 import SwiftUI
 
 @MainActor
@@ -100,6 +101,17 @@ final class DroidMirrorAppDelegate: NSObject, NSApplicationDelegate {
 struct DroidMirrorMain {
     @MainActor
     static func main() {
+        // Validate the actual launcher/injected-library path without initializing
+        // UI, reading pairing keys, starting the receiver, or connecting a phone.
+        if CommandLine.arguments.contains("--check-launch") {
+            let library = Bundle.main.bundleURL.appendingPathComponent("Contents/Frameworks/libDroidMirrorBLE.dylib")
+            guard dlopen(library.path, RTLD_NOW | RTLD_LOCAL) != nil else {
+                fputs("DroidMirror BLE library failed to load\n", stderr)
+                exit(1)
+            }
+            print("DroidMirror launch check passed")
+            return
+        }
         let app = NSApplication.shared
         let delegate = DroidMirrorAppDelegate()
         app.delegate = delegate

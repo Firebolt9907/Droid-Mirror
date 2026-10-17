@@ -49,11 +49,11 @@ final class ShizukuDisplayClient implements AutoCloseable {
         try { return Shizuku.pingBinder() && Shizuku.getVersion() >= 13 && Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED; }
         catch (RuntimeException error) { return false; }
     }
-    private static Shizuku.UserServiceArgs arguments(Context context) {
+    static Shizuku.UserServiceArgs arguments(Context context) {
         return new Shizuku.UserServiceArgs(new ComponentName(context.getPackageName(), DisplayGuardService.class.getName()))
             // Bump when the embedded capture code changes: Shizuku daemons can
             // survive APK replacement and otherwise keep running the old code.
-            .daemon(true).processNameSuffix("display_guard").debuggable(false).version(27);
+            .daemon(true).processNameSuffix("display_guard").debuggable(false).version(34);
     }
     private final ServiceConnection connection = new ServiceConnection() {
         @Override public void onServiceConnected(ComponentName name, IBinder binder) {
@@ -90,6 +90,20 @@ final class ShizukuDisplayClient implements AutoCloseable {
             try { IDisplayGuard remote = guard; if (!closed && remote != null) remote.localUse(owner); }
             catch (RemoteException | RuntimeException ignored) {}
         }); } catch (java.util.concurrent.RejectedExecutionException ignored) {}
+    }
+    void upgradeVideo(WirelessVideoProfile profile) throws java.io.IOException {
+        IDisplayGuard remote = guard;
+        try {
+            if (closed || remote == null || !remote.upgradeVideo(owner, profile.maxSize, profile.fps, profile.bitRate))
+                throw new java.io.IOException("Wi-Fi video quality upgrade unavailable");
+        } catch (RemoteException error) { throw new java.io.IOException(error); }
+    }
+    void restoreBluetoothVideo() throws java.io.IOException {
+        IDisplayGuard remote=guard;
+        try {
+            if (closed || remote==null || !remote.restoreBluetoothVideo(owner))
+                throw new java.io.IOException("Bluetooth video profile restore unavailable");
+        } catch (RemoteException error) { throw new java.io.IOException(error); }
     }
     void frameSent() {
         if (lastVideo == 0) android.util.Log.i("DroidMirrorLease", "First video frame transmitted");

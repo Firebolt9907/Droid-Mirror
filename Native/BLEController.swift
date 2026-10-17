@@ -58,7 +58,7 @@ final class BLEController: NSObject, ObservableObject {
 
     func scan() {
         guard !stopped else { return }
-        guard BLETrust.key() != nil else { status = "Pair phone using authorized ADB first"; return }
+        guard BLETrust.key() != nil else { status = "Choose DroidMirror → Pair Bluetooth… to pair mirroring and notifications"; return }
         guard central.state == .poweredOn else {
             status = "Bluetooth is not ready"
             return

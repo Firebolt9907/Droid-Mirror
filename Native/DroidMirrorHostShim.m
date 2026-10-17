@@ -3,6 +3,8 @@
 #import <objc/runtime.h>
 #import <stdlib.h>
 #import <dlfcn.h>
+#import <mach-o/dyld.h>
+#import <limits.h>
 
 static void (*DMOriginalSetExecutableURL)(NSTask *, SEL, NSURL *);
 static void (*DMOriginalReplyToTerminate)(NSApplication *, SEL, BOOL);
@@ -151,8 +153,14 @@ static void DMSetExecutableURL(NSTask *task, SEL selector, NSURL *url) {
 
 __attribute__((constructor))
 static void DMInstallBundledScrcpyResolver(void) {
-    // A helper launched by LaunchServices must never inherit host swizzles.
-    if ([NSBundle.mainBundle.bundleIdentifier isEqualToString:@"app.droidmirror.notifications"]) return;
+    // The launcher injects this image into the host. Child processes may inherit
+    // that environment; never install application hooks in Bluetooth/ADB/helpers.
+    char executable[PATH_MAX]; uint32_t size = sizeof(executable);
+    if (_NSGetExecutablePath(executable, &size) != 0 ||
+        ![[[NSString stringWithUTF8String:executable] lastPathComponent] isEqualToString:@"DroidMirrorHost"] ||
+        ![NSBundle.mainBundle.bundleIdentifier isEqualToString:@"app.droidmirror.mac"]) return;
+    // The image is already loaded. Do not inject it into any future subprocess.
+    unsetenv("DYLD_INSERT_LIBRARIES");
     Method method = class_getInstanceMethod(NSTask.class, @selector(setExecutableURL:));
     if (method == NULL) {
         return;

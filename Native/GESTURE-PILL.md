@@ -23,7 +23,7 @@ The connected 1080×2400 / 420dpi phone reports a 24dp navigation bar: the targe
 315×52.5 physical pixels inside that strip. This uses the configured navigation-bar
 height; immersive visibility and vendor-specific hidden-pill settings are not queried.
 
-Single and double clicks wait 350ms after release to distinguish a third click,
+Single and double clicks wait 180ms after release to distinguish a third click,
 without firing the earlier actions. Motion beyond 8dp or a hold over 250ms replays
 the withheld down and resumes ordinary touch delivery. A held next click pauses
 the previous deadline. Generation tokens discard stale callbacks. Mode changes,

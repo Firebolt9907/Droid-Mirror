@@ -1,0 +1,71 @@
+import app.droidmirror.bluetooth.*;
+import java.io.*;
+import java.nio.file.*;
+import java.util.*;
+import java.util.concurrent.*;
+
+/** Disconnects within both envelope headers and HEVC payload; never restarts scrcpy. */
+public final class WirelessFallbackTest {
+    static void check(boolean value) { if (!value) throw new AssertionError(); }
+    static final class BrokenSocket extends OutputStream {
+        final ByteArrayOutputStream received=new ByteArrayOutputStream();
+        int remaining=Integer.MAX_VALUE;
+        final CountDownLatch broken=new CountDownLatch(1);
+        public void write(int value) throws IOException {
+            if (remaining--<=0) { broken.countDown(); throw new IOException("ADB disconnected mid-record"); }
+            received.write(value);
+        }
+    }
+    static byte[] payload(byte[] wire, int skip, boolean incomplete) throws Exception {
+        ByteArrayOutputStream result=new ByteArrayOutputStream();
+        DataInputStream input=new DataInputStream(new ByteArrayInputStream(wire)); input.skipNBytes(skip);
+        while (input.available()!=0) {
+            if (input.available()<5) { check(incomplete); break; }
+            int type=input.readUnsignedByte(), count=input.readInt(); check(type==0 && count>0 && count<=16384);
+            byte[] bytes=input.readNBytes(count); result.write(bytes);
+            if (bytes.length<count) { check(incomplete); break; }
+        }
+        return result.toByteArray();
+    }
+    public static void main(String[] args) throws Exception {
+        byte[] expected=new byte[70000]; new Random(91).nextBytes(expected);
+        byte[] key=new byte[32],nonce=new byte[32],profile=new WirelessVideoProfile(1920,60,12000000).bytes();
+        ExecutorService executor=Executors.newSingleThreadExecutor();
+        try {
+            for (int cut : new int[]{0,1,4,5,6,12,16388,16389,16390,30000,65555}) {
+                ByteArrayOutputStream classic=new ByteArrayOutputStream();
+                BluetoothWire wire=new BluetoothWire(classic); wire.video(Arrays.copyOf(expected,700));
+                byte[] initial=classic.toByteArray();
+                BrokenSocket wifi=new BrokenSocket(); check(wire.upgrade(wifi,key,nonce,profile)); wifi.remaining=cut;
+                Future<?> sender=executor.submit(() -> {
+                    try { wire.video(Arrays.copyOfRange(expected,700,expected.length)); }
+                    catch (IOException failed) { throw new RuntimeException(failed); }
+                });
+                check(wifi.broken.await(2,TimeUnit.SECONDS));
+                // Snapshot only after the failed write has completed/released its monitor.
+                byte[] partial=wifi.received.toByteArray(); byte[] accepted=payload(partial,48,true);
+                check(wire.fallback(700+accepted.length));
+                sender.get(2,TimeUnit.SECONDS); check(!wire.isWireless());
+                check(!wire.fallback(700+accepted.length)); // Duplicate BLE signal is harmless.
+                byte[] resumed=Arrays.copyOfRange(classic.toByteArray(),initial.length,classic.size());
+                ByteArrayOutputStream joined=new ByteArrayOutputStream();
+                joined.write(payload(initial,8,false)); joined.write(accepted); joined.write(payload(resumed,0,false));
+                check(Arrays.equals(joined.toByteArray(),expected));
+                if (cut==30000 && args.length!=0) {
+                    Files.write(Path.of(args[0],"fallback-initial.bin"),initial);
+                    Files.write(Path.of(args[0],"fallback-wifi.bin"),partial);
+                    Files.write(Path.of(args[0],"fallback-resumed.bin"),resumed);
+                    Files.write(Path.of(args[0],"fallback-expected.bin"),expected);
+                }
+                // A recovered session can upgrade again without another device/codec header.
+                check(wire.upgrade(new ByteArrayOutputStream(),key,nonce,profile));
+                check(wire.fallback(expected.length));
+            }
+            // Confirmation can fail while pre-handoff Classic bytes are in flight.
+            BluetoothWire wire=new BluetoothWire(new ByteArrayOutputStream());
+            wire.video(new byte[]{1,2,3}); check(wire.upgrade(new ByteArrayOutputStream(),key,nonce,profile));
+            check(wire.fallback(0)); // Original ordered Classic bytes must not be duplicated.
+            System.out.println("Wireless fallback: BLE resume offsets, mid-header/payload loss, exact decoder continuity, duplicate requests and repeated handoffs passed");
+        } finally { executor.shutdownNow(); }
+    }
+}

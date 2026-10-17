@@ -1,12 +1,15 @@
+#import "MouseWheelRouting.h"
+#include "../scrcpy-5.0/app/src/wheel_protocol.h"
 #import <Cocoa/Cocoa.h>
 #import <QuartzCore/QuartzCore.h>
 #import <SDL3/SDL.h>
 #import <objc/runtime.h>
+#include "../scrcpy-5.0/app/src/video_filter.h"
 
 static const CGFloat DMToolbarHeight = 58.0;
 static const CGFloat DMToolbarCornerRadius = 24.0;
 static const CGFloat DMToolbarShadowInset = 18.0;
-static const NSTimeInterval DMCtrlDoubleTapInterval = 0.35;
+static const NSTimeInterval DMCtrlDoubleTapInterval = 0.18;
 static void *DMControllerKey = &DMControllerKey;
 
 static inline CGFloat DMScreenCornerRadius(CGFloat width) {
@@ -30,7 +33,7 @@ static inline CGFloat DMScreenCornerRadius(CGFloat width) {
 }
 @end
 
-@interface DMWindowController : NSObject
+@interface DMWindowController : NSObject <NSMenuItemValidation>
 @property(nonatomic, weak) NSWindow *window;
 @property(nonatomic) SDL_Window *sdlWindow;
 @property(nonatomic, strong) NSView *screenView;
@@ -39,6 +42,9 @@ static inline CGFloat DMScreenCornerRadius(CGFloat width) {
 @property(nonatomic, strong) NSView *toolbarContainer;
 @property(nonatomic, strong) CALayer *toolbarShadowLayer;
 @property(nonatomic, strong) NSButton *pinButtonControl;
+@property(nonatomic, strong) NSButton *sharpenButtonControl;
+@property(nonatomic, strong) NSButton *spatialButtonControl;
+@property(nonatomic, strong) NSMenuItem *spatialMenuItem;
 @property(nonatomic, strong) NSPopover *pinPopover;
 @property(nonatomic, strong) NSPopover *settingsPopover;
 @property(nonatomic, strong) NSTextField *pinDots;
@@ -62,12 +68,21 @@ static inline CGFloat DMScreenCornerRadius(CGFloat width) {
 @property(nonatomic) CGFloat pendingScrollX;
 @property(nonatomic) CGFloat pendingScrollY;
 @property(nonatomic) BOOL swipeScheduled;
+@property(nonatomic) CGFloat pendingWheelX;
+@property(nonatomic) CGFloat pendingWheelY;
+@property(nonatomic) BOOL wheelScheduled;
+@property(nonatomic) NSUInteger wheelGeneration;
+@property(nonatomic) NSTimeInterval lastWheelCommand;
 @property(nonatomic) BOOL touchActive;
 @property(nonatomic) CGFloat touchX;
 @property(nonatomic) CGFloat touchY;
 @property(nonatomic) NSInteger androidWidth;
 @property(nonatomic) NSInteger androidHeight;
 @property(nonatomic) BOOL bluetoothStream;
+@property(nonatomic, copy) NSArray<NSValue *> *cameraCutouts;
+@property(nonatomic, strong) id cutoutMouseMonitor;
+- (void)updateCameraCutouts:(NSArray<NSValue *> *)cutouts;
+- (NSEvent *)handleCutoutMouseEvent:(NSEvent *)event;
 - (instancetype)initWithWindow:(NSWindow *)window;
 @end
 
@@ -110,6 +125,11 @@ static inline CGFloat DMScreenCornerRadius(CGFloat width) {
     }
     [self setupBackgroundTimeout];
     [self setupKeyboardRemapping];
+    _cutoutMouseMonitor = [NSEvent addLocalMonitorForEventsMatchingMask:
+        NSEventMaskLeftMouseDown
+        handler:^NSEvent *(NSEvent *event) {
+            return weakSelf ? [weakSelf handleCutoutMouseEvent:event] : event;
+        }];
     return self;
 }
 
@@ -122,11 +142,51 @@ static inline CGFloat DMScreenCornerRadius(CGFloat width) {
     _pendingCommandDownEvent = nil;
     if (_scrollMonitor) [NSEvent removeMonitor:_scrollMonitor];
     if (_keyboardMonitor) [NSEvent removeMonitor:_keyboardMonitor];
+    if (_cutoutMouseMonitor) [NSEvent removeMonitor:_cutoutMouseMonitor];
     if (_resignActiveObserver) [[NSNotificationCenter defaultCenter] removeObserver:_resignActiveObserver];
     if (_becomeActiveObserver) [[NSNotificationCenter defaultCenter] removeObserver:_becomeActiveObserver];
     [_backgroundTimeoutTimer invalidate];
     [_adbShellInput closeFile];
     [_adbShell terminate];
+}
+
+- (void)updateCameraCutouts:(NSArray<NSValue *> *)cutouts {
+    BOOL wasHidden = self.cameraCutouts.count > 0;
+    self.cameraCutouts = cutouts;
+    BOOL hidden = cutouts.count > 0;
+    if (hidden == wasHidden) return;
+    if (hidden) {
+        [self.pinPopover close];
+        [self.settingsPopover close];
+        [self.window removeChildWindow:self.toolbarWindow];
+        [self.toolbarWindow orderOut:nil];
+    } else {
+        [self.window addChildWindow:self.toolbarWindow ordered:NSWindowAbove];
+        [self positionToolbar];
+        [self.toolbarWindow orderFront:nil];
+    }
+}
+
+- (NSEvent *)handleCutoutMouseEvent:(NSEvent *)event {
+    if (event.type != NSEventTypeLeftMouseDown || event.window != self.window ||
+        (self.window.styleMask & NSWindowStyleMaskFullScreen)) return event;
+    NSRect bounds = self.screenView.bounds;
+    if (bounds.size.width <= 0 || bounds.size.height <= 0) return event;
+    NSPoint point = [self.screenView convertPoint:event.locationInWindow fromView:nil];
+    CGFloat x = (point.x - NSMinX(bounds)) / bounds.size.width;
+    CGFloat y = (point.y - NSMinY(bounds)) / bounds.size.height;
+    if (!self.screenView.isFlipped) y = 1 - y;
+    for (NSValue *value in self.cameraCutouts) {
+        NSRect circle = value.rectValue; // center x/y, radius x/y, normalized from SDL.
+        CGFloat dx = (x - circle.origin.x) / circle.size.width;
+        CGFloat dy = (y - circle.origin.y) / circle.size.height;
+        if (dx * dx + dy * dy > 1) continue;
+        [self.window makeKeyWindow];
+        // AppKit owns the drag, just as it does for a standard window titlebar.
+        [self.window performWindowDragWithEvent:event];
+        return nil;
+    }
+    return event;
 }
 
 - (void)setupKeyboardRemapping {
@@ -394,6 +454,22 @@ static inline CGFloat DMScreenCornerRadius(CGFloat width) {
             return nil;
         }
 
+        if (selfRef.bluetoothStream && DMIsMouseWheel(event.phase, event.hasPreciseScrollingDeltas, event.momentumPhase)) {
+            selfRef.pendingWheelX += dx; selfRef.pendingWheelY += dy;
+            if (!selfRef.wheelScheduled) {
+                NSTimeInterval delay = MAX(0, selfRef.lastWheelCommand + 1.0/30.0 - NSProcessInfo.processInfo.systemUptime);
+                if (delay == 0) [selfRef flushMouseWheelCommands];
+                else {
+                    selfRef.wheelScheduled = YES;
+                    NSUInteger generation = selfRef.wheelGeneration;
+                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(delay*NSEC_PER_SEC)),dispatch_get_main_queue(),^{
+                        if (weakSelf.scrollMonitor && weakSelf.wheelGeneration == generation) [weakSelf flushMouseWheelCommands];
+                    });
+                }
+            }
+            return nil;
+        }
+
         // Discrete mouse wheels have no gesture phase. Coalesce them into one
         // short two-dimensional swipe while preserving both axes.
         if (fabs(dx) < 0.01 && fabs(dy) < 0.01) return nil;
@@ -437,6 +513,21 @@ static inline CGFloat DMScreenCornerRadius(CGFloat width) {
     self.pendingScrollX = 0;
     self.pendingScrollY = 0;
     self.swipeScheduled = NO;
+    self.pendingWheelX = self.pendingWheelY = 0; self.wheelScheduled = NO;
+    ++self.wheelGeneration;
+}
+
+- (void)flushMouseWheelCommands {
+    CGFloat dx=self.pendingWheelX, dy=self.pendingWheelY;
+    self.pendingWheelX=self.pendingWheelY=0; self.wheelScheduled=NO;
+    if (!self.sdlWindow || (fabs(dx)<0.001 && fabs(dy)<0.001)) return;
+    self.lastWheelCommand=NSProcessInfo.processInfo.systemUptime;
+    SDL_Event event; SDL_zero(event); event.type=SDL_EVENT_MOUSE_WHEEL;
+    event.wheel.timestamp=SDL_GetTicksNS(); event.wheel.windowID=SDL_GetWindowID(self.sdlWindow);
+    event.wheel.which=SC_DROIDMIRROR_WHEEL_MOUSE_ID;
+    event.wheel.x=dx; event.wheel.y=dy;
+    event.wheel.mouse_x=NSMidX(self.screenView.bounds); event.wheel.mouse_y=NSMidY(self.screenView.bounds);
+    SDL_PushEvent(&event);
 }
 
 - (void)pushSDLButtonDown:(BOOL)down at:(NSPoint)point {
@@ -617,8 +708,16 @@ static inline CGFloat DMScreenCornerRadius(CGFloat width) {
     [connectionLabel setContentCompressionResistancePriority:NSLayoutPriorityRequired forOrientation:NSLayoutConstraintOrientationHorizontal];
     NSButton *power = [self symbolButton:@"power" help:@"Power" action:@selector(power:)];
     _pinButtonControl = [self symbolButton:@"lock" help:@"PIN keypad" action:@selector(showPIN:)];
+    _sharpenButtonControl = [self symbolButton:@"camera.filters" help:@"Enhance video: Off" action:@selector(toggleSharpen:)];
+    [_sharpenButtonControl setButtonType:NSButtonTypeToggle];
+    [_sharpenButtonControl setAccessibilityLabel:@"Enhance video"];
+    _spatialButtonControl = [self symbolButton:@"arrow.up.left.and.arrow.down.right" help:@"MetalFX spatial upscaling (2×): Off" action:@selector(toggleSpatial:)];
+    [_spatialButtonControl setButtonType:NSButtonTypeToggle];
+    [_spatialButtonControl setAccessibilityLabel:@"MetalFX spatial upscaling"];
+    [self ensureVideoMenu];
+    [self syncSpatialControls];
     NSButton *close = [self symbolButton:@"xmark.circle.fill" help:@"Close mirror" action:@selector(close:)];
-    NSStackView *stack = [NSStackView stackViewWithViews:@[label, connectionLabel, power, _pinButtonControl, close]];
+    NSStackView *stack = [NSStackView stackViewWithViews:@[label, connectionLabel, power, _pinButtonControl, _sharpenButtonControl, _spatialButtonControl, close]];
     stack.orientation = NSUserInterfaceLayoutOrientationHorizontal;
     stack.alignment = NSLayoutAttributeCenterY;
     stack.spacing = 4;
@@ -629,6 +728,91 @@ static inline CGFloat DMScreenCornerRadius(CGFloat width) {
         [stack.trailingAnchor constraintLessThanOrEqualToAnchor:_toolbar.trailingAnchor constant:-8],
         [stack.centerYAnchor constraintEqualToAnchor:_toolbar.centerYAnchor]
     ]];
+}
+
+- (void)ensureVideoMenu {
+    NSMenu *menu = NSApp.mainMenu;
+    if (!menu) { menu = [NSMenu new]; NSApp.mainMenu = menu; }
+    if (!menu.numberOfItems) {
+        NSMenuItem *application = [[NSMenuItem alloc] initWithTitle:@"DroidMirror" action:NULL keyEquivalent:@""];
+        application.submenu = [[NSMenu alloc] initWithTitle:@"DroidMirror"];
+        [menu addItem:application];
+    }
+    NSMenuItem *view = [menu itemWithTitle:@"View"];
+    if (!view) {
+        view = [[NSMenuItem alloc] initWithTitle:@"View" action:NULL keyEquivalent:@""];
+        view.submenu = [[NSMenu alloc] initWithTitle:@"View"];
+        [menu addItem:view];
+    }
+    NSMenuItem *item = [view.submenu itemWithTitle:@"MetalFX Upscaling (2×)"];
+    if (!item) {
+        item = [[NSMenuItem alloc] initWithTitle:@"MetalFX Upscaling (2×)"
+            action:@selector(toggleSpatialFromMenu:) keyEquivalent:@""];
+        [view.submenu addItem:item];
+    }
+    item.target = self;
+    self.spatialMenuItem = item;
+}
+
+- (void)syncSpatialControls {
+    SDL_PropertiesID properties = self.sdlWindow ? SDL_GetWindowProperties(self.sdlWindow) : 0;
+    BOOL supported = self.sdlWindow && SDL_GetBooleanProperty(properties, SC_SPATIAL_SUPPORTED_PROP, true);
+    BOOL enabled = supported && SDL_GetBooleanProperty(properties, SC_SPATIAL_FILTER_PROP, true);
+    self.spatialButtonControl.state = enabled ? NSControlStateValueOn : NSControlStateValueOff;
+    self.spatialButtonControl.enabled = supported;
+    self.spatialButtonControl.contentTintColor = enabled ? NSColor.controlAccentColor : NSColor.secondaryLabelColor;
+    self.spatialButtonControl.toolTip = supported
+        ? (enabled ? @"MetalFX spatial upscaling (2×): On" : @"MetalFX spatial upscaling (2×): Off")
+        : @"MetalFX spatial upscaling is unavailable on this renderer or GPU";
+    self.spatialMenuItem.state = enabled ? NSControlStateValueOn : NSControlStateValueOff;
+    self.spatialMenuItem.enabled = supported;
+    self.spatialMenuItem.toolTip = self.spatialButtonControl.toolTip;
+}
+
+- (BOOL)validateMenuItem:(NSMenuItem *)item {
+    if (item.action == @selector(toggleSpatialFromMenu:)) {
+        [self syncSpatialControls];
+        return self.spatialButtonControl.enabled;
+    }
+    return YES;
+}
+
+- (void)toggleSpatialFromMenu:(NSMenuItem *)sender {
+    [self syncSpatialControls];
+    if (!self.spatialButtonControl.enabled) return;
+    self.spatialButtonControl.state = self.spatialButtonControl.state == NSControlStateValueOn
+        ? NSControlStateValueOff : NSControlStateValueOn;
+    [self toggleSpatial:self.spatialButtonControl];
+}
+
+- (void)toggleSpatial:(NSButton *)sender {
+    if (!self.sdlWindow) return;
+    SDL_PropertiesID properties = SDL_GetWindowProperties(self.sdlWindow);
+    if (!SDL_GetBooleanProperty(properties, SC_SPATIAL_SUPPORTED_PROP, true)) {
+        [self syncSpatialControls];
+        return;
+    }
+    SDL_SetBooleanProperty(properties, SC_SPATIAL_FILTER_PROP, sender.state == NSControlStateValueOn);
+    [self syncSpatialControls];
+    SDL_Event event;
+    SDL_zero(event);
+    event.type = SDL_EVENT_WINDOW_EXPOSED;
+    event.window.windowID = SDL_GetWindowID(self.sdlWindow);
+    SDL_PushEvent(&event);
+}
+
+- (void)toggleSharpen:(NSButton *)sender {
+    if (!self.sdlWindow) return;
+    BOOL enabled = sender.state == NSControlStateValueOn;
+    SDL_SetBooleanProperty(SDL_GetWindowProperties(self.sdlWindow), SC_VIDEO_FILTER_PROP, enabled);
+    sender.contentTintColor = enabled ? NSColor.controlAccentColor : NSColor.secondaryLabelColor;
+    sender.toolTip = enabled ? @"Enhance video: On" : @"Enhance video: Off";
+    // An exposed event redraws the retained frame even when the phone is idle.
+    SDL_Event event;
+    SDL_zero(event);
+    event.type = SDL_EVENT_WINDOW_EXPOSED;
+    event.window.windowID = SDL_GetWindowID(self.sdlWindow);
+    SDL_PushEvent(&event);
 }
 
 - (void)runAndroidKey:(NSString *)key {
@@ -781,7 +965,7 @@ static inline CGFloat DMScreenCornerRadius(CGFloat width) {
 }
 
 - (void)detectPINPrompt {
-    if (self.bluetoothStream) return;
+    if (self.bluetoothStream || self.cameraCutouts.count) return;
     if (self.pinPopover.shown) return;
     NSString *adb = NSProcessInfo.processInfo.environment[@"ADB"] ?: @"/opt/homebrew/bin/adb";
     NSString *serial = NSProcessInfo.processInfo.environment[@"DROIDMIRROR_SERIAL"];
@@ -800,7 +984,7 @@ static inline CGFloat DMScreenCornerRadius(CGFloat width) {
         NSArray *markers = @[@"keyguard_pin_view", @"pinentry", @"pin_entry", @"pin_pad", @"credential_pin", @"enter your pin"];
         BOOL found = NO;
         for (NSString *marker in markers) if ([text containsString:marker]) { found = YES; break; }
-        if (found) dispatch_async(dispatch_get_main_queue(), ^{ if (!weakSelf.pinPopover.shown) [weakSelf showPIN:weakSelf.pinButtonControl]; });
+        if (found) dispatch_async(dispatch_get_main_queue(), ^{ if (!weakSelf.cameraCutouts.count && !weakSelf.pinPopover.shown) [weakSelf showPIN:weakSelf.pinButtonControl]; });
     });
 }
 @end
@@ -812,6 +996,24 @@ static void DMInstallToolbar(void) {
         DMWindowController *controller = [[DMWindowController alloc] initWithWindow:window];
         objc_setAssociatedObject(window, DMControllerKey, controller, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
+}
+
+// Called on the SDL/AppKit main thread after the rendered geometry is known.
+void DroidMirrorSetCameraCutouts(SDL_Window *sdlWindow, const float *circles, unsigned count) {
+    if (!sdlWindow) return;
+    NSWindow *window = (__bridge NSWindow *)SDL_GetPointerProperty(
+        SDL_GetWindowProperties(sdlWindow), SDL_PROP_WINDOW_COCOA_WINDOW_POINTER, NULL);
+    if (!window) return;
+    DMInstallToolbar();
+    DMWindowController *controller = objc_getAssociatedObject(window, DMControllerKey);
+    if (!controller) return;
+    NSMutableArray<NSValue *> *values = [NSMutableArray array];
+    for (unsigned i = 0; i < count && i < 4; ++i) {
+        const float *c = circles + 4*i;
+        if (!isfinite(c[0]) || !isfinite(c[1]) || !isfinite(c[2]) || !isfinite(c[3]) || c[2] <= 0 || c[3] <= 0) continue;
+        [values addObject:[NSValue valueWithRect:NSMakeRect(c[0], c[1], c[2], c[3])]];
+    }
+    [controller updateCameraCutouts:values];
 }
 
 __attribute__((constructor))
