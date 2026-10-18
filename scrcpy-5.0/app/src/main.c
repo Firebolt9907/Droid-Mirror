@@ -2,6 +2,8 @@
 
 #include <stdbool.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
 #ifdef HAVE_V4L2
 # include <libavdevice/avdevice.h>
 #endif
@@ -18,6 +20,10 @@
 #include "util/net.h"
 #include "util/term.h"
 #include "version.h"
+#ifdef __APPLE__
+#include <dlfcn.h>
+#include "util/sdl.h"
+#endif
 
 #ifdef _WIN32
 #include <windows.h>
@@ -124,6 +130,28 @@ end:
 int
 main(int argc, char *argv[]) {
 #ifndef _WIN32
+#ifdef __APPLE__
+    if (getenv("DROIDMIRROR_SESSION_COMMANDS")) {
+        int (*next)(int *, char ***) = dlsym(RTLD_DEFAULT, "DroidMirrorNextSession");
+        void (*finished)(int) = dlsym(RTLD_DEFAULT, "DroidMirrorSessionFinished");
+        int (*cancelled)(void) = dlsym(RTLD_DEFAULT, "DroidMirrorSessionCancelled");
+        SDL_Window *(*phone)(void) = dlsym(RTLD_DEFAULT, "DroidMirrorPhoneWindow");
+        if (!next || !finished || !phone) return SCRCPY_EXIT_FAILURE;
+        int count; char **arguments;
+        while (next(&count, &arguments)) {
+            sc_sdl_keep_connecting_window(phone());
+            // getopt and SDL's registered event queue are reused for retries.
+            optind = 1;
+            int result = cancelled && cancelled() ? SCRCPY_EXIT_SUCCESS : main_scrcpy(count, arguments);
+            fflush(stderr);
+            finished(result);
+            for (int i=0; i<count; ++i) free(arguments[i]);
+            free(arguments);
+        }
+        SDL_Quit();
+        return 0;
+    }
+#endif
     return main_scrcpy(argc, argv);
 #else
     (void) argc;

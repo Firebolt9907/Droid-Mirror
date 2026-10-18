@@ -37,6 +37,8 @@ struct sc_screen {
 
     bool video;
     bool camera;
+    bool camera_cutout_requested;
+    sc_tick camera_cutout_request_at;
     bool window_aspect_ratio_lock;
     bool flex_display;
 
@@ -119,6 +121,7 @@ struct sc_screen {
 struct sc_screen_params {
     bool video;
     bool camera;
+    bool camera_cutout_requested;
     bool flex_display;
 
     struct sc_controller *controller;

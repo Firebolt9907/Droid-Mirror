@@ -16,6 +16,29 @@ sc_device_msg_deserialize(const uint8_t *buf, size_t len,
 
     msg->type = buf[0];
     switch (msg->type) {
+        case DEVICE_MSG_TYPE_CAMERA_CUTOUT: {
+            if (len < 6) return 0;
+            unsigned count = buf[5];
+            if (count > 4) return -1;
+            if (len < 6 + count * 16) return 0;
+            struct sc_camera_cutout *cutout = &msg->camera_cutout;
+            cutout->width = sc_read16be(buf + 1);
+            cutout->height = sc_read16be(buf + 3);
+            cutout->count = count;
+            if (!cutout->width || !cutout->height) return -1;
+            for (unsigned i = 0; i < count; ++i) {
+                const uint8_t *p = buf + 6 + i * 16;
+                struct sc_cutout_rect *rect = &cutout->rects[i];
+                rect->left = (int32_t) sc_read32be(p);
+                rect->top = (int32_t) sc_read32be(p + 4);
+                rect->right = (int32_t) sc_read32be(p + 8);
+                rect->bottom = (int32_t) sc_read32be(p + 12);
+                if (rect->left < -65535 || rect->top < -65535
+                        || rect->right > 65535 || rect->bottom > 65535
+                        || rect->right <= rect->left || rect->bottom <= rect->top) return -1;
+            }
+            return 6 + count * 16;
+        }
         case DEVICE_MSG_TYPE_CLIPBOARD: {
             if (len < 5) {
                 // at least type + empty string length

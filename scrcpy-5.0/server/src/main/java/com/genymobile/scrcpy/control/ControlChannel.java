@@ -10,8 +10,12 @@ public final class ControlChannel {
     private final DeviceMessageWriter writer;
 
     public ControlChannel(LocalSocket controlSocket) throws IOException {
-        reader = new ControlMessageReader(controlSocket.getInputStream());
-        writer = new DeviceMessageWriter(controlSocket.getOutputStream());
+        this(controlSocket.getInputStream(), controlSocket.getOutputStream());
+    }
+
+    public ControlChannel(java.io.InputStream input, java.io.OutputStream output) {
+        reader = new ControlMessageReader(input);
+        writer = new DeviceMessageWriter(output);
     }
 
     public ControlMessage recv() throws IOException {

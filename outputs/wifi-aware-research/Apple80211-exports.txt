@@ -1,0 +1,72 @@
+/System/Library/PrivateFrameworks/Apple80211.framework/Apple80211 [arm64e]:
+    -exports:
+        offset      symbol
+        0x000009D0  _ACInterfaceCreate
+        0x00000A94  _ACInterfaceDeviceNameCopy
+        0x00000BA8  _ACInterfaceGetPower
+        0x00000B28  _ACInterfaceSetPower
+        0x00000C80  _ACNetworkAssociate
+        0x00000C78  _ACNetworkCopyBroadcastScanResults
+        0x00000C88  _ACNetworkCopyDirectedScanResult
+        0x00000C10  _ACNetworkDisassociate
+        0x00000C90  _ACNetworkGetBSSID
+        0x00000C98  _ACNetworkSet8021XProfile
+        0x00000CA0  _ACNetworkSetRemember
+        0x00000CA8  _ACNetworkSetRememberAtIndex
+        [re-export] _Apple80211Associate (from IO80211)
+        [re-export] _Apple80211Associate2 (from IO80211)
+        [re-export] _Apple80211BindToInterface (from IO80211)
+        [re-export] _Apple80211BindToInterfaceWithParams (from IO80211)
+        [re-export] _Apple80211BindToInterfaceWithService (from IO80211)
+        [re-export] _Apple80211Close (from IO80211)
+        [re-export] _Apple80211CopyAwdlPreferredChannels (from IO80211)
+        [re-export] _Apple80211CopyCurrentNetwork (from IO80211)
+        [re-export] _Apple80211CopyLeakyAPStatus (from IO80211)
+        [re-export] _Apple80211CopyRangingCapabilities (from IO80211)
+        [re-export] _Apple80211CopyValue (from IO80211)
+        [re-export] _Apple80211Disassociate (from IO80211)
+        [re-export] _Apple80211DisassociateExt (from IO80211)
+        [re-export] _Apple80211ErrToStr (from IO80211)
+        [re-export] _Apple80211EventMonitoringHalt (from IO80211)
+        [re-export] _Apple80211EventMonitoringInit (from IO80211)
+        [re-export] _Apple80211EventMonitoringInit2 (from IO80211)
+        [re-export] _Apple80211EventMonitoringInitWithDispatchQueue (from IO80211)
+        [re-export] _Apple80211EventSocketRef (from IO80211)
+        [re-export] _Apple80211FilterMonitoringEvent (from IO80211)
+        [re-export] _Apple80211GasRequest (from IO80211)
+        [re-export] _Apple80211GenerateUUIDForScan (from IO80211)
+        [re-export] _Apple80211Get (from IO80211)
+        [re-export] _Apple80211GetBeaconCache (from IO80211)
+        [re-export] _Apple80211GetIOReportingService (from IO80211)
+        [re-export] _Apple80211GetIfListCopy (from IO80211)
+        [re-export] _Apple80211GetInfoCopy (from IO80211)
+        [re-export] _Apple80211GetInterfaceNameCopy (from IO80211)
+        [re-export] _Apple80211GetPower (from IO80211)
+        [re-export] _Apple80211GetRangingPhyErrorString (from IO80211)
+        [re-export] _Apple80211GetRsnAuthSelectorPriorityMap (from IO80211)
+        [re-export] _Apple80211GetVirtualIfListCopy (from IO80211)
+        [re-export] _Apple80211IsAuthSelAllowed (from IO80211)
+        [re-export] _Apple80211MapUserBuffer (from IO80211)
+        [re-export] _Apple80211MaxLinkSpeed (from IO80211)
+        [re-export] _Apple80211MonitorEventsWithBlock (from IO80211)
+        [re-export] _Apple80211Open (from IO80211)
+        [re-export] _Apple80211ParseWPAPassword (from IO80211)
+        [re-export] _Apple80211RangeAsync (from IO80211)
+        [re-export] _Apple80211RangingStopAsync (from IO80211)
+        [re-export] _Apple80211RawEventMonitoringInit (from IO80211)
+        [re-export] _Apple80211RawEventMonitoringInitWithCFRunLoop (from IO80211)
+        [re-export] _Apple80211RawGet (from IO80211)
+        [re-export] _Apple80211RawP2PEventMonitoringInit (from IO80211)
+        [re-export] _Apple80211RawSet (from IO80211)
+        [re-export] _Apple80211RawStartMonitoringEventAll (from IO80211)
+        [re-export] _Apple80211ReturnToString (from IO80211)
+        [re-export] _Apple80211Scan (from IO80211)
+        [re-export] _Apple80211ScanAsync (from IO80211)
+        [re-export] _Apple80211ScanDynamic (from IO80211)
+        [re-export] _Apple80211Set (from IO80211)
+        [re-export] _Apple80211SetPower (from IO80211)
+        [re-export] _Apple80211SetProperty (from IO80211)
+        [re-export] _Apple80211StartMonitoringEvent (from IO80211)
+        [re-export] _Apple80211StopMonitoringEvent (from IO80211)
+        [re-export] _convertToApple80211Error (from IO80211)
+        [re-export] _get_apple80211_log (from IO80211)

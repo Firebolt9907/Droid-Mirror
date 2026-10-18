@@ -413,6 +413,10 @@ execute_server(struct sc_server *server,
         // By default, cleanup is true
         ADD_PARAM("cleanup=false");
     }
+    const char *transport = getenv("DROIDMIRROR_TRANSPORT");
+    if (transport && !strcmp(transport, "adb")) {
+        ADD_PARAM("droidmirror_session=true");
+    }
     if (!params->power_on) {
         // By default, power_on is true
         ADD_PARAM("power_on=false");
@@ -979,6 +983,11 @@ run_external_video(struct sc_server *server) {
     if (!device_read_info(&server->intr, socket, &server->info)) {
         goto fail;
     }
+    if (server->params.external_control_port) {
+        server->control_socket = connect_to_server(server, 1, 0, IPV4_LOCALHOST,
+            server->params.external_control_port);
+        if (server->control_socket == SC_SOCKET_NONE) goto fail;
+    }
     server->cbs->on_connected(server, server->cbs_userdata);
     sc_mutex_lock(&server->mutex);
     while (!server->stopped) {
@@ -986,6 +995,7 @@ run_external_video(struct sc_server *server) {
     }
     sc_mutex_unlock(&server->mutex);
     net_interrupt(socket);
+    if (server->control_socket != SC_SOCKET_NONE) net_interrupt(server->control_socket);
     return 0;
 fail:
     server->cbs->on_connection_failed(server, server->cbs_userdata);

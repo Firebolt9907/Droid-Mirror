@@ -7,6 +7,7 @@ import com.genymobile.scrcpy.model.Position;
  */
 public final class ControlMessage {
 
+    public static final int TYPE_GET_CAMERA_CUTOUT = 25;
     public static final int TYPE_INJECT_KEYCODE = 0;
     public static final int TYPE_INJECT_TEXT = 1;
     public static final int TYPE_INJECT_TOUCH_EVENT = 2;
@@ -30,6 +31,7 @@ public final class ControlMessage {
     public static final int TYPE_CAMERA_ZOOM_OUT = 20;
     public static final int TYPE_RESIZE_DISPLAY = 21;
     public static final int TYPE_SCAN_FILE = 22;
+    public static final int TYPE_WHEEL_SCROLL = 24;
 
     public static final long SEQUENCE_INVALID = 0;
 
@@ -45,6 +47,7 @@ public final class ControlMessage {
     private int actionButton; // MotionEvent.BUTTON_*
     private int buttons; // MotionEvent.BUTTON_*
     private long pointerId;
+    private long eventTime = -1;
     private float pressure;
     private Position position;
     private float hScroll;
@@ -92,6 +95,11 @@ public final class ControlMessage {
         msg.actionButton = actionButton;
         msg.buttons = buttons;
         return msg;
+    }
+
+    public static ControlMessage createWheelScroll(Position position, int dx, int dy) {
+        ControlMessage msg = new ControlMessage(); msg.type = TYPE_WHEEL_SCROLL;
+        msg.position = position; msg.hScroll = dx; msg.vScroll = dy; return msg;
     }
 
     public static ControlMessage createInjectScrollEvent(Position position, float hScroll, float vScroll, int buttons) {
@@ -222,6 +230,9 @@ public final class ControlMessage {
     public int getButtons() {
         return buttons;
     }
+
+    public long getEventTime() { return eventTime; }
+    public void setEventTime(long value) { eventTime = value; }
 
     public long getPointerId() {
         return pointerId;

@@ -19,32 +19,52 @@ public func refreshDroidMirrorBLEMenu() {
     integration?.refreshMenu()
 }
 
+func shareDroidMirrorLink(_ url: URL) { integration?.shareLink(url) }
+
 private final class BLEIntegration: NSObject {
+    private let links = LinkSharing()
+    func shareLink(_ url: URL) { if NotificationRuntime.background { links.share(url) } }
+    private var mirrorTarget = MirrorWindowCommandTarget()
     private var controller: BLEController?
     private var timer: Timer?
     private var subscriptions = Set<AnyCancellable>()
     private var menuItem: NSMenuItem?
     private var statusItem: NSMenuItem?
     private var endpointItem: NSMenuItem?
+    private var adbItem: NSMenuItem?
     private let enabledKey = "DroidMirror.BLE.enabled"
     private var discoveryNotifications: DiscoveryNotifications?
     private var phoneNotifications: AndroidNotificationBridge?
+    private var media: MediaPlaybackSync?
+    private var mediaItem: NSMenuItem?
+    private var mediaStatusItem: NSMenuItem?
+    private var remoteMediaStatus = "Media syncing off"
+    private var clipboard: ClipboardSync?
+    private var taskContinuation: TaskContinuation?
+    private var hotspot: PhoneHotspot?
+    private var clipboardItem: NSMenuItem?
+    private var clipboardStatusItem: NSMenuItem?
+    private var remoteClipboardStatus = "Clipboard mirroring off"
     private var menuObservers = [NSObjectProtocol]()
     private var repairingMenu = false
     private var stopped = false
     private var remoteStatus = "Starting background receiver…"
-    private var remoteEndpoint = "Waiting for Android endpoint"
+    private var remoteEndpoint = "Wireless ADB off"
 
     override init() {
         super.init()
         discoveryNotifications = DiscoveryNotifications(warningsEnabled: !NotificationRuntime.background)
         phoneNotifications = NotificationRuntime.background ? AndroidNotificationBridge() : nil
+        media = NotificationRuntime.background ? MediaPlaybackSync() : nil
+        clipboard = NotificationRuntime.background ? ClipboardSync() : nil
+        taskContinuation = NotificationRuntime.background ? TaskContinuation() : nil
+        hotspot = NotificationRuntime.background ? PhoneHotspot() : nil
         discoveryNotifications?.onResponse = { [weak self] response in self?.phoneNotifications?.respond(response) }
         NotificationRuntime.preferences.register(defaults: [enabledKey: true])
         if NotificationRuntime.background && NotificationRuntime.preferences.bool(forKey: enabledKey) { start() }
         let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
             guard let self else { return }
-            if NotificationRuntime.background { self.publishStatus() }
+            if NotificationRuntime.background { self.links.tick(); self.publishStatus() }
             else { self.refreshMenu() }
         }
         self.timer = timer
@@ -55,9 +75,17 @@ private final class BLEIntegration: NSObject {
             })
         }
         let distributed = DistributedNotificationCenter.default()
+        menuObservers.append(distributed.addObserver(forName: Notification.Name("app.droidmirror.sessionState"), object: nil, queue: .main) {
+            [weak self] event in
+            guard let pid = event.userInfo?["pid"] as? Int,
+                  let active = event.userInfo?["active"] as? Bool else { return }
+            self?.mirrorTarget.session(pid: pid, active: active)
+        })
         menuObservers.append(distributed.addObserver(forName: Notification.Name("app.droidmirror.receiverStatus"), object: nil, queue: .main) {
             [weak self] event in
             guard !NotificationRuntime.background, let self else { return }
+            self.remoteMediaStatus = event.userInfo?["media"] as? String ?? self.remoteMediaStatus
+            self.remoteClipboardStatus = event.userInfo?["clipboard"] as? String ?? self.remoteClipboardStatus
             self.remoteStatus = event.userInfo?["status"] as? String ?? self.remoteStatus
             self.remoteEndpoint = event.userInfo?["endpoint"] as? String ?? self.remoteEndpoint
             self.refreshMenu()
@@ -66,10 +94,34 @@ private final class BLEIntegration: NSObject {
             [weak self] _ in
             guard NotificationRuntime.background, let self else { return }
             BLETrust.invalidate()
+            self.media?.clear()
+            self.media?.controller = nil
+            self.hotspot?.controller = nil
+            self.hotspot?.clear()
+            self.taskContinuation?.clear()
+            self.links.cancel()
             self.controller?.stop(); self.controller = nil; self.subscriptions.removeAll()
             if NotificationRuntime.preferences.bool(forKey: self.enabledKey) { self.start() }
             self.phoneNotifications?.controller = self.controller
             self.publishStatus()
+        })
+        menuObservers.append(distributed.addObserver(forName: Notification.Name("app.droidmirror.adbConfiguration"), object: nil, queue: .main) {
+            [weak self] _ in
+            NotificationRuntime.preferences.synchronize()
+            self?.controller?.configureADB()
+        })
+        menuObservers.append(distributed.addObserver(forName: Notification.Name("app.droidmirror.clipboardConfiguration"), object: nil, queue: .main) {
+            [weak self] _ in
+            guard NotificationRuntime.background else { return }
+            self?.clipboard?.configure()
+        })
+        menuObservers.append(distributed.addObserver(forName: Notification.Name("app.droidmirror.hotspotConfiguration"), object: nil, queue: .main) {
+            [weak self] _ in
+            guard NotificationRuntime.background else { return }
+            self?.hotspot?.configure()
+        })
+        menuObservers.append(distributed.addObserver(forName: Notification.Name("app.droidmirror.mediaConfiguration"), object: nil, queue: .main) {
+            [weak self] _ in self?.media?.configure()
         })
         refreshMenu()
     }
@@ -77,16 +129,61 @@ private final class BLEIntegration: NSObject {
     private func publishStatus() {
         NotificationRuntime.post("app.droidmirror.receiverStatus", info: [
             "status": controller?.status ?? "Bluetooth receiver disabled",
+            "bleDiagnostics": controller?.diagnostics ?? "disabled",
             "notifications": phoneNotifications?.diagnostics ?? "unavailable",
-            "endpoint": controller.flatMap { bridge in bridge.port.map { "\(bridge.tailscaleIP):\($0)" } } ?? "Waiting for Android endpoint"])
+            "media": media?.status ?? "Media syncing off",
+            "clipboard": clipboard?.status ?? "Clipboard mirroring off",
+            "endpoint": controller?.adbStatus ?? "Wireless ADB off"])
     }
 
     private func start() {
         let bridge = BLEController()
         controller = bridge
+        links.controller = bridge
         phoneNotifications?.controller = bridge
-        bridge.onEvent = { [weak self] event in self?.phoneNotifications?.receive(event) }
-        bridge.onAuthenticated = { [weak self] in self?.phoneNotifications?.flush() }
+        media?.controller = bridge
+        clipboard?.controller = bridge
+        taskContinuation?.controller = bridge
+        hotspot?.controller = bridge
+        bridge.onEvent = { [weak self] event in
+            if ["shareLink", "openLinkResult"].contains(event["type"] as? String ?? "") {
+                self?.links.receive(event)
+            } else if (event["type"] as? String)?.hasPrefix("media") == true {
+                self?.media?.receive(event)
+            } else if event["type"] as? String == "hotspotResult" {
+                self?.hotspot?.receive(event)
+            } else if event["type"] as? String == "taskContinuation" {
+                self?.taskContinuation?.receive(event)
+            } else if (event["type"] as? String)?.hasPrefix("clipboard") == true {
+                self?.clipboard?.receive(event)
+            } else if event["type"] as? String == "minimizeMirror" {
+                guard let pid = self?.mirrorTarget.target() else {
+                    NSLog("DroidMirror minimize: no active mirror heartbeat")
+                    return
+                }
+                NSLog("DroidMirror minimize: forwarding to host %d", pid)
+                DistributedNotificationCenter.default().postNotificationName(
+                    Notification.Name("app.droidmirror.minimizeMirror"),
+                    object: String(pid), userInfo: nil, deliverImmediately: true)
+            } else {
+                self?.phoneNotifications?.receive(event)
+            }
+        }
+        bridge.onDisconnected = { [weak self] in
+            self?.media?.clear()
+            self?.clipboard?.disconnected()
+            self?.taskContinuation?.clear()
+            self?.hotspot?.clear()
+            self?.links.disconnected()
+        }
+        bridge.onAuthenticated = { [weak self] in
+            self?.phoneNotifications?.flush()
+            self?.media?.connected()
+            self?.clipboard?.connected()
+            self?.taskContinuation?.connected()
+            self?.links.connected()
+            self?.hotspot?.configure()
+        }
         bridge.$status.sink { status in
             NSLog("DroidMirror BLE: %@", status)
         }.store(in: &subscriptions)
@@ -94,9 +191,14 @@ private final class BLEIntegration: NSObject {
 
     func stop() {
         stopped = true
+        links.cancel()
         menuObservers.forEach { NotificationCenter.default.removeObserver($0) }
         menuObservers.forEach { DistributedNotificationCenter.default().removeObserver($0) }
         menuObservers.removeAll()
+        media?.stop()
+        clipboard?.stop()
+        taskContinuation?.stop()
+        hotspot?.stop()
         phoneNotifications?.stop()
         discoveryNotifications?.stop()
         timer?.invalidate()
@@ -108,20 +210,38 @@ private final class BLEIntegration: NSObject {
     private func installMenu() {
         guard let menu = NSApp.mainMenu?.items.first?.submenu else { return }
         if let menuItem { BLEMenuAttachment.ensure(menuItem, in: menu); return }
-        let root = NSMenuItem(title: "Wireless ADB over Bluetooth", action: nil, keyEquivalent: "")
+        let root = NSMenuItem(title: "Background Bluetooth", action: nil, keyEquivalent: "")
         let sub = NSMenu(title: root.title)
-        let toggle = NSMenuItem(title: "Automatically discover ADB port", action: #selector(toggleBLE(_:)), keyEquivalent: "")
+        let toggle = NSMenuItem(title: "Keep phone connected over Bluetooth", action: #selector(toggleBLE(_:)), keyEquivalent: "")
         toggle.target = self
         toggle.state = NotificationRuntime.preferences.bool(forKey: enabledKey) ? .on : .off
         sub.addItem(toggle)
+        let adb = NSMenuItem(title: "Automatically connect Wireless ADB", action: #selector(toggleADB(_:)), keyEquivalent: "")
+        adb.target = self
+        sub.addItem(adb)
+        adbItem = adb
         let configure = NSMenuItem(title: "Set phone IP address…", action: #selector(configureHost(_:)), keyEquivalent: "")
         configure.target = self
         sub.addItem(configure)
-        let pair = NSMenuItem(title: "Pair phone using authorized ADB…", action: #selector(pairPhone(_:)), keyEquivalent: "")
-        pair.target = self; sub.addItem(pair)
+        sub.addItem(.separator())
+        let clipboardToggle = NSMenuItem(title: "Mirror clipboard over Bluetooth", action: #selector(toggleClipboard(_:)), keyEquivalent: "")
+        clipboardToggle.target = self
+        sub.addItem(clipboardToggle)
+        clipboardItem = clipboardToggle
+        let clipboardStatus = NSMenuItem(title: remoteClipboardStatus, action: nil, keyEquivalent: "")
+        sub.addItem(clipboardStatus)
+        clipboardStatusItem = clipboardStatus
+        sub.addItem(.separator())
+        let mediaToggle = NSMenuItem(title: "Sync phone and Apple Music playback", action: #selector(toggleMedia(_:)), keyEquivalent: "")
+        mediaToggle.target = self
+        sub.addItem(mediaToggle)
+        mediaItem = mediaToggle
+        let mediaStatus = NSMenuItem(title: remoteMediaStatus, action: nil, keyEquivalent: "")
+        sub.addItem(mediaStatus)
+        mediaStatusItem = mediaStatus
         sub.addItem(.separator())
         let status = NSMenuItem(title: "Starting Bluetooth…", action: nil, keyEquivalent: "")
-        let endpoint = NSMenuItem(title: "Waiting for endpoint", action: nil, keyEquivalent: "")
+        let endpoint = NSMenuItem(title: "Wireless ADB off", action: nil, keyEquivalent: "")
         sub.addItem(status)
         sub.addItem(endpoint)
         root.submenu = sub
@@ -140,14 +260,15 @@ private final class BLEIntegration: NSObject {
     }
 
     private func updateMenu() {
+        adbItem?.state = NotificationRuntime.preferences.bool(forKey: BLEController.automaticADBKey) ? .on : .off
+        mediaItem?.state = NotificationRuntime.preferences.bool(forKey: MediaPlaybackSync.enabledKey) ? .on : .off
+        mediaStatusItem?.title = remoteMediaStatus
+        clipboardItem?.state = NotificationRuntime.preferences.bool(forKey: ClipboardSync.enabledKey) ? .on : .off
+        clipboardStatusItem?.title = remoteClipboardStatus
         menuItem?.submenu?.items.first?.state = NotificationRuntime.preferences.bool(forKey: enabledKey) ? .on : .off
         statusItem?.title = NotificationRuntime.background ? (controller?.status ?? "Bluetooth discovery disabled") : remoteStatus
         if !NotificationRuntime.background { endpointItem?.title = remoteEndpoint; return }
-        if let bridge = controller, let port = bridge.port {
-            endpointItem?.title = "\(bridge.tailscaleIP):\(port)"
-        } else {
-            endpointItem?.title = "Waiting for Android endpoint"
-        }
+        endpointItem?.title = controller?.adbStatus ?? "Wireless ADB off"
     }
 
     @objc private func toggleBLE(_ sender: NSMenuItem) {
@@ -161,11 +282,38 @@ private final class BLEIntegration: NSObject {
         if enabled {
             start()
         } else {
+            links.cancel()
+            media?.clear()
+            taskContinuation?.clear()
             controller?.stop()
             controller = nil
             subscriptions.removeAll()
         }
         updateMenu()
+    }
+
+    @objc private func toggleMedia(_ sender: NSMenuItem) {
+        let enabled = !NotificationRuntime.preferences.bool(forKey: MediaPlaybackSync.enabledKey)
+        NotificationRuntime.preferences.set(enabled, forKey: MediaPlaybackSync.enabledKey)
+        NotificationRuntime.preferences.synchronize()
+        NotificationRuntime.post("app.droidmirror.mediaConfiguration")
+        updateMenu()
+    }
+
+    @objc private func toggleADB(_ sender: NSMenuItem) {
+        let enabled = !NotificationRuntime.preferences.bool(forKey: BLEController.automaticADBKey)
+        NotificationRuntime.preferences.set(enabled, forKey: BLEController.automaticADBKey)
+        NotificationRuntime.preferences.synchronize()
+        NotificationRuntime.post("app.droidmirror.adbConfiguration")
+        updateMenu()
+    }
+
+    @objc private func toggleClipboard(_ sender: NSMenuItem) {
+        let enabled = !NotificationRuntime.preferences.bool(forKey: ClipboardSync.enabledKey)
+        NotificationRuntime.preferences.set(enabled, forKey: ClipboardSync.enabledKey)
+        NotificationRuntime.preferences.synchronize()
+        sender.state = enabled ? .on : .off
+        NotificationRuntime.post("app.droidmirror.clipboardConfiguration")
     }
 
     @objc private func configureHost(_ sender: Any?) {
@@ -188,63 +336,7 @@ private final class BLEIntegration: NSObject {
         }
         NotificationRuntime.preferences.set(host, forKey: "DroidMirror.BLE.host")
         NotificationRuntime.preferences.synchronize()
-        if !NotificationRuntime.background { NotificationRuntime.post("app.droidmirror.receiverConfiguration"); return }
-        controller?.tailscaleIP = host
-        controller?.requestEndpoint()
-        controller?.connectADB(force: true)
+        NotificationRuntime.post("app.droidmirror.adbConfiguration")
     }
 
-    @objc private func pairPhone(_ sender: Any?) {
-        guard let adb = BLEController.findADB() else { return }
-        let alert = NSAlert()
-        alert.messageText = "Pair encrypted Bluetooth"
-        alert.informativeText = "On your phone, open BLE ADB Bridge and tap Allow Mac pairing for 60 seconds. This uses an already-authorized ADB connection to provision a private key."
-        alert.addButton(withTitle: "Continue"); alert.addButton(withTitle: "Cancel")
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-        DispatchQueue.global(qos: .userInitiated).async {
-            let task = Process(); task.executableURL = adb; task.arguments = ["devices"]
-            let result = (try? BLEController.runBounded(task, timeout: 8)) ?? ""
-            let devices = result.split(separator: "\n").compactMap { line -> String? in
-                let columns = line.split(whereSeparator: { $0.isWhitespace })
-                return columns.count == 2 && columns[1] == "device" ? String(columns[0]) : nil
-            }
-            DispatchQueue.main.async {
-                guard !devices.isEmpty else { self.pairResult(false); return }
-                var serial = devices[0]
-                if devices.count > 1 {
-                    let choice = NSAlert(); choice.messageText = "Choose the phone to pair"
-                    let popup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 350, height: 26))
-                    popup.addItems(withTitles: devices); choice.accessoryView = popup
-                    choice.addButton(withTitle: "Pair"); choice.addButton(withTitle: "Cancel")
-                    guard choice.runModal() == .alertFirstButtonReturn else { return }
-                    serial = popup.titleOfSelectedItem ?? serial
-                }
-                DispatchQueue.global(qos: .userInitiated).async {
-                    var success = false
-                    do {
-                        let key = try BLETrust.random()
-                        let task = Process(); task.executableURL = adb; task.arguments = ["-s", serial, "shell", "sh"]
-                        // Key is supplied through stdin, never process arguments or logs.
-                        let command = "content call --uri content://dev.bleadb.bridge.pairing --method pair --arg '\(key.base64EncodedString())'\n"
-                        let output = try BLEController.runBounded(task, timeout: 10, input: Data(command.utf8))
-                        if output.contains("status=paired-v2") { try BLETrust.save(key); success = true }
-                    } catch { /* No key or remote command output is logged. */ }
-                    DispatchQueue.main.async { self.pairResult(success) }
-                }
-            }
-        }
-    }
-    private func pairResult(_ success: Bool) {
-        if success {
-            NotificationRuntime.preferences.set(true, forKey: enabledKey)
-            NotificationRuntime.preferences.synchronize()
-            if NotificationRuntime.background { controller?.stop(); subscriptions.removeAll(); start() }
-            else { NotificationRuntime.post("app.droidmirror.receiverConfiguration") }
-        }
-        let alert = NSAlert()
-        alert.messageText = success ? "Encrypted Bluetooth paired" : "Pairing did not complete"
-        alert.informativeText = success ? "Enable DroidMirror notification forwarding in Android's notification access settings." :
-            "Install BLE ADB Bridge 2.0, authorize ADB, then open the phone's 60-second pairing window and try again."
-        alert.runModal()
-    }
 }

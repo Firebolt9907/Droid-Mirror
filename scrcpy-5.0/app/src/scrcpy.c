@@ -41,6 +41,10 @@
 #include "util/log.h"
 #include "util/rand.h"
 #include "util/str.h"
+#include "util/sdl.h"
+#ifdef __APPLE__
+#include <dlfcn.h>
+#endif
 #include "util/term.h"
 #include "util/timeout.h"
 #include "util/tick.h"
@@ -120,7 +124,16 @@ sdl_configure_ctrl_c_windows(void) {
 static enum scrcpy_exit_code
 event_loop(struct scrcpy *s, bool has_screen) {
     SDL_Event event;
-    while (SDL_WaitEvent(&event)) {
+    for (;;) {
+#ifdef __APPLE__
+        void (*pump)(void) = dlsym(RTLD_DEFAULT, "DroidMirrorPumpPresentation");
+        if (getenv("DROIDMIRROR_SESSION_COMMANDS") && pump) pump();
+#endif
+        bool hosted = getenv("DROIDMIRROR_SESSION_COMMANDS") != NULL;
+        if (!(hosted ? SDL_WaitEventTimeout(&event, 50) : SDL_WaitEvent(&event))) {
+            if (hosted) continue;
+            break;
+        }
         switch (event.type) {
             case SC_EVENT_DEVICE_DISCONNECTED:
                 LOGW("Device disconnected");
@@ -163,7 +176,16 @@ event_loop(struct scrcpy *s, bool has_screen) {
 static bool
 await_for_server(bool *connected) {
     SDL_Event event;
-    while (SDL_WaitEvent(&event)) {
+    for (;;) {
+#ifdef __APPLE__
+        void (*pump)(void) = dlsym(RTLD_DEFAULT, "DroidMirrorPumpPresentation");
+        if (getenv("DROIDMIRROR_SESSION_COMMANDS") && pump) pump();
+#endif
+        bool hosted = getenv("DROIDMIRROR_SESSION_COMMANDS") != NULL;
+        if (!(hosted ? SDL_WaitEventTimeout(&event, 50) : SDL_WaitEvent(&event))) {
+            if (hosted) continue;
+            break;
+        }
         switch (event.type) {
             case SDL_EVENT_QUIT:
                 if (connected) {
@@ -386,7 +408,11 @@ scrcpy(struct scrcpy_options *options) {
         return SCRCPY_EXIT_FAILURE;
     }
 
-    atexit(SDL_Quit);
+    static bool registered_sdl_quit;
+    if (!registered_sdl_quit) {
+        atexit(SDL_Quit);
+        registered_sdl_quit = true;
+    }
 
     enum scrcpy_exit_code ret = SCRCPY_EXIT_FAILURE;
 
@@ -439,6 +465,7 @@ scrcpy(struct scrcpy_options *options) {
         .tunnel_host = options->tunnel_host,
         .tunnel_port = options->tunnel_port,
         .external_video_port = options->external_video_port,
+        .external_control_port = options->external_control_port,
         .min_size_alignment = options->min_size_alignment,
         .max_size = options->max_size,
         .video_bit_rate = options->video_bit_rate,
@@ -502,6 +529,52 @@ scrcpy(struct scrcpy_options *options) {
     // Set hints before starting the server thread to avoid race conditions in
     // SDL
     sc_sdl_set_hints(options->render_driver, options->disable_screensaver);
+
+#ifdef __APPLE__
+    // Create the actual video window before connecting. sc_screen_init adopts
+    // this SDL_Window, so the spinner and decoded frames share one NSWindow.
+    if (options->window && options->video_playback && getenv("DROIDMIRROR_HOST_PID")) {
+        if (!SDL_Init(SDL_INIT_VIDEO)) { goto end; }
+        int width = options->window_width ? options->window_width : 430;
+        int height = options->window_height ? options->window_height : width * 20 / 9;
+        SDL_Window *loading = sc_sdl_create_window(options->window_title,
+            options->window_x == SC_WINDOW_POSITION_UNDEFINED ? SDL_WINDOWPOS_CENTERED : options->window_x,
+            options->window_y == SC_WINDOW_POSITION_UNDEFINED ? SDL_WINDOWPOS_CENTERED : options->window_y,
+            width, height, SDL_WINDOW_BORDERLESS | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);
+        if (!loading) { goto end; }
+        sc_sdl_keep_connecting_window(loading);
+        void (*show_loading)(SDL_Window *) = dlsym(RTLD_DEFAULT, "DroidMirrorShowConnecting");
+        if (show_loading) { show_loading(loading); }
+        SDL_ShowWindow(loading);
+        // The host completes phone availability and audio checks while this
+        // window remains interactive. No Android session starts before approval.
+        const char *gate = getenv("DROIDMIRROR_START_GATE");
+        if (gate) {
+            Uint64 deadline = SDL_GetTicks() + 60000;
+            for (;;) {
+                FILE *file = fopen(gate, "r");
+                if (file) {
+                    int audio = fgetc(file);
+                    fclose(file);
+                    remove(gate);
+                    if (audio == '0') { params.audio = options->audio = options->audio_playback = false; }
+                    break;
+                }
+                SDL_Event event;
+                while (SDL_PollEvent(&event)) {
+                    if (event.type == SDL_EVENT_QUIT) { ret = SCRCPY_EXIT_SUCCESS; goto end; }
+                }
+                if (SDL_GetTicks() > deadline) { LOGE("Phone availability check timed out"); goto end; }
+                void (*pump)(void) = dlsym(RTLD_DEFAULT, "DroidMirrorPumpPresentation");
+                if (pump) pump();
+                SDL_Delay(10);
+            }
+            // sc_server_init copies its parameters, so update the approved audio
+            // preference before starting its connection thread.
+            s->server.params.audio = params.audio;
+        }
+    }
+#endif
 
     if (!sc_server_start(&s->server)) {
         goto end;
@@ -582,7 +655,7 @@ scrcpy(struct scrcpy_options *options) {
 
     struct sc_file_pusher *fp = NULL;
 
-    if (options->window && options->control) {
+    if (options->window && options->control && !options->external_video_port) {
         if (!sc_file_pusher_init(&s->file_pusher, &s->controller, serial,
                                  options->push_target)) {
             goto end;
@@ -1089,14 +1162,14 @@ end:
     }
 
     if (screen_initialized) {
-        if (disconnected) {
+        if (disconnected && !getenv("DROIDMIRROR_SESSION_COMMANDS")) {
             sc_screen_handle_disconnection(&s->screen);
         }
         LOGD("Quit...");
 
         // Close the window immediately, because sc_screen_destroy() may only be
         // called once the video decoder thread is joined (it may take time)
-        sc_screen_hide_window(&s->screen);
+        if (!getenv("DROIDMIRROR_SESSION_COMMANDS")) sc_screen_hide_window(&s->screen);
     }
 
     if (video_decoder_started) {

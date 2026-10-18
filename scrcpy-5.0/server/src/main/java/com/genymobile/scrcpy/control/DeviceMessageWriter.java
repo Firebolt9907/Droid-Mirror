@@ -23,6 +23,9 @@ public class DeviceMessageWriter {
         int type = msg.getType();
         dos.writeByte(type);
         switch (type) {
+            case DeviceMessage.TYPE_CAMERA_CUTOUT:
+                dos.write(msg.getData());
+                break;
             case DeviceMessage.TYPE_CLIPBOARD:
                 String text = msg.getText();
                 byte[] raw = text.getBytes(StandardCharsets.UTF_8);

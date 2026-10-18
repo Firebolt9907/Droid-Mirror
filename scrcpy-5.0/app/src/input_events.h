@@ -380,6 +380,7 @@ struct sc_text_event {
 };
 
 struct sc_mouse_click_event {
+    uint64_t capture_time_ms;
     struct sc_position position;
     enum sc_action action;
     enum sc_mouse_button button;
@@ -395,6 +396,7 @@ struct sc_mouse_scroll_event {
 };
 
 struct sc_mouse_motion_event {
+    uint64_t capture_time_ms;
     struct sc_position position;
     uint64_t pointer_id;
     int32_t xrel;
@@ -403,6 +405,7 @@ struct sc_mouse_motion_event {
 };
 
 struct sc_touch_event {
+    uint64_t capture_time_ms;
     struct sc_position position;
     enum sc_touch_action action;
     uint64_t pointer_id;

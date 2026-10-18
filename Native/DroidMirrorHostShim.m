@@ -3,15 +3,16 @@
 #import <objc/runtime.h>
 #import <stdlib.h>
 #import <dlfcn.h>
+#import <mach-o/dyld.h>
+#import <limits.h>
+#import "ReceiverUpdate.h"
 
 static void (*DMOriginalSetExecutableURL)(NSTask *, SEL, NSURL *);
 static void (*DMOriginalReplyToTerminate)(NSApplication *, SEL, BOOL);
 static BOOL DMQuitting;
 static BOOL DMFinishingQuit;
 static NSUInteger DMQuitGeneration;
-static id DMExitObserver;
 static id DMQuitObserver;
-static id DMRequestObserver;
 static NSTask *DMMirrorTask;
 static void (*DMStopBLE)(void);
 static BOOL DMMirrorStarted;
@@ -34,22 +35,6 @@ static void DMMenuUpdate(NSMenu *menu, SEL selector) {
     DMOriginalMenuUpdate(menu, selector);
     // Repair after SwiftUI's validation/reconstruction, before presentation.
     if (!DMQuitting && DMRefreshBLEMenu) DMRefreshBLEMenu();
-}
-
-// Call the retained host's exported Swift methods with the compiler's Swift
-// calling convention. No guessed object offsets or accessibility access.
-__attribute__((visibility("default")))
-void DroidMirrorRequestMirror(void) {
-    if (DMQuitting || DMMirrorTask.running) return;
-    typedef void **(*SharedAddress)(void) __attribute__((swiftcall));
-    typedef void (*Refresh)(BOOL, void * __attribute__((swift_context))) __attribute__((swiftcall));
-    typedef void (*Start)(void * __attribute__((swift_context))) __attribute__((swiftcall));
-    SharedAddress shared = (SharedAddress)dlsym(RTLD_DEFAULT, "$s11DroidMirror0B5ModelC6sharedACvau");
-    Refresh refresh = (Refresh)dlsym(RTLD_DEFAULT, "$s11DroidMirror0B5ModelC14refreshDevices8silentlyySb_tF");
-    Start start = (Start)dlsym(RTLD_DEFAULT, "$s11DroidMirror0B5ModelC5startyyF");
-    if (!shared || !refresh || !start) return;
-    void **address = shared();
-    if (address && *address) { refresh(YES, *address); start(*address); }
 }
 
 static void DMFinishQuit(NSApplication *app) {
@@ -135,6 +120,9 @@ static void DMFixQuitMenu(NSMenu *menu) {
 }
 
 static void DMSetExecutableURL(NSTask *task, SEL selector, NSURL *url) {
+    if ([url.lastPathComponent isEqualToString:@"DroidMirrorRenderer"]) {
+        DMMirrorTask = task;
+    }
     if ([url.lastPathComponent isEqualToString:@"scrcpy"]) {
         NSURL *bundledClient = [[NSBundle.mainBundle.bundleURL
             URLByAppendingPathComponent:@"Contents/Helpers"]
@@ -151,8 +139,14 @@ static void DMSetExecutableURL(NSTask *task, SEL selector, NSURL *url) {
 
 __attribute__((constructor))
 static void DMInstallBundledScrcpyResolver(void) {
-    // A helper launched by LaunchServices must never inherit host swizzles.
-    if ([NSBundle.mainBundle.bundleIdentifier isEqualToString:@"app.droidmirror.notifications"]) return;
+    // The launcher injects this image into the host. Child processes may inherit
+    // that environment; never install application hooks in Bluetooth/ADB/helpers.
+    char executable[PATH_MAX]; uint32_t size = sizeof(executable);
+    if (_NSGetExecutablePath(executable, &size) != 0 ||
+        ![[[NSString stringWithUTF8String:executable] lastPathComponent] isEqualToString:@"DroidMirrorHost"] ||
+        ![NSBundle.mainBundle.bundleIdentifier isEqualToString:@"app.droidmirror.mac"]) return;
+    // The image is already loaded. Do not inject it into any future subprocess.
+    unsetenv("DYLD_INSERT_LIBRARIES");
     Method method = class_getInstanceMethod(NSTask.class, @selector(setExecutableURL:));
     if (method == NULL) {
         return;
@@ -174,18 +168,7 @@ static void DMInstallBundledScrcpyResolver(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
         NSURL *receiver = [NSBundle.mainBundle.bundleURL URLByAppendingPathComponent:
             @"Contents/Helpers/DroidMirror Notifications.app"];
-        if ([NSRunningApplication runningApplicationsWithBundleIdentifier:@"app.droidmirror.notifications"].count == 0) {
-            NSWorkspaceOpenConfiguration *configuration = [NSWorkspaceOpenConfiguration configuration];
-            configuration.activates = NO;
-            NSMutableDictionary *environment = [NSProcessInfo.processInfo.environment mutableCopy];
-            [environment removeObjectForKey:@"DYLD_INSERT_LIBRARIES"];
-            [environment removeObjectForKey:@"DROIDMIRROR_HOST_PID"];
-            configuration.environment = environment;
-            [[NSWorkspace sharedWorkspace] openApplicationAtURL:receiver configuration:configuration
-                completionHandler:^(NSRunningApplication *app, NSError *error) {
-                    if (error) NSLog(@"DroidMirror receiver launch failed: %@", error.localizedDescription);
-                }];
-        }
+        DMEnsureReceiver(receiver, DMMirrorTask.running);
         NSString *blePath = [NSBundle.mainBundle.bundlePath stringByAppendingPathComponent:
             @"Contents/Frameworks/libDroidMirrorBLE.dylib"];
         void *bleLibrary = dlopen(blePath.fileSystemRepresentation, RTLD_NOW | RTLD_LOCAL);
@@ -201,28 +184,20 @@ static void DMInstallBundledScrcpyResolver(void) {
         DMFixQuitMenu(NSApp.mainMenu);
         [NSTimer scheduledTimerWithTimeInterval:0.5 repeats:YES block:^(__unused NSTimer *timer) {
             DMFixQuitMenu(NSApp.mainMenu);
-            DMPublishSessionState();
+            // The persistent renderer publishes whether a stream is active.
             if (!DMQuitting && !DMMirrorStarted && DMMirrorTask.running) {
                 DMMirrorStarted = YES;
                 [[NSNotificationCenter defaultCenter] postNotificationName:@"app.droidmirror.mirrorStarted"
                                                                    object:nil];
             }
         }];
-        DMExitObserver = [[NSNotificationCenter defaultCenter]
-            addObserverForName:NSTaskDidTerminateNotification object:nil queue:NSOperationQueue.mainQueue
-            usingBlock:^(NSNotification *notification) {
-                NSTask *task = notification.object;
-                if ([task.executableURL.lastPathComponent isEqualToString:@"scrcpy"])
-                    [NSApp terminate:nil];
-            }];
+        // The model handles stream completion after reading its diagnostics.
+        // Exiting here races standalone phone-use and connection-failure alerts.
         DMQuitObserver = [[NSDistributedNotificationCenter defaultCenter]
             addObserverForName:@"app.droidmirror.quit" object:nil queue:NSOperationQueue.mainQueue
             usingBlock:^(NSNotification *notification) {
                 if ([notification.object intValue] == NSProcessInfo.processInfo.processIdentifier)
                     [NSApp terminate:nil];
             }];
-        DMRequestObserver = [[NSDistributedNotificationCenter defaultCenter]
-            addObserverForName:@"app.droidmirror.requestMirror" object:nil queue:NSOperationQueue.mainQueue
-            usingBlock:^(NSNotification *notification) { DroidMirrorRequestMirror(); }];
     });
 }

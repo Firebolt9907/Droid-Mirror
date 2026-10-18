@@ -13,6 +13,10 @@ enum NotificationRuntime {
     static var host: NSRunningApplication? {
         NSRunningApplication.runningApplications(withBundleIdentifier: "app.droidmirror.mac").first
     }
+    static func isHost(pid: Int32) -> Bool {
+        guard pid > 0, let process = NSRunningApplication(processIdentifier: pid), !process.isTerminated else { return false }
+        return process.bundleIdentifier == "app.droidmirror.mac" && process.bundleURL == host?.bundleURL
+    }
     static func post(_ name: String, info: [String: Any]? = nil) {
         DistributedNotificationCenter.default().postNotificationName(Notification.Name(name), object: nil,
             userInfo: info, deliverImmediately: true)
@@ -43,11 +47,38 @@ struct NotificationFocusPolicy {
 }
 
 struct NotificationDeliveryPolicy {
-    private(set) var active = false
-    mutating func session(active: Bool) { self.active = active }
-    mutating func reconcile(hostIsRunning: Bool, hasSessionState: Bool) {
-        if !hostIsRunning { active = false }
-        else if !hasSessionState { active = true }
+    func shouldDeliver(event: [String: Any]) -> Bool {
+        // Older companions omit these fields; keep their ordinary notifications
+        // working while newer companions filter persistent items at the source.
+        let package = event["package"] as? String ?? ""
+        let category = event["category"] as? String ?? ""
+        let channel = (event["channel"] as? String ?? "").lowercased()
+        let system = package == "android" || package == "com.android.systemui"
+        let routine = category == "service" || category == "transport" || event["progress"] as? Bool == true ||
+            (system && (category == "sys" || channel == "physical_keyboard" || channel == "virtual_keyboard"))
+        return !routine && package != "app.droidmirror.bluetooth" &&
+            event["ongoing"] as? Bool != true && event["persistent"] as? Bool != true
     }
-    func shouldDeliver() -> Bool { !active }
+}
+
+// The launcher execs the Swift host. LaunchServices may retain a stale -1 PID
+// even while the host is alive; its session heartbeat carries the actual PID.
+struct MirrorWindowCommandTarget {
+    private var pid: Int32?
+    private var updatedAt = Date.distantPast
+
+    mutating func session(pid: Int, active: Bool, now: Date = Date()) {
+        guard let validPID = Int32(exactly: pid), validPID > 0 else { return }
+        if active {
+            self.pid = validPID
+            updatedAt = now
+        } else if self.pid == validPID {
+            self.pid = nil
+        }
+    }
+
+    func target(now: Date = Date()) -> Int32? {
+        guard now.timeIntervalSince(updatedAt) <= 3 else { return nil }
+        return pid
+    }
 }

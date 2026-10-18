@@ -79,8 +79,21 @@ task_uhid_output(void *userdata) {
 }
 
 static void
+task_set_camera_cutout(void *userdata) {
+    sc_camera_cutout_set(userdata);
+    free(userdata);
+}
+
+static void
 process_msg(struct sc_receiver *receiver, struct sc_device_msg *msg) {
     switch (msg->type) {
+        case DEVICE_MSG_TYPE_CAMERA_CUTOUT: {
+            struct sc_camera_cutout *copy = malloc(sizeof(*copy));
+            if (!copy) return;
+            *copy = msg->camera_cutout;
+            if (!sc_run_on_main_thread(task_set_camera_cutout, copy, false)) free(copy);
+            break;
+        }
         case DEVICE_MSG_TYPE_CLIPBOARD: {
             // Take ownership of the text (do not destroy the msg)
             char *text = msg->clipboard.text;

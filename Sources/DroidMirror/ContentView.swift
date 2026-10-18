@@ -2,6 +2,7 @@ import AppKit
 import SwiftUI
 
 struct ContentView: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @EnvironmentObject private var model: MirrorModel
     @State private var showWireless = false
     @State private var showSettings = false
@@ -45,8 +46,13 @@ struct ContentView: View {
             }
 
             Button { model.isMirroring ? model.stop() : model.start() } label: {
-                Label(model.isMirroring ? "Stop" : "Mirror", systemImage: model.isMirroring ? "stop.fill" : "play.fill")
-                    .fontWeight(.semibold)
+                HStack(spacing: 6) {
+                    if model.isStarting { ProgressView().controlSize(.mini) }
+                    Label(model.isStarting ? "Connecting" : (model.isMirroring ? "Stop" : "Mirror"),
+                          systemImage: model.isMirroring ? "stop.fill" : "play.fill")
+                        .contentTransition(.symbolEffect(.replace))
+                        .fontWeight(.semibold)
+                }
             }
             .buttonStyle(.borderedProminent)
             .tint(model.isMirroring ? .red : .accentColor)
@@ -66,9 +72,9 @@ struct ContentView: View {
         .padding(18)
         .background(WindowStyler())
         .fixedSize()
-        .alert("DroidMirror", isPresented: Binding(get: { model.errorMessage != nil }, set: { if !$0 { model.errorMessage = nil } })) {
-            Button("OK") { model.errorMessage = nil }
-        } message: { Text(model.errorMessage ?? "") }
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.25), value: model.isStarting)
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.25), value: model.isMirroring)
+
         .sheet(isPresented: $showWireless) { WirelessView().environmentObject(model) }
         .onChange(of: model.isDeviceLocked) { _, locked in
             if locked { pinDigitCount = 0; showPinPad = true }
@@ -80,6 +86,8 @@ struct ContentView: View {
             Circle().fill(.black.opacity(0.18)).frame(width: 34, height: 34)
             Image(systemName: model.selectedDevice?.isBluetooth == true ? "antenna.radiowaves.left.and.right" : (model.selectedDevice?.isWireless == true ? "wifi" : "smartphone"))
                 .font(.system(size: 15, weight: .semibold))
+                .contentTransition(.symbolEffect(.replace))
+                .symbolEffect(.pulse, options: .repeating, isActive: model.isStarting && !reduceMotion)
                 .foregroundStyle(model.selectedDevice?.isOnline == true ? Color.accentColor : Color.secondary)
         }
         .overlay(alignment: .bottomTrailing) {
@@ -105,12 +113,15 @@ struct ContentView: View {
             }
             Divider()
             Button("Refresh", systemImage: "arrow.clockwise") { model.refreshDevices() }
+            Button("Set up a phone…", systemImage: "iphone.gen3.radiowaves.left.and.right") {
+                OnboardingWindowController.shared.show(model: model)
+            }
             Button("Connect wirelessly…", systemImage: "wifi") { showWireless = true }
         } label: {
             VStack(alignment: .leading, spacing: 1) {
                 Text(model.selectedDevice?.displayName ?? "No device")
                     .font(.system(size: 13, weight: .semibold)).lineLimit(1)
-                Text(model.isMirroring ? "Mirroring" : (model.selectedDevice?.isOnline == true ? "Ready" : "Not connected"))
+                Text(model.isStarting ? "Connecting…" : (model.isMirroring ? "Mirroring" : (model.selectedDevice?.isOnline == true ? (model.selectedDevice?.isBluetooth == true ? "Bluetooth paired" : "Ready") : "Not connected")))
                     .font(.caption2).foregroundStyle(.secondary)
             }
             .frame(width: 118, alignment: .leading)
@@ -131,8 +142,13 @@ struct ContentView: View {
                 ForEach(MirrorTransport.allCases) { Text($0.label).tag($0) }
             }.disabled(model.isMirroring || model.isStarting)
             if model.preferences.transport == .bluetoothClassic {
-                Text("Authorize Shizuku and enable Mac connections once on Android, then press Mirror on the Mac. 480p · up to 30 fps · 1 Mbps. Video only.")
+                Text("Starts over Bluetooth with HEVC at 480p, up to 16 fps and 256 kbps, then upgrades to your Wi-Fi picture settings when paired wireless ADB is available. Authorize Shizuku and enable Mac connections once on Android. Mouse, keyboard and navigation stay on BLE.")
                     .font(.caption).foregroundStyle(.secondary)
+            }
+            if model.preferences.transport == .wifiAware {
+                Text(model.wifiAwareStatus).font(.caption).foregroundStyle(.secondary)
+                Button("Check Wi-Fi Aware support") { model.checkWiFiAware() }
+                    .disabled(model.isRefreshing)
             }
             Group {
             Toggle("Start mirroring automatically", isOn: $model.preferences.autoStart)
@@ -153,7 +169,7 @@ struct ContentView: View {
             Picker("Frame rate", selection: $model.preferences.maxFPS) {
                 Text("30 fps").tag(30); Text("60 fps").tag(60); Text("90 fps").tag(90)
             }
-            }.disabled(model.preferences.transport == .bluetoothClassic)
+            }.disabled(model.preferences.transport != .adb)
             Text("Changes apply the next time the mirror starts.")
                 .font(.caption).foregroundStyle(.secondary)
         }

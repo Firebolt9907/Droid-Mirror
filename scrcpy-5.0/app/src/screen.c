@@ -1,4 +1,5 @@
 #include "screen.h"
+#include "camera_cutout.h"
 
 #include <assert.h>
 #include <string.h>
@@ -300,11 +301,11 @@ sc_screen_render(struct sc_screen *screen, bool update_content_rect) {
     const SDL_FRect *srcrect = NULL;
     SDL_FRect frame_rect;
     if (!screen->is_icon_active) {
-        struct sc_size frame_size = sc_texture_get_frame_size(&screen->tex);
         frame_rect.x = 0;
         frame_rect.y = 0;
-        frame_rect.w = frame_size.width;
-        frame_rect.h = frame_size.height;
+        // Display effects may return a larger texture than the decoded frame.
+        // Input coordinates and window geometry still use the decoded size.
+        SDL_GetTextureSize(texture, &frame_rect.w, &frame_rect.h);
         srcrect = &frame_rect;
     }
 
@@ -338,6 +339,13 @@ sc_screen_render(struct sc_screen *screen, bool update_content_rect) {
         dstrect->y = (int32_t) dstrect->y;
         ok = SDL_RenderTextureRotated(renderer, texture, srcrect, dstrect,
                                       angle, NULL, flip);
+    }
+
+    sc_camera_cutout_update_window(renderer, &geometry,
+        (!screen->is_icon_active && !screen->camera) ? screen->frame_size : (struct sc_size){0, 0},
+        orientation);
+    if (!screen->is_icon_active && !screen->camera) {
+        sc_camera_cutout_render(renderer, &geometry, screen->frame_size, orientation);
     }
 
     if (!ok) {
@@ -531,6 +539,9 @@ sc_screen_init(struct sc_screen *screen,
     screen->secure_check_at = 0;
     screen->paused = false;
     screen->resume_frame = NULL;
+    screen->camera_cutout_requested = false;
+    screen->camera_cutout_request_at = 0;
+    sc_camera_cutout_set(NULL);
     screen->orientation = SC_ORIENTATION_0;
     screen->disconnected = false;
     screen->disconnect_started = false;
@@ -619,6 +630,18 @@ sc_screen_init(struct sc_screen *screen,
     if (!screen->window) {
         LOGE("Could not create window: %s", SDL_GetError());
         goto error_destroy_fps_counter;
+    }
+
+    if (SDL_GetBooleanProperty(SDL_GetWindowProperties(screen->window), "app.droidmirror.connecting", false)) {
+        // Preserve moves and resizes made while connecting. Only the phone's
+        // aspect ratio needs to be resolved when the first frame arrives.
+        struct sc_size size = sc_sdl_get_window_size(screen->window);
+        struct sc_point position = sc_sdl_get_window_position(screen->window);
+        screen->req.width = size.width;
+        screen->req.height = 0;
+        screen->req.x = position.x;
+        screen->req.y = position.y;
+        SDL_ClearProperty(SDL_GetWindowProperties(screen->window), "app.droidmirror.connecting");
     }
 
     screen->renderer = SDL_CreateRenderer(screen->window, NULL);
@@ -766,7 +789,7 @@ error_destroy_renderer:
 #endif
     SDL_DestroyRenderer(screen->renderer);
 error_destroy_window:
-    SDL_DestroyWindow(screen->window);
+    if (!getenv("DROIDMIRROR_SESSION_COMMANDS")) SDL_DestroyWindow(screen->window);
 error_destroy_fps_counter:
     sc_fps_counter_destroy(&screen->fps_counter);
 error_destroy_frame_buffer:
@@ -858,7 +881,7 @@ sc_screen_destroy(struct sc_screen *screen) {
     SDL_GL_DestroyContext(screen->gl_context);
 #endif
     SDL_DestroyRenderer(screen->renderer);
-    SDL_DestroyWindow(screen->window);
+    if (!getenv("DROIDMIRROR_SESSION_COMMANDS")) SDL_DestroyWindow(screen->window);
     sc_fps_counter_destroy(&screen->fps_counter);
     sc_frame_buffer_destroy(&screen->fb);
     sc_mutex_destroy(&screen->mutex);
@@ -1003,8 +1026,19 @@ sc_screen_apply_frame(struct sc_screen *screen, bool can_resize) {
         return false;
     }
 
-    if (screen->frame_size.width != new_frame_size.width
-            || screen->frame_size.height != new_frame_size.height) {
+    bool frame_size_changed = screen->frame_size.width != new_frame_size.width
+            || screen->frame_size.height != new_frame_size.height;
+    sc_tick cutout_now = sc_tick_now();
+    if (screen->controller && !screen->camera
+            && (!screen->camera_cutout_requested || frame_size_changed
+                || (!sc_camera_cutout_matches_frame(new_frame_size)
+                    && cutout_now >= screen->camera_cutout_request_at))) {
+        struct sc_control_msg request = {.type = SC_CONTROL_MSG_TYPE_GET_CAMERA_CUTOUT};
+        screen->camera_cutout_requested = sc_controller_push_msg(screen->controller, &request);
+        screen->camera_cutout_request_at = cutout_now + SC_TICK_FROM_SEC(1);
+    }
+
+    if (frame_size_changed) {
 
         // frame dimension changed
         screen->frame_size = new_frame_size;
@@ -1250,6 +1284,11 @@ sc_screen_handle_event(struct sc_screen *screen, const SDL_Event *event) {
             }
             return;
         }
+        case SC_EVENT_CAMERA_CUTOUT_UPDATED:
+            if (screen->window_shown && !screen->camera) {
+                sc_screen_render(screen, false);
+            }
+            return;
         case SDL_EVENT_WINDOW_EXPOSED:
             sc_screen_render(screen, true);
             return;

@@ -3,6 +3,7 @@ package com.genymobile.scrcpy.control;
 import com.genymobile.scrcpy.AndroidVersions;
 import com.genymobile.scrcpy.AsyncProcessor;
 import com.genymobile.scrcpy.CleanUp;
+import com.genymobile.scrcpy.FakeContext;
 import com.genymobile.scrcpy.Options;
 import com.genymobile.scrcpy.device.Device;
 import com.genymobile.scrcpy.display.DisplayInfo;
@@ -23,9 +24,11 @@ import com.genymobile.scrcpy.wrappers.InputManager;
 import com.genymobile.scrcpy.wrappers.ServiceManager;
 
 import android.content.Intent;
+import android.content.res.Resources;
 import android.net.Uri;
 import android.os.Build;
 import android.os.SystemClock;
+import android.provider.Settings;
 import android.util.Pair;
 import android.view.InputDevice;
 import android.view.KeyCharacterMap;
@@ -38,6 +41,7 @@ import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
@@ -84,6 +88,8 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
     private Thread keepActiveThread;
 
     private UhidManager uhidManager;
+    private IdleUhidKeyboard idleUhidKeyboard;
+    private final InjectedKeys injectedKeys = new InjectedKeys();
 
     private final boolean camera;
     private final int displayId;
@@ -102,7 +108,27 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
     private final AtomicReference<DisplayData> displayData = new AtomicReference<>();
     private final Object displayDataAvailable = new Object(); // condition variable
 
+    private ControlMessage pillDown;
+    private long pillDownTime;
+    private float pillSlop;
+    private final GesturePill.Clicks pillClicks = new GesturePill.Clicks();
+    private ScheduledFuture<?> pillClickTask;
+    private ScheduledFuture<?> pillHoldTask;
+    private volatile boolean pillStopped;
+
+    private static final long POINTER_ID_WHEEL = -4;
+    private WheelScroll wheelScroll;
+    private java.util.concurrent.ScheduledFuture<?> wheelTask;
+    private Size wheelSize;
+    private final java.util.Set<Long> directPointers = new java.util.HashSet<>();
+
+    private volatile boolean cameraCutoutRequested;
+
     private long lastTouchDown;
+    private final TouchEventTime touchEventTime = new TouchEventTime();
+    private long traceDown, traceArrival, traceLast, traceGap, tracePointer;
+    private int traceMoves, traceGestures;
+    private boolean traceOutside;
     private final PointersState pointersState = new PointersState();
     private final MotionEvent.PointerProperties[] pointerProperties = new MotionEvent.PointerProperties[PointersState.MAX_POINTERS];
     private final MotionEvent.PointerCoords[] pointerCoords = new MotionEvent.PointerCoords[PointersState.MAX_POINTERS];
@@ -164,9 +190,13 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
     }
 
     @Override
-    public void onNewVirtualDisplay(int virtualDisplayId, PositionMapper positionMapper) {
+    public synchronized void onNewVirtualDisplay(int virtualDisplayId, PositionMapper positionMapper) {
+        stopWheelScroll();
         DisplayData data = new DisplayData(virtualDisplayId, positionMapper);
         DisplayData old = this.displayData.getAndSet(data);
+        if (cameraCutoutRequested) {
+            sendCameraCutout();
+        }
         if (old == null) {
             // The very first time the Controller is notified of a new virtual display
             synchronized (displayDataAvailable) {
@@ -276,13 +306,24 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
             startKeepActiveThread();
         }
 
+        if (cleanUp != null) {
+            idleUhidKeyboard = new IdleUhidKeyboard();
+            idleUhidKeyboard.create();
+        }
+
         thread = new Thread(() -> {
             try {
                 control();
             } catch (IOException e) {
                 Ln.e("Controller error", e);
             } finally {
+                stopWheelScroll();
+                releaseInjectedKeys();
                 Ln.d("Controller stopped");
+                if (idleUhidKeyboard != null) {
+                    idleUhidKeyboard.destroy();
+                    idleUhidKeyboard = null;
+                }
                 if (uhidManager != null) {
                     uhidManager.closeAll();
                 }
@@ -297,6 +338,20 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
 
     @Override
     public void stop() {
+        synchronized (this) {
+            stopWheelScroll();
+            if (idleUhidKeyboard != null) {
+                idleUhidKeyboard.destroy();
+                idleUhidKeyboard = null;
+            }
+            pillStopped = true;
+            cancelPillClicks();
+            if (pillHoldTask != null) {
+                pillHoldTask.cancel(false);
+            }
+            pillDown = null;
+        }
+        releaseInjectedKeys();
         if (keepActiveThread != null) {
             keepActiveThread.interrupt();
         }
@@ -334,6 +389,10 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
 
         // Events for all sources (display or camera)
         switch (type) {
+            case ControlMessage.TYPE_GET_CAMERA_CUTOUT:
+                cameraCutoutRequested = true;
+                sendCameraCutout();
+                return true;
             case ControlMessage.TYPE_RESET_VIDEO:
                 resetVideo();
                 return true;
@@ -344,27 +403,33 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
         if (!camera) {
             switch (type) {
                 case ControlMessage.TYPE_INJECT_KEYCODE:
+                    stopWheelScroll();
                     if (supportsInputEvents) {
                         injectKeycode(msg.getAction(), msg.getKeycode(), msg.getRepeat(), msg.getMetaState());
                     }
                     return true;
                 case ControlMessage.TYPE_INJECT_TEXT:
+                    stopWheelScroll();
                     if (supportsInputEvents) {
                         injectText(msg.getText());
                     }
                     return true;
                 case ControlMessage.TYPE_INJECT_TOUCH_EVENT:
                     if (supportsInputEvents) {
-                        injectTouch(
-                                msg.getAction(), msg.getPointerId(), msg.getPosition(), msg.getPressure(), msg.getActionButton(), msg.getButtons());
+                        handlePillTouch(msg);
                     }
                     return true;
+                case ControlMessage.TYPE_WHEEL_SCROLL:
+                    if (supportsInputEvents) handleWheelScroll(msg);
+                    return true;
                 case ControlMessage.TYPE_INJECT_SCROLL_EVENT:
+                    stopWheelScroll();
                     if (supportsInputEvents) {
                         injectScroll(msg.getPosition(), msg.getHScroll(), msg.getVScroll(), msg.getButtons());
                     }
                     return true;
                 case ControlMessage.TYPE_BACK_OR_SCREEN_ON:
+                    stopWheelScroll();
                     if (supportsInputEvents) {
                         pressBackOrTurnScreenOn(msg.getAction());
                     }
@@ -385,17 +450,23 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
                     setClipboard(msg.getText(), msg.getPaste(), msg.getSequence());
                     return true;
                 case ControlMessage.TYPE_SET_DISPLAY_POWER:
+                    stopWheelScroll();
                     if (supportsInputEvents) {
                         setDisplayPower(msg.getOn());
                     }
                     return true;
                 case ControlMessage.TYPE_ROTATE_DEVICE:
+                    stopWheelScroll();
                     int actionDisplayId = getActionDisplayId();
                     if (actionDisplayId != Device.DISPLAY_ID_NONE) {
                         Device.rotateDevice(actionDisplayId);
                     }
                     return true;
                 case ControlMessage.TYPE_UHID_CREATE:
+                    if (idleUhidKeyboard != null) {
+                        idleUhidKeyboard.destroy();
+                        idleUhidKeyboard = null;
+                    }
                     getUhidManager().open(msg.getId(), msg.getVendorId(), msg.getProductId(), msg.getText(), msg.getData());
                     return true;
                 case ControlMessage.TYPE_UHID_INPUT:
@@ -408,6 +479,7 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
                     openHardKeyboardSettings();
                     return true;
                 case ControlMessage.TYPE_START_APP:
+                    stopWheelScroll();
                     startAppAsync(msg.getText());
                     return true;
                 case ControlMessage.TYPE_RESIZE_DISPLAY:
@@ -459,7 +531,8 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
         int actionDisplayId = getActionDisplayId();
         if (actionDisplayId != Device.DISPLAY_ID_NONE) {
             for (KeyEvent event : events) {
-                if (!Device.injectEvent(event, actionDisplayId, Device.INJECT_MODE_ASYNC)) {
+                if (!injectKeyEvent(event.getAction(), event.getKeyCode(), event.getRepeatCount(), event.getMetaState(),
+                        Device.INJECT_MODE_ASYNC)) {
                     return false;
                 }
             }
@@ -509,8 +582,212 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
         return Pair.create(point, targetDisplayId);
     }
 
-    private boolean injectTouch(int action, long pointerId, Position position, float pressure, int actionButton, int buttons) {
+    private void sendCameraCutout() {
+        DisplayData data = displayData.get();
+        if (sender == null || data == null) {
+            return;
+        }
+        Size video = data.positionMapper.getVideoSize();
+        java.util.ArrayList<android.graphics.Rect> bounds = new java.util.ArrayList<>();
+        // Separate virtual displays and cameras do not contain the phone's physical camera opening.
+        if (!camera && displayId == 0) {
+            for (android.graphics.Rect rect : ServiceManager.getDisplayManager().getCameraCutoutBounds(displayId)) {
+                android.graphics.Rect mapped = data.positionMapper.mapDeviceRect(rect);
+                if (mapped != null && !mapped.isEmpty() && mapped.right > 0 && mapped.bottom > 0
+                        && mapped.left < video.getWidth() && mapped.top < video.getHeight() && bounds.size() < 4) {
+                    bounds.add(mapped);
+                }
+            }
+        }
+        java.nio.ByteBuffer bytes = java.nio.ByteBuffer.allocate(5 + bounds.size() * 16);
+        bytes.putShort((short) video.getWidth()).putShort((short) video.getHeight()).put((byte) bounds.size());
+        for (android.graphics.Rect rect : bounds) {
+            bytes.putInt(rect.left).putInt(rect.top).putInt(rect.right).putInt(rect.bottom);
+        }
+        sender.send(DeviceMessage.createCameraCutout(bytes.array()));
+    }
+
+    private int navigationMode() {
+        try {
+            // Read on every click and again before dispatch, so switching to buttons disables shortcuts immediately.
+            int mode = Settings.Secure.getInt(FakeContext.get().getContentResolver(), "navigation_mode", -1);
+            if (mode >= 0) {
+                return mode;
+            }
+            Resources res = FakeContext.get().getResources();
+            int id = res.getIdentifier("config_navBarInteractionMode", "integer", "android");
+            return id == 0 ? -1 : res.getInteger(id);
+        } catch (RuntimeException e) {
+            return -1; // Unknown devices keep their normal input behavior.
+        }
+    }
+
+    private boolean isPillDown(ControlMessage msg) {
+        if (displayId != 0 || msg.getPointerId() != POINTER_ID_MOUSE
+                || ((msg.getButtons() | msg.getActionButton()) & ~MotionEvent.BUTTON_PRIMARY) != 0) {
+            return false;
+        }
+        Pair<Point, Integer> pair = getEventPointAndDisplayId(msg.getPosition());
+        DisplayInfo info = ServiceManager.getDisplayManager().getDisplayInfo(0);
+        if (pair == null || info == null) {
+            return false;
+        }
+        try {
+            Resources res = FakeContext.get().getResources();
+            int id = res.getIdentifier("navigation_bar_height", "dimen", "android");
+            int navHeight = id == 0 ? 0 : res.getDimensionPixelSize(id);
+            float density = info.getDpi() / 160f;
+            pillSlop = 8 * density;
+            return GesturePill.contains(navigationMode(), pair.first.getX(), pair.first.getY(),
+                    info.getSize().getWidth(), info.getSize().getHeight(), density, navHeight);
+        } catch (RuntimeException e) {
+            return false;
+        }
+    }
+
+    private void injectTouchMessage(ControlMessage msg) {
+        injectTouch(msg.getAction(), msg.getPointerId(), msg.getPosition(), msg.getPressure(), msg.getActionButton(), msg.getButtons(), msg.getEventTime());
+    }
+
+    private void cancelPillClicks() {
+        if (pillClickTask != null) {
+            pillClickTask.cancel(false);
+            pillClickTask = null;
+        }
+        pillClicks.cancel();
+    }
+
+    private synchronized void handlePillTouch(ControlMessage msg) {
+        // A hover must not become a second pointer in the local wheel gesture.
+        if (wheelScroll != null && msg.getAction() == MotionEvent.ACTION_HOVER_MOVE) return;
+        if (msg.getAction() == MotionEvent.ACTION_DOWN) {
+            stopWheelScroll(); directPointers.add(msg.getPointerId());
+        } else if (msg.getAction() == MotionEvent.ACTION_UP || msg.getAction() == MotionEvent.ACTION_CANCEL) {
+            directPointers.remove(msg.getPointerId());
+        }
+        if (pillStopped) {
+            return;
+        }
         long now = SystemClock.uptimeMillis();
+        if (pillDown != null) {
+            Pair<Point, Integer> start = getEventPointAndDisplayId(pillDown.getPosition());
+            Pair<Point, Integer> current = getEventPointAndDisplayId(msg.getPosition());
+            boolean tap = msg.getPointerId() == pillDown.getPointerId() && start != null && current != null
+                    && navigationMode() == 2
+                    && GesturePill.isTap(start.first.getX(), start.first.getY(), current.first.getX(), current.first.getY(),
+                            pillSlop, now - pillDownTime);
+            if (tap && msg.getAction() == MotionEvent.ACTION_MOVE) {
+                return;
+            }
+            pillHoldTask.cancel(false);
+            if (tap && msg.getAction() == MotionEvent.ACTION_UP) {
+                pillDown = null;
+                if (pillClickTask != null) {
+                    pillClickTask.cancel(false);
+                }
+                int count = pillClicks.click();
+                long token = pillClicks.token();
+                if (count == 3) {
+                    dispatchPillClicks(token);
+                } else {
+                    pillClickTask = EXECUTOR.schedule(() -> dispatchPillClicks(token), GesturePill.CLICK_MS, TimeUnit.MILLISECONDS);
+                }
+                return;
+            }
+            // Replay the withheld down before a drag, second pointer, hold or cancellation.
+            // Android receives the original coordinates and retains its normal swipe navigation.
+            injectTouchMessage(pillDown);
+            pillDown = null;
+            cancelPillClicks();
+        }
+        if (msg.getAction() == MotionEvent.ACTION_DOWN && isPillDown(msg)) {
+            pillDown = msg;
+            pillDownTime = now;
+            pillClicks.pause();
+            // Pause the preceding click's deadline while the next click is held.
+            if (pillClickTask != null) {
+                pillClickTask.cancel(false);
+            }
+            pillHoldTask = EXECUTOR.schedule(() -> {
+                synchronized (Controller.this) {
+                    if (pillDown == msg && !pillStopped) {
+                        injectTouchMessage(pillDown);
+                        pillDown = null;
+                        cancelPillClicks();
+                    }
+                }
+            }, GesturePill.MAX_HOLD_MS, TimeUnit.MILLISECONDS);
+            return;
+        }
+        if (msg.getAction() == MotionEvent.ACTION_DOWN) {
+            cancelPillClicks();
+        }
+        injectTouchMessage(msg);
+    }
+
+    private synchronized void dispatchPillClicks(long token) {
+        int count = pillClicks.take(token);
+        if (count == 0 || pillStopped || displayId != 0 || navigationMode() != 2) {
+            return;
+        }
+        if (count < 3) {
+            pressReleaseKeycode(count == 1 ? KeyEvent.KEYCODE_HOME : KeyEvent.KEYCODE_APP_SWITCH, Device.INJECT_MODE_ASYNC);
+            return;
+        }
+        // Match Android input keyevent --longpress, including repeat and FLAG_LONG_PRESS.
+        injectKeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_HOME, 0, 0, Device.INJECT_MODE_ASYNC);
+        EXECUTOR.schedule(() -> {
+            synchronized (Controller.this) {
+                if (pillStopped) {
+                    return; // stop() has already canceled outstanding presses.
+                }
+                try {
+                    if (navigationMode() == 2) {
+                        injectKeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_HOME, 1, 0,
+                                Device.INJECT_MODE_ASYNC, KeyEvent.FLAG_LONG_PRESS);
+                    }
+                } finally {
+                    injectKeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_HOME, 0, 0, Device.INJECT_MODE_ASYNC);
+                }
+            }
+        }, android.view.ViewConfiguration.getLongPressTimeout(), TimeUnit.MILLISECONDS);
+    }
+
+    private synchronized void stopWheelScroll() {
+        if (wheelTask != null) { wheelTask.cancel(false); wheelTask = null; }
+        if (wheelScroll != null) { wheelScroll.cancel(); wheelScroll = null; }
+        wheelSize = null;
+    }
+
+    private synchronized void handleWheelScroll(ControlMessage message) {
+        if (pillStopped || !directPointers.isEmpty()) return;
+        Position anchor = message.getPosition(); Size size = anchor.getScreenSize();
+        int dx = (int)message.getHScroll(), dy = (int)message.getVScroll();
+        if (size.getWidth() < 4 || size.getHeight() < 4 || getEventPointAndDisplayId(anchor) == null
+                || Math.abs((long)dx) > size.getWidth()*8L || Math.abs((long)dy) > size.getHeight()*8L) return;
+        if (wheelScroll == null || !size.equals(wheelSize)) {
+            stopWheelScroll(); wheelSize = size;
+            wheelScroll = new WheelScroll(size.getWidth(),size.getHeight(),anchor.getPoint().getX(),anchor.getPoint().getY(),
+                (action,x,y) -> injectTouch(action,POINTER_ID_WHEEL,new Position(new Point(x,y),size),
+                    action == MotionEvent.ACTION_UP ? 0f : 1f,0,0,-1));
+        }
+        cancelPillClicks();
+        wheelScroll.add(dx,dy,SystemClock.uptimeMillis());
+        if (wheelTask == null) {
+            wheelTask = EXECUTOR.scheduleAtFixedRate(() -> {
+                synchronized (Controller.this) {
+                    if (wheelScroll == null || pillStopped) return;
+                    wheelScroll.tick(SystemClock.uptimeMillis());
+                    if (!wheelScroll.isActive()) stopWheelScroll();
+                }
+            },16,16,TimeUnit.MILLISECONDS);
+        }
+    }
+
+    private boolean injectTouch(int action, long pointerId, Position position, float pressure, int actionButton, int buttons, long eventTime) {
+        long received = SystemClock.uptimeMillis();
+        long now = pointerId == POINTER_ID_WHEEL ? received : touchEventTime.resolve(eventTime, received);
+        if (now < 0) { Ln.w("Ignoring stale or invalid timestamped touch"); return false; }
 
         Pair<Point, Integer> pair = getEventPointAndDisplayId(position);
         if (pair == null) {
@@ -519,6 +796,24 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
 
         Point point = pair.first;
         int targetDisplayId = pair.second;
+        if (eventTime >= 0 && traceGestures < 20) {
+            Point raw = position.getPoint(); Size bounds = position.getScreenSize();
+            boolean outside = raw.getX() < 0 || raw.getY() < 0 || raw.getX() >= bounds.getWidth() || raw.getY() >= bounds.getHeight();
+            if (action == MotionEvent.ACTION_DOWN) {
+                tracePointer = pointerId; traceDown = traceLast = now; traceArrival = received;
+                traceMoves = 0; traceGap = 0; traceOutside = outside;
+                Ln.i("Timed gesture DOWN; deliveryAgeMs=" + (received - now));
+            } else if (pointerId == tracePointer) {
+                traceOutside |= outside;
+                if (action == MotionEvent.ACTION_MOVE) { ++traceMoves; traceGap = Math.max(traceGap, now - traceLast); traceLast = now; }
+                if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
+                    Ln.i("Timed gesture UP; sourceDurationMs=" + (now - traceDown) + " arrivalDurationMs=" + (received - traceArrival)
+                        + " moves=" + traceMoves + " maxSourceGapMs=" + traceGap + " outside=" + traceOutside
+                        + " deliveryAgeMs=" + (received - now));
+                    ++traceGestures;
+                }
+            }
+        }
 
         int pointerIndex = pointersState.getPointerIndex(pointerId);
         if (pointerIndex == -1) {
@@ -732,11 +1027,29 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
     }
 
     private boolean injectKeyEvent(int action, int keyCode, int repeat, int metaState, int injectMode) {
+        return injectKeyEvent(action, keyCode, repeat, metaState, injectMode, 0);
+    }
+
+    private boolean injectKeyEvent(int action, int keyCode, int repeat, int metaState, int injectMode, int eventFlags) {
         int actionDisplayId = getActionDisplayId();
         if (actionDisplayId == Device.DISPLAY_ID_NONE) {
             return false;
         }
-        return Device.injectKeyEvent(action, keyCode, repeat, metaState, actionDisplayId, injectMode);
+        return injectedKeys.inject(action, keyCode, repeat, metaState, actionDisplayId, SystemClock.uptimeMillis(),
+                (a, key, count, meta, display, down, now, flags) ->
+                        injectTrackedKey(a, key, count, meta, display, down, now, flags | eventFlags, injectMode));
+    }
+
+    private boolean injectTrackedKey(int action, int keyCode, int repeat, int metaState, int targetDisplayId,
+            long downTime, long eventTime, int flags, int injectMode) {
+        KeyEvent event = new KeyEvent(downTime, eventTime, action, keyCode, repeat, metaState,
+                KeyCharacterMap.VIRTUAL_KEYBOARD, 0, flags, InputDevice.SOURCE_KEYBOARD);
+        return Device.injectEvent(event, targetDisplayId, injectMode);
+    }
+
+    private void releaseInjectedKeys() {
+        injectedKeys.releaseAll(SystemClock.uptimeMillis(), (action, key, repeat, meta, display, down, now, flags) ->
+                injectTrackedKey(action, key, repeat, meta, display, down, now, flags, Device.INJECT_MODE_ASYNC));
     }
 
     private boolean pressReleaseKeycode(int keyCode, int injectMode) {
@@ -744,7 +1057,14 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
         if (actionDisplayId == Device.DISPLAY_ID_NONE) {
             return false;
         }
-        return Device.pressReleaseKeycode(keyCode, actionDisplayId, injectMode);
+        boolean down;
+        boolean up;
+        try {
+            down = injectKeyEvent(KeyEvent.ACTION_DOWN, keyCode, 0, 0, injectMode);
+        } finally {
+            up = injectKeyEvent(KeyEvent.ACTION_UP, keyCode, 0, 0, injectMode);
+        }
+        return down && up;
     }
 
     private int getActionDisplayId() {

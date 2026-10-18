@@ -5,30 +5,26 @@ import AppKit
 final class SessionNotifications: NSObject, UNUserNotificationCenterDelegate {
     static let shared = SessionNotifications()
     private let center = UNUserNotificationCenter.current()
-    private var sessionID: String?
     private override init() { super.init(); center.delegate = self }
-    func requestPermission() async { _ = try? await center.requestAuthorization(options: [.alert, .sound]) }
-    func began() { if sessionID == nil { sessionID = UUID().uuidString } }
-    func ended() async {
-        guard let id = sessionID else { return }
-        sessionID = nil // Closing, quit and disconnect callbacks share one notification.
-        let content = UNMutableNotificationContent()
-        content.title = "Phone was used remotely"
-        content.body = "Your DroidMirror mirroring session ended."
-        content.sound = .default
-        try? await center.add(UNNotificationRequest(identifier: "DroidMirror.remote-use.\(id)", content: content, trigger: nil))
+    func requestPermission() async {
+        // Clean up session-history banners from previous releases, leaving
+        // other DroidMirror alerts and forwarded phone notifications intact.
+        let delivered = await center.deliveredNotifications()
+        let pending = await center.pendingNotificationRequests()
+        center.removeDeliveredNotifications(withIdentifiers: delivered.map { $0.request.identifier }
+            .filter { $0.hasPrefix("DroidMirror.remote-use.") })
+        center.removePendingNotificationRequests(withIdentifiers: pending.map(\.identifier)
+            .filter { $0.hasPrefix("DroidMirror.remote-use.") })
+        _ = try? await center.requestAuthorization(options: [.alert, .sound])
     }
     func localUse(restored: Bool) {
-        let alert = NSAlert()
-        alert.messageText = "phone was used"
-        alert.informativeText = restored
-            ? "phone turned on\n\nYour phone was locked and its display restored. Remote streaming stopped."
-            : "The phone’s power or screen-lock action ended remote streaming. Locking or display restoration could not be confirmed."
-        alert.addButton(withTitle: "OK")
-        SettingsWindowController.shared.show(model: MirrorModel.shared)
-        if let window = SettingsWindowController.shared.window {
-            alert.beginSheetModal(for: window, completionHandler: nil)
-        }
+        present(title: "Phone is in use", message: restored
+            ? "Your phone was used. Its display was restored and remote streaming stopped."
+            : "The phone’s power or screen-lock action ended remote streaming. Locking or display restoration could not be confirmed.")
+    }
+
+    func present(title: String = "DroidMirror", message: String) {
+        PhoneWindowController.shared.present(title: title, message: message, model: MirrorModel.shared)
     }
     nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification,
                                            withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {

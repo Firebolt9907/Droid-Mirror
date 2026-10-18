@@ -7,10 +7,13 @@
 #import "DeviceCorners.h"
 #import "CornerResize.h"
 #import "ScrollDirection.h"
+#import "MirrorMenu.h"
+#import "ConnectingPhone.h"
 
 static id DMKeyboardMonitor;
 static id DMWindowCloseObserver;
 static BOOL DMCommandQuitActive;
+static BOOL DMEmojiShortcutActive;
 static BOOL DMHostQuitRequested;
 static NSUInteger DMPINSyntheticEventsRemaining;
 static void (*DMOriginalSendEvent)(NSApplication *, SEL, NSEvent *);
@@ -30,6 +33,7 @@ static void DMPositionToolbarWithDeviceCorners(id controller, SEL selector) {
 static BOOL DMFrameRendered;
 static __weak NSWindow *DMMirrorWindow;
 static id DMFocusObserver;
+static id DMMinimizeObserver;
 
 static void DMReportMirrorVisible(void) {
     if (!DMFrameRendered || !DMMirrorWindow.visible || DMMirrorWindow.miniaturized) return;
@@ -38,7 +42,19 @@ static void DMReportMirrorVisible(void) {
 }
 __attribute__((visibility("default")))
 void DroidMirrorFrameVisible(void) {
-    dispatch_async(dispatch_get_main_queue(), ^{ DMFrameRendered = YES; DMReportMirrorVisible(); });
+    void (^present)(void) = ^{ DMFinishConnectingPhone(); DMFrameRendered = YES; DMReportMirrorVisible(); };
+    // SDL presents on the main thread. Reorder the loading overlay in the same
+    // turn, before Core Animation can expose the new Metal view for a frame.
+    if (NSThread.isMainThread) present();
+    else dispatch_async(dispatch_get_main_queue(), present);
+}
+
+__attribute__((visibility("default")))
+void DroidMirrorSessionDidStop(void) {
+    DMFrameRendered = NO;
+    DMSecureBlack = NO;
+    DMSecureOverlay.hidden = YES;
+    DMPINSyntheticEventsRemaining = 0;
 }
 
 static void DMDetectPINPrompt(id controller, SEL selector) {
@@ -142,6 +158,13 @@ static void DMRequestHostQuit(void) {
     }
 }
 
+// The owning host reads diagnostics before deciding whether to quit or show
+// an alert. Cleanup/destructors must not turn a startup failure into Quit.
+// Explicit Quit still goes through DMRequestHostQuit above.
+static BOOL DMHostOwnsMirrorExit(void) {
+    return NSProcessInfo.processInfo.environment[@"DROIDMIRROR_HOST_PID"].length > 0;
+}
+
 static BOOL DMEventIsQ(NSEvent *event) {
     if (event.keyCode == 12) {
         return YES;
@@ -161,6 +184,15 @@ static DMMirrorQuitTarget *DMMirrorQuit;
 
 static void DMSendEvent(NSApplication *app, SEL selector, NSEvent *event) {
     if ((event.type == NSEventTypeKeyDown || event.type == NSEventTypeKeyUp) &&
+            event.keyCode == 49 &&
+            (DMEmojiShortcutActive ||
+             (event.modifierFlags & (NSEventModifierFlagControl | NSEventModifierFlagCommand)) ==
+                (NSEventModifierFlagControl | NSEventModifierFlagCommand))) {
+        DMEmojiShortcutActive = event.type == NSEventTypeKeyDown;
+        if (DMEmojiShortcutActive && !event.isARepeat) [app orderFrontCharacterPalette:nil];
+        return;
+    }
+    if ((event.type == NSEventTypeKeyDown || event.type == NSEventTypeKeyUp) &&
         DMEventIsQ(event) && (event.modifierFlags & NSEventModifierFlagCommand)) {
         if (event.type == NSEventTypeKeyDown && !event.isARepeat)
             [DMMirrorQuit quit:nil];
@@ -169,20 +201,6 @@ static void DMSendEvent(NSApplication *app, SEL selector, NSEvent *event) {
     BOOL previousScrollContext = DMBeginScrollDirectionEvent(event);
     @try { DMOriginalSendEvent(app, selector, event); }
     @finally { DMEndScrollDirectionEvent(previousScrollContext); }
-}
-
-static void DMFixMirrorQuitMenu(NSMenu *menu) {
-    for (NSMenuItem *item in menu.itemArray) {
-        if (item.action == @selector(terminate:) ||
-            [item.keyEquivalent.lowercaseString isEqualToString:@"q"]) {
-            item.target = DMMirrorQuit;
-            item.action = @selector(quit:);
-            item.keyEquivalent = @"q";
-            item.keyEquivalentModifierMask = NSEventModifierFlagCommand;
-            item.enabled = YES;
-        }
-        if (item.submenu) DMFixMirrorQuitMenu(item.submenu);
-    }
 }
 
 static NSInteger DMPINButtonTagForEvent(NSEvent *event) {
@@ -257,6 +275,14 @@ static void DMSetupKeyboardPassthrough(id self, SEL command) {
                     [mirrorWindow makeKeyAndOrderFront:nil];
                     DMReportMirrorVisible();
                 }];
+            DMMinimizeObserver = [[NSDistributedNotificationCenter defaultCenter]
+                addObserverForName:@"app.droidmirror.minimizeMirror"
+                object:NSProcessInfo.processInfo.environment[@"DROIDMIRROR_HOST_PID"] queue:NSOperationQueue.mainQueue
+                usingBlock:^(__unused NSNotification *notification) {
+                    if (DMHostQuitRequested || mirrorWindow.miniaturized) return;
+                    NSLog(@"DroidMirror minimize: received by mirror window (style=%lu)", mirrorWindow.styleMask);
+                    [mirrorWindow miniaturize:nil];
+                }];
             // Run after the styling controller finishes attaching its toolbar,
             // so the stream, rather than its child toolbar, receives focus.
             dispatch_async(dispatch_get_main_queue(), ^{
@@ -293,7 +319,7 @@ static void DMSetupKeyboardPassthrough(id self, SEL command) {
                             object:mirrorWindow
                              queue:nil
                         usingBlock:^(__unused NSNotification *notification) {
-                DMRequestHostQuit();
+                if (!DMHostOwnsMirrorExit()) DMRequestHostQuit();
             }];
         }
     }
@@ -301,6 +327,8 @@ static void DMSetupKeyboardPassthrough(id self, SEL command) {
     NSEventMask mask = NSEventMaskKeyDown | NSEventMaskKeyUp;
     DMKeyboardMonitor = [NSEvent addLocalMonitorForEventsMatchingMask:mask
                                                               handler:^NSEvent *(NSEvent *event) {
+        for (NSView *view in DMMirrorWindow.contentView.subviews)
+            if ([view.identifier isEqualToString:@"DroidMirrorConnecting"]) return event;
         if (DMPINSyntheticEventsRemaining > 0) {
             DMPINSyntheticEventsRemaining -= 1;
             return event;
@@ -383,30 +411,58 @@ static void DMLoadOriginalAndInstall(void) {
     DMInstallKeyboardPassthrough();
 }
 
+static BOOL DMRendererShutdownRequested(void) {
+    NSString *command = NSProcessInfo.processInfo.environment[@"DROIDMIRROR_SESSION_COMMANDS"];
+    if (!command.length) return NO;
+    return [NSFileManager.defaultManager fileExistsAtPath:
+        [[command stringByDeletingLastPathComponent] stringByAppendingPathComponent:@"shutdown"]];
+}
+
+static void (*DMOriginalRendererTerminate)(NSApplication *, SEL, id);
+static void DMRendererTerminate(NSApplication *app, SEL selector, id sender) {
+    // Dock Quit must end the owning controller too. A host-requested shutdown
+    // already has its cleanup in progress and must not send a second Quit.
+    if (!DMRendererShutdownRequested()) DMRequestHostQuit();
+    DMOriginalRendererTerminate(app, selector, sender);
+}
+
 // The wrapper normally owns scrcpy, but closing scrcpy's window can bypass the
 // wrapper's quit path. Notify the host while Cocoa is still available, and keep
 // the process-exit fallback for ordinary SDL shutdowns.
 __attribute__((constructor))
 static void DMObserveScrcpyTermination(void) {
+    if (getenv("DROIDMIRROR_SESSION_COMMANDS")) {
+        Method terminate = class_getInstanceMethod(NSApplication.class, @selector(terminate:));
+        DMOriginalRendererTerminate = (void *)method_getImplementation(terminate);
+        method_setImplementation(terminate, (IMP)DMRendererTerminate);
+    }
     Method sendEvent = class_getInstanceMethod(NSApplication.class, @selector(sendEvent:));
     DMOriginalSendEvent = (void *)method_getImplementation(sendEvent);
     method_setImplementation(sendEvent, (IMP)DMSendEvent);
     dispatch_async(dispatch_get_main_queue(), ^{
         DMMirrorQuit = [DMMirrorQuitTarget new];
+        DMEnsureMirrorQuitMenu(NSApp, DMMirrorQuit);
+        DroidMirrorInstallSessionMenu();
         [NSTimer scheduledTimerWithTimeInterval:0.5 repeats:YES block:^(__unused NSTimer *timer) {
-            DMFixMirrorQuitMenu(NSApp.mainMenu);
+            DMEnsureMirrorQuitMenu(NSApp, DMMirrorQuit);
+            DroidMirrorInstallSessionMenu();
+            // SDL may rebuild the main menu; keep the live video toggle reachable.
+            if ([DMSecureController respondsToSelector:NSSelectorFromString(@"ensureVideoMenu")]) {
+                ((void (*)(id, SEL))objc_msgSend)(DMSecureController, NSSelectorFromString(@"ensureVideoMenu"));
+            }
         }];
         [[NSNotificationCenter defaultCenter]
             addObserverForName:NSApplicationWillTerminateNotification
                         object:nil
                          queue:nil
                     usingBlock:^(__unused NSNotification *notification) {
-            DMRequestHostQuit();
+            if (!DMHostOwnsMirrorExit() || (getenv("DROIDMIRROR_SESSION_COMMANDS") && !DMRendererShutdownRequested()))
+                DMRequestHostQuit();
         }];
     });
 }
 
 __attribute__((destructor))
 static void DMNotifyHostWhenScrcpyExits(void) {
-    DMRequestHostQuit();
+    if (!DMHostOwnsMirrorExit()) DMRequestHostQuit();
 }

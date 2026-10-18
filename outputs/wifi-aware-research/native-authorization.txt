@@ -1,0 +1,11 @@
+Native macOS signing test, October 14, 2026
+
+Documented entitlement: com.apple.developer.wifi-aware = [Subscribe]
+Service: _droidmirror._tcp, Subscribable
+Apple Development signature: codesign succeeded; execution terminated by signal 9.
+AMFI diagnostic: AppleMobileFileIntegrityError Code=-413, No matching profile found.
+Unsatisfied entitlement: com.apple.developer.wifi-aware
+Control: the same development identity runs a native helper with empty entitlements.
+No local provisioning profiles found in the standard Xcode provisioning directories.
+Bundled native discovery: rejected with error 1; no capability result.
+Android discovery, pairing, and data paths remain blocked and unverified.

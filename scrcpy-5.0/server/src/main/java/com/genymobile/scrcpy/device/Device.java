@@ -79,8 +79,14 @@ public final class Device {
     }
 
     public static boolean pressReleaseKeycode(int keyCode, int displayId, int injectMode) {
-        return injectKeyEvent(KeyEvent.ACTION_DOWN, keyCode, 0, 0, displayId, injectMode)
-                && injectKeyEvent(KeyEvent.ACTION_UP, keyCode, 0, 0, displayId, injectMode);
+        boolean down;
+        boolean up;
+        try {
+            down = injectKeyEvent(KeyEvent.ACTION_DOWN, keyCode, 0, 0, displayId, injectMode);
+        } finally {
+            up = injectKeyEvent(KeyEvent.ACTION_UP, keyCode, 0, 0, displayId, injectMode);
+        }
+        return down && up;
     }
 
     public static boolean isScreenOn(int displayId) {

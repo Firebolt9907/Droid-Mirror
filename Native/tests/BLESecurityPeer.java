@@ -1,5 +1,6 @@
-import dev.bleadb.bridge.BleSecureSession;
-import dev.bleadb.bridge.BleFragments;
+import app.droidmirror.bluetooth.bridge.BleSecureSession;
+import app.droidmirror.bluetooth.PairingKeys;
+import app.droidmirror.bluetooth.bridge.BleFragments;
 import org.json.JSONObject;
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
@@ -9,12 +10,17 @@ import java.util.Arrays;
 public final class BLESecurityPeer {
     public static void main(String[] args) throws Exception {
         byte[] key = new byte[32]; Arrays.fill(key, (byte) 7);
-        BleSecureSession session = new BleSecureSession(key);
+        BleSecureSession session = new BleSecureSession(PairingKeys.notifications(key));
         byte[] payload = new byte[8192]; Arrays.fill(payload, (byte) 42);
-        BleFragments assembly = new BleFragments();
-        byte[] result = null;
-        for (byte[] frame : BleFragments.Companion.split(payload, 1, 20)) result = assembly.accept(frame);
-        if (!Arrays.equals(result, payload)) throw new AssertionError("Fragment round trip");
+        for (int maximum : new int[] {20, 182, 512, 514, 517}) {
+            BleFragments assembly = new BleFragments();
+            byte[] result = null;
+            for (byte[] frame : BleFragments.Companion.split(payload, 1, maximum)) {
+                if (frame.length > Math.min(512, maximum)) throw new AssertionError("Oversized ATT attribute");
+                result = assembly.accept(frame);
+            }
+            if (!Arrays.equals(result, payload)) throw new AssertionError("Fragment round trip at " + maximum);
+        }
         var invalid = BleFragments.Companion.split(new byte[100], 2, 20);
         BleFragments bad = new BleFragments();
         bad.accept(invalid.get(0));

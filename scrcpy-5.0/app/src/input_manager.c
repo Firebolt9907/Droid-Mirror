@@ -8,13 +8,25 @@
 #include "android/input.h"
 #include "android/keycodes.h"
 #include "events.h"
+#include "wheel_protocol.h"
+#include <math.h>
 #include "input_events.h"
 #include "screen.h"
 #include "shortcut_mod.h"
 #include "util/log.h"
 #include "util/sdl.h"
+#include "util/tick.h"
+
+static uint64_t sc_source_event_time_ms(uint64_t timestamp) {
+    uint64_t sdl_now = SDL_GetTicksNS();
+    sc_tick now = sc_tick_now();
+    uint64_t age = timestamp && timestamp <= sdl_now ? sdl_now - timestamp : 0;
+    return (uint64_t)((now - SC_TICK_FROM_NS(age)) / SC_TICK_FROM_MS(1));
+}
 #ifdef __APPLE__
 #include "droidmirror_keymap.h"
+#include "droidmirror_line_delete.h"
+#include "emoji_text.h"
 #endif
 
 void
@@ -359,6 +371,24 @@ sc_input_manager_process_text_input(struct sc_input_manager *im,
         return;
     }
 
+#ifdef __APPLE__
+    if (im->controller && sc_text_contains_emoji(event->text)) {
+        struct sc_control_msg msg = { .type = SC_CONTROL_MSG_TYPE_SET_CLIPBOARD };
+        msg.set_clipboard.sequence = SC_SEQUENCE_INVALID;
+        msg.set_clipboard.paste = true;
+        msg.set_clipboard.text = strdup(event->text);
+        if (!msg.set_clipboard.text) {
+            LOG_OOM();
+            return;
+        }
+        if (!sc_controller_push_msg(im->controller, &msg)) {
+            free(msg.set_clipboard.text);
+            LOGW("Could not paste emoji");
+        }
+        return;
+    }
+#endif
+
     if (!im->kp->ops->process_text) {
         // The key processor does not support text input
         return;
@@ -385,6 +415,7 @@ simulate_virtual_finger(struct sc_input_manager *im,
 
     struct sc_control_msg msg;
     msg.type = SC_CONTROL_MSG_TYPE_INJECT_TOUCH_EVENT;
+    msg.inject_touch_event.capture_time_ms = 0;
     msg.inject_touch_event.action = action;
     msg.inject_touch_event.position.screen_size = im->screen->frame_size;
     msg.inject_touch_event.position.point = point;
@@ -697,6 +728,19 @@ sc_input_manager_process_key(struct sc_input_manager *im,
 
     assert(!im->camera);
 
+#ifdef __APPLE__
+    // Command has already been remapped to Control. Expand each press (and
+    // repeat) into a complete selection/delete, and consume its key release.
+    if (sdl_keycode == SDLK_BACKSPACE && ctrl
+            && !(mod & (SDL_KMOD_ALT | SDL_KMOD_GUI | SDL_KMOD_SHIFT))) {
+        if (down) {
+            sc_droidmirror_delete_to_line_start(im->kp,
+                sc_mods_state_from_sdl(mod), SC_SEQUENCE_INVALID);
+        }
+        return;
+    }
+#endif
+
     uint64_t ack_to_wait = SC_SEQUENCE_INVALID;
     bool is_ctrl_v = ctrl && !shift && sdl_keycode == SDLK_V && down && !repeat;
     if (im->clipboard_autosync && is_ctrl_v) {
@@ -776,6 +820,7 @@ sc_input_manager_process_mouse_motion(struct sc_input_manager *im,
     }
 
     struct sc_mouse_motion_event evt = {
+        .capture_time_ms = sc_source_event_time_ms(event->timestamp),
         .position = sc_input_manager_get_position(im, event->x, event->y),
         .pointer_id = im->vfinger_down ? SC_POINTER_ID_GENERIC_FINGER
                                        : SC_POINTER_ID_MOUSE,
@@ -821,6 +866,7 @@ sc_input_manager_process_touch(struct sc_input_manager *im,
     int32_t y = event->y * (int32_t) window_size.height;
 
     struct sc_touch_event evt = {
+        .capture_time_ms = sc_source_event_time_ms(event->timestamp),
         .position = {
             .screen_size = im->screen->frame_size,
             .point =
@@ -962,6 +1008,7 @@ sc_input_manager_process_mouse_button(struct sc_input_manager *im,
     bool use_finger = im->vfinger_down || change_vfinger;
 
     struct sc_mouse_click_event evt = {
+        .capture_time_ms = sc_source_event_time_ms(event->timestamp),
         .position = sc_input_manager_get_position(im, event->x, event->y),
         .action = sc_action_from_sdl_mousebutton_type(event->type),
         .button = button,
@@ -1030,6 +1077,18 @@ static void
 sc_input_manager_process_mouse_wheel(struct sc_input_manager *im,
                                      const SDL_MouseWheelEvent *event) {
     if (im->camera || !im->kp || im->screen->paused || im->disconnected) {
+        return;
+    }
+
+    if (event->which == SC_DROIDMIRROR_WHEEL_MOUSE_ID && im->controller) {
+        // Only tagged discrete wheels use phone-side playback. Trackpads never
+        // receive this tag, so their normal touch/scroll path stays untouched.
+        if (im->mouse_buttons_state || !isfinite(event->x) || !isfinite(event->y)) return;
+        struct sc_position anchor = sc_input_manager_get_position(im,event->mouse_x,event->mouse_y);
+        struct sc_position target = sc_input_manager_get_position(im,event->mouse_x + event->x*24,event->mouse_y + event->y*24);
+        struct sc_control_msg msg = {.type=SC_CONTROL_MSG_TYPE_WHEEL_SCROLL,
+            .wheel_scroll={.position=anchor,.dx=target.point.x-anchor.point.x,.dy=target.point.y-anchor.point.y}};
+        if (msg.wheel_scroll.dx || msg.wheel_scroll.dy) sc_controller_push_msg(im->controller,&msg);
         return;
     }
 

@@ -63,6 +63,7 @@ public class Options {
     private boolean downsizeOnError = true;
     private boolean cleanup = true;
     private boolean powerOn = true;
+    private boolean droidMirrorSession;
 
     private NewDisplay newDisplay;
     private boolean vdDestroyContent = true;
@@ -226,6 +227,8 @@ public class Options {
     public String getAudioEncoder() {
         return audioEncoder;
     }
+
+    public boolean getDroidMirrorSession() { return droidMirrorSession; }
 
     public boolean getPowerOffScreenOnClose() {
         return this.powerOffScreenOnClose;
@@ -464,6 +467,9 @@ public class Options {
                     break;
                 case "cleanup":
                     options.cleanup = Boolean.parseBoolean(value);
+                    break;
+                case "droidmirror_session":
+                    options.droidMirrorSession = Boolean.parseBoolean(value);
                     break;
                 case "power_on":
                     options.powerOn = Boolean.parseBoolean(value);

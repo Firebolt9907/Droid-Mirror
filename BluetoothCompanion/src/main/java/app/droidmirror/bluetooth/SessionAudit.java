@@ -7,30 +7,37 @@ import android.app.NotificationManager;
 import android.content.Context;
 import android.content.pm.PackageManager;
 import android.os.Build;
-import java.io.IOException;
-import java.util.concurrent.TimeUnit;
 
 final class SessionAudit {
-    static final String TITLE = "Phone was used remotely";
-    static final String TEXT = "Your DroidMirror mirroring session ended.";
-    static boolean phone(Context context) {
-        if (Build.VERSION.SDK_INT >= 33 && context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) return false;
-        NotificationManager notifications = context.getSystemService(NotificationManager.class);
-        notifications.createNotificationChannel(new NotificationChannel("remote-use", "Remote use history", NotificationManager.IMPORTANCE_DEFAULT));
-        notifications.notify(2, new Notification.Builder(context, "remote-use").setSmallIcon(android.R.drawable.ic_menu_view)
-            .setContentTitle(TITLE).setContentText(TEXT).setAutoCancel(true).build());
-        return true;
+    static final String TITLE = "Phone Mirroring";
+    static final String COMPUTER_NAME = "computerName";
+    static String text(String computerName) {
+        return "Phone was used from " + (computerName == null || computerName.trim().isEmpty() ? "Mac" : computerName.trim());
     }
-    static boolean shell() {
-        java.lang.Process command = null;
+    static String computerName(Context context, String peer) {
         try {
-            // Structured argv, no shell interpolation. The shell's notification survives app force-stop.
-            command = new ProcessBuilder("/system/bin/cmd", "notification", "post", "-t", TITLE,
-                "DroidMirror.remote-use", TEXT).redirectErrorStream(true).start();
-            return command.waitFor(1000, TimeUnit.MILLISECONDS) && command.exitValue() == 0;
-        } catch (IOException | InterruptedException error) {
-            if (error instanceof InterruptedException) Thread.currentThread().interrupt();
+            android.bluetooth.BluetoothManager manager = context.getSystemService(android.bluetooth.BluetoothManager.class);
+            return manager.getAdapter().getRemoteDevice(peer).getName();
+        } catch (SecurityException | IllegalArgumentException | NullPointerException unavailable) { return null; }
+    }
+    static void clear(Context context) {
+        context.stopService(new android.content.Intent(context, RemoteUseWarningService.class));
+        context.getSystemService(NotificationManager.class).cancel(2);
+    }
+    static boolean phone(Context context, String computerName) {
+        if (Build.VERSION.SDK_INT >= 33 && context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) return false;
+        try {
+            context.startForegroundService(new android.content.Intent(context, RemoteUseWarningService.class).putExtra(COMPUTER_NAME, computerName));
+            return true;
+        } catch (RuntimeException unavailable) {
+            NotificationManager notifications = context.getSystemService(NotificationManager.class);
+            notifications.createNotificationChannel(new NotificationChannel("remote-use", "Remote use history", NotificationManager.IMPORTANCE_DEFAULT));
+            notifications.notify(2, new Notification.Builder(context, "remote-use").setSmallIcon(R.drawable.ic_screen_share)
+                .setContentTitle(TITLE).setContentText(text(computerName)).setAutoCancel(true).build());
             return false;
-        } finally { if (command != null && command.isAlive()) command.destroyForcibly(); }
+        }
+    }
+    static boolean shell(String computerName) {
+        return com.genymobile.scrcpy.RemoteUseWarning.launch(computerName);
     }
 }
