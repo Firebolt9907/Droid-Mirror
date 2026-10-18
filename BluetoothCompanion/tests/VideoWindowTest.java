@@ -23,6 +23,16 @@ public final class VideoWindowTest {
             // Falling back with Wi-Fi bytes still in flight must stop new
             // Classic reservations until cumulative ACKs drain below its cap.
             int capacity = BluetoothWire.VIDEO_WINDOW_BYTES;
+            VideoWindow boundedWifi = new VideoWindow(capacity,1000);
+            boundedWifi.useWirelessCapacity();
+            if(boundedWifi.capacityBytes()!=128*1024) throw new AssertionError("Wi-Fi replay backlog grew beyond its recovery budget");
+            boundedWifi.reserve(128*1024);
+            Future<?> wifiCredit=executor.submit(() -> {
+                try { boundedWifi.reserve(1); } catch(IOException error) { throw new RuntimeException(error); }
+            });
+            try { wifiCredit.get(20,TimeUnit.MILLISECONDS); throw new AssertionError("Wi-Fi exceeded bounded replay credit"); }
+            catch(TimeoutException expected) {}
+            boundedWifi.acknowledge(1); wifiCredit.get(1,TimeUnit.SECONDS); boundedWifi.close();
             VideoWindow fallback = new VideoWindow(capacity, 1000);
             fallback.useWirelessCapacity(); fallback.reserve(capacity * 3);
             fallback.useBluetoothCapacity();

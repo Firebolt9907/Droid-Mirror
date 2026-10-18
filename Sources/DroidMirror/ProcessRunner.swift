@@ -5,7 +5,20 @@ import Darwin
 final class ProcessDiagnostics: @unchecked Sendable {
     private let pipe = Pipe()
     private let lock = NSLock()
-    private var bytes = Data()
+    private let logURL = FileManager.default.temporaryDirectory
+        .appendingPathComponent("DroidMirror-diagnostics-\(UUID().uuidString).log")
+    private var logHandle: FileHandle?
+    private var bytes = Data() // Fallback if temporary storage is unavailable.
+
+    init() {
+        FileManager.default.createFile(atPath: logURL.path, contents: nil)
+        logHandle = try? FileHandle(forUpdating: logURL)
+    }
+
+    deinit {
+        try? logHandle?.close()
+        try? FileManager.default.removeItem(at: logURL)
+    }
 
     func attach(to process: Process, captureOutput: Bool = false) {
         process.standardError = pipe
@@ -24,18 +37,39 @@ final class ProcessDiagnostics: @unchecked Sendable {
         while true {
             let count = Darwin.read(pipe.fileHandleForReading.fileDescriptor, &buffer, buffer.count)
             if count > 0 {
-                bytes.append(contentsOf: buffer.prefix(count))
-                if bytes.count > 8192 { bytes.removeFirst(bytes.count - 8192) }
+                let chunk = Data(buffer.prefix(count))
+                if let logHandle {
+                    do { try logHandle.write(contentsOf: chunk) }
+                    catch {
+                        bytes = (try? Data(contentsOf: logURL)) ?? Data()
+                        bytes.append(chunk)
+                        try? logHandle.close()
+                        self.logHandle = nil
+                    }
+                } else { bytes.append(chunk) }
             } else if count < 0 && errno == EINTR {
                 continue
             } else { break }
         }
     }
-    func reset() { drain(); lock.lock(); bytes.removeAll(); lock.unlock() }
+    func reset() {
+        drain()
+        lock.lock(); defer { lock.unlock() }
+        bytes.removeAll()
+        if let logHandle {
+            do {
+                try logHandle.truncate(atOffset: 0)
+                try logHandle.seek(toOffset: 0)
+            } catch {
+                try? logHandle.close()
+                self.logHandle = nil
+            }
+        }
+    }
     func snapshot() -> String {
         drain()
         lock.lock(); defer { lock.unlock() }
-        return String(decoding: bytes, as: UTF8.self)
+        return String(decoding: logHandle == nil ? bytes : ((try? Data(contentsOf: logURL)) ?? Data()), as: UTF8.self)
     }
     func finish() -> String {
         pipe.fileHandleForReading.readabilityHandler = nil
@@ -145,8 +179,10 @@ enum ProcessRunner {
                     guard gate.claim() else { return }
                     if process.isRunning { process.terminate() }
                     try? outputHandle.close()
+                    let data = (try? Data(contentsOf: outputURL)) ?? Data()
                     try? FileManager.default.removeItem(at: outputURL)
-                    continuation.resume(throwing: RunnerError.timedOut)
+                    let diagnostic = String(decoding: data, as: UTF8.self)
+                    continuation.resume(throwing: RunnerError.failed("Command timed out\n\n" + diagnostic))
                 }
             }
         }

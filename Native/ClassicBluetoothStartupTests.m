@@ -27,20 +27,31 @@
 @interface DMStartupPeripheral : NSObject
 @property(nonatomic, strong) NSUUID *identifier;
 @property(nonatomic, weak) id delegate;
+@property(nonatomic, strong) NSArray *services;
+@property(nonatomic) NSUInteger discoveries;
+@property(nonatomic) NSUInteger characteristicDiscoveries;
+@property(nonatomic) NSUInteger reads;
 @end
 @implementation DMStartupPeripheral
+- (void)discoverServices:(NSArray *)services { ++_discoveries; }
+- (void)discoverCharacteristics:(NSArray *)characteristics forService:(id)service { ++_characteristicDiscoveries; }
+- (void)readValueForCharacteristic:(id)characteristic { ++_reads; }
+- (NSUInteger)maximumWriteValueLengthForType:(CBCharacteristicWriteType)type { return 512; }
+- (void)writeValue:(NSData *)value forCharacteristic:(id)characteristic type:(CBCharacteristicWriteType)type {}
 @end
 
 @interface DMStartupManager : NSObject
 @property(nonatomic, strong) NSArray *connected;
 @property(nonatomic, strong) id candidate;
 @property(nonatomic) NSUInteger scans;
+@property(nonatomic) NSUInteger cancellations;
 @end
 @implementation DMStartupManager
 - (CBManagerState)state { return CBManagerStatePoweredOn; }
 - (NSArray *)retrieveConnectedPeripheralsWithServices:(NSArray *)services { return _connected; }
 - (void)connectPeripheral:(id)peripheral options:(NSDictionary *)options { _candidate=peripheral; }
 - (void)stopScan {}
+- (void)cancelPeripheralConnection:(id)peripheral { ++_cancellations; }
 - (void)scanForPeripheralsWithServices:(NSArray *)services options:(NSDictionary *)options { ++_scans; }
 @end
 
@@ -89,6 +100,234 @@
 }
 @end
 
+@interface DMRecoveryTransport : DMBleInputTransport
+@property(nonatomic, strong) NSString *failure;
+@property(nonatomic) NSUInteger readyCount;
+@property(nonatomic, strong) NSData *delivered;
+- (DMBleInputKeys)testKeys:(BOOL)returning;
+- (NSData *)testReturnPacket;
+- (NSData *)testProof;
+- (NSData *)testClock;
+- (NSData *)testResume:(uint64_t)next;
+@end
+@implementation DMRecoveryTransport
+- (void)reportFailure:(NSString *)reason { self.failure=reason; }
+- (void)reportReady { ++self.readyCount; }
+- (void)deliver:(NSData *)bytes { self.delivered=bytes; }
+- (void)drain {} // Test controls ATT completions explicitly.
+- (DMBleInputKeys)testKeys:(BOOL)returning {
+    uint8_t session[32]; DMBleInputKeys keys;
+    dm_ble_session_key(self.pairingKey.bytes,self.sessionNonce.bytes,session);
+    if (returning) dm_ble_output_keys(session,&keys); else dm_ble_input_keys(session,&keys);
+    return keys;
+}
+- (NSData *)testReturnPacket {
+    DMBleInputKeys keys=[self testKeys:YES];
+    uint8_t packet[25]; assert(dm_ble_input_seal(&keys,self.receiveSequence,(const uint8_t *)"x",1,packet));
+    return [NSData dataWithBytes:packet length:sizeof(packet)];
+}
+- (NSData *)testProof {
+    DMBleInputKeys keys=[self testKeys:NO];
+    uint8_t proof[32]; dm_ble_input_proof(&keys,self.challenge.bytes,proof);
+    return [NSData dataWithBytes:proof length:sizeof(proof)];
+}
+- (NSData *)testResume:(uint64_t)next {
+    DMBleInputKeys keys=[self testKeys:NO]; uint8_t bytes[40];
+    uint64_t encoded=CFSwapInt64HostToBig(next); memcpy(bytes,&encoded,8);
+    dm_ble_resume_proof(&keys,self.challenge.bytes,bytes,bytes+8);
+    return [NSData dataWithBytes:bytes length:sizeof(bytes)];
+}
+- (NSData *)testClock {
+    DMBleInputKeys keys=[self testKeys:NO];
+    uint8_t bytes[40]={0}; dm_ble_clock_proof(&keys,bytes,bytes+8);
+    return [NSData dataWithBytes:bytes length:sizeof(bytes)];
+}
+@end
+
+static CBMutableService *RecoveryService(void) {
+    CBMutableService *service=[[CBMutableService alloc] initWithType:[CBUUID UUIDWithString:DMInputService] primary:YES];
+    NSMutableArray *attributes=[NSMutableArray array];
+    for (NSString *uuid in @[DMInputCharacteristic,DMInputProof,DMInputReturn,DMInputKey,DMInputClock,DMInputResume,DMInputReplay])
+        [attributes addObject:[[CBMutableCharacteristic alloc] initWithType:[CBUUID UUIDWithString:uuid]
+            properties:CBCharacteristicPropertyRead|CBCharacteristicPropertyWrite value:nil
+            permissions:CBAttributePermissionsReadable|CBAttributePermissionsWriteable]];
+    service.characteristics=attributes; return service;
+}
+
+static void TestActiveServiceRecovery(void) {
+    DMRecoveryTransport *ble=[DMRecoveryTransport new];
+    DMStartupPeripheral *peer=[DMStartupPeripheral new]; peer.identifier=[NSUUID UUID];
+    ble.peripheral=(CBPeripheral *)peer; ble.pending=[DMBleInputQueue new];
+    ble.pairingKey=[NSMutableData dataWithLength:32]; ble.sessionNonce=[NSMutableData dataWithLength:32];
+    CBMutableCharacteristic *initialNonce=[[CBMutableCharacteristic alloc] initWithType:[CBUUID UUIDWithString:DMInputKey]
+        properties:CBCharacteristicPropertyRead value:ble.sessionNonce permissions:CBAttributePermissionsReadable];
+    ble.nonceCharacteristic=initialNonce;
+    [ble peripheral:(CBPeripheral *)peer didUpdateValueForCharacteristic:initialNonce error:nil];
+    ble.sequence=17; ble.receiveSequence=23;
+    CBMutableService *old=RecoveryService();
+    ble.inputService=old; ble.returning=old.characteristics[2];
+    ble.ready=YES; ble.proofVerified=YES; ble.readPending=YES;
+    NSData *lostReturn=[ble testReturnPacket];
+    CBMutableCharacteristic *returning=(CBMutableCharacteristic *)ble.returning;
+    [ble peripheral:(CBPeripheral *)peer didModifyServices:@[old]];
+    assert(!ble.ready && ble.recovering && !ble.failure && peer.discoveries==1);
+    NSTimeInterval deadline=ble.recoveryDeadline;
+    [ble peripheral:(CBPeripheral *)peer didModifyServices:@[old]];
+    assert(ble.recoveryDeadline==deadline); // Repeated invalidations cannot extend recovery.
+    returning.value=lostReturn;
+    [ble peripheral:(CBPeripheral *)peer didUpdateValueForCharacteristic:returning error:nil];
+    assert(ble.receiveSequence==23 && !ble.delivered); // Ignore old ATT completion.
+    [ble recoverInputServiceAtTime:deadline-0.01]; assert(peer.discoveries==1);
+    CBMutableService *fresh=RecoveryService(); peer.services=@[fresh];
+    [ble peripheral:(CBPeripheral *)peer didDiscoverServices:nil];
+    [ble peripheral:(CBPeripheral *)peer didDiscoverCharacteristicsForService:fresh error:nil];
+    CBMutableCharacteristic *nonce=(CBMutableCharacteristic *)ble.nonceCharacteristic;
+    nonce.value=ble.sessionNonce;
+    [ble peripheral:(CBPeripheral *)peer didUpdateValueForCharacteristic:nonce error:nil];
+    assert(ble.challenge.length==16 && ble.sequence==17 && ble.receiveSequence==23);
+    CBMutableCharacteristic *proof=(CBMutableCharacteristic *)ble.proof; proof.value=[ble testProof];
+    [ble peripheral:(CBPeripheral *)peer didUpdateValueForCharacteristic:proof error:nil];
+    CBMutableCharacteristic *resume=(CBMutableCharacteristic *)ble.resumeCharacteristic; resume.value=[ble testResume:17];
+    [ble peripheral:(CBPeripheral *)peer didUpdateValueForCharacteristic:resume error:nil];
+    CBMutableCharacteristic *replay=(CBMutableCharacteristic *)ble.replayCharacteristic; replay.value=lostReturn;
+    [ble peripheral:(CBPeripheral *)peer didUpdateValueForCharacteristic:replay error:nil];
+    assert(ble.receiveSequence==24 && [ble.delivered isEqual:[NSData dataWithBytes:"x" length:1]]);
+    CBMutableCharacteristic *clock=(CBMutableCharacteristic *)ble.clockCharacteristic; clock.value=[ble testClock];
+    [ble peripheral:(CBPeripheral *)peer didUpdateValueForCharacteristic:clock error:nil];
+    assert(ble.ready && !ble.recovering && ble.readyCount==1 && !ble.failure);
+    assert(ble.sequence==17 && ble.receiveSequence==24); // No CTR nonce reuse or replay acceptance.
+    for (NSUInteger accepted=0; accepted<2; ++accepted) {
+        ble.recovering=YES; ble.ready=NO; ble.proofVerified=YES;
+        ble.inFlightPacket=[NSData dataWithBytes:"ciphertext" length:10];
+        resume.value=[ble testResume:accepted ? 17 : 16];
+        [ble peripheral:(CBPeripheral *)peer didUpdateValueForCharacteristic:resume error:nil];
+        assert(ble.retryInput==!accepted && ble.sequence==17);
+        if (!accepted) assert(ble.inFlightPacket.length==10); else assert(!ble.inFlightPacket);
+        clock.value=[ble testClock];
+        [ble peripheral:(CBPeripheral *)peer didUpdateValueForCharacteristic:clock error:nil];
+        assert(ble.ready && !ble.failure);
+    }
+    // A valid MAC cannot authorize an input sequence outside the outstanding packet.
+    ble.recovering=YES; ble.ready=NO; ble.proofVerified=YES;
+    resume.value=[ble testResume:15];
+    [ble peripheral:(CBPeripheral *)peer didUpdateValueForCharacteristic:resume error:nil];
+    assert([ble.failure containsString:@"sequence"] && ble.sequence==17);
+    ble.failure=nil; ble.ready=YES; ble.recovering=NO;
+    [ble peripheral:(CBPeripheral *)peer didModifyServices:@[fresh]];
+    [ble recoverInputServiceAtTime:ble.recoveryDeadline];
+    assert([ble.failure containsString:@"timed out"]);
+    ble.failure=nil;
+    // A replacement app/session cannot inherit the old mirror's authentication.
+    CBMutableService *replacement=RecoveryService(); peer.services=@[replacement];
+    [ble peripheral:(CBPeripheral *)peer didDiscoverServices:nil];
+    [ble peripheral:(CBPeripheral *)peer didDiscoverCharacteristicsForService:replacement error:nil];
+    nonce=(CBMutableCharacteristic *)ble.nonceCharacteristic;
+    NSMutableData *different=[ble.sessionNonce mutableCopy]; ((uint8_t *)different.mutableBytes)[0]=1; nonce.value=different;
+    [ble peripheral:(CBPeripheral *)peer didUpdateValueForCharacteristic:nonce error:nil];
+    assert([ble.failure containsString:@"replaced"] && !ble.ready && ble.sequence==17 && ble.receiveSequence==24);
+    puts("BLE active recovery: in-flight completion, fresh proof, same-session nonce, preserved sequences, stale callbacks and bounded failure passed");
+}
+
+static void TestStalledCandidateRecovery(void) {
+    DMBleInputTransport *ble=[DMBleInputTransport new];
+    DMStartupManager *manager=[DMStartupManager new];
+    DMStartupPeripheral *stalled=[DMStartupPeripheral new]; stalled.identifier=[NSUUID UUID];
+    DMStartupPeripheral *live=[DMStartupPeripheral new]; live.identifier=[NSUUID UUID];
+    ble.manager=(CBCentralManager *)manager; ble.rejected=[NSMutableSet set];
+    [ble centralManager:(CBCentralManager *)manager didDiscoverPeripheral:(CBPeripheral *)stalled advertisementData:@{} RSSI:@0];
+    NSTimeInterval deadline=ble.candidateConnectionDeadline;
+    [ble recoverConnectingCandidateAtTime:deadline-0.01];
+    assert(ble.peripheral==(CBPeripheral *)stalled && manager.cancellations==0);
+    // The phone's new identity becomes a system-connected link while the old
+    // advertising identity is still silently retrying in CoreBluetooth.
+    manager.connected=@[stalled,live];
+    [ble recoverConnectingCandidateAtTime:deadline];
+    assert(manager.cancellations==1 && ble.peripheral==(CBPeripheral *)live && manager.candidate==live);
+    assert(ble.rejected.count==0 && [ble.deferredCandidate isEqual:stalled.identifier]);
+    [ble centralManager:(CBCentralManager *)manager didConnectPeripheral:(CBPeripheral *)stalled];
+    [ble centralManager:(CBCentralManager *)manager didDisconnectPeripheral:(CBPeripheral *)stalled error:nil];
+    assert(ble.peripheral==(CBPeripheral *)live && live.discoveries==0);
+    [ble centralManager:(CBCentralManager *)manager didConnectPeripheral:(CBPeripheral *)live];
+    assert(live.discoveries==1 && ble.candidateConnectionDeadline==0);
+    [ble recoverConnectingCandidateAtTime:deadline+100];
+    assert(manager.cancellations==1 && ble.peripheral==(CBPeripheral *)live);
+
+    DMBleInputTransport *cancelled=[DMBleInputTransport new];
+    cancelled.manager=(CBCentralManager *)manager; cancelled.peripheral=(CBPeripheral *)stalled;
+    cancelled.candidateConnectionDeadline=1; cancelled.closed=YES;
+    [cancelled recoverConnectingCandidateAtTime:2]; assert(manager.cancellations==1);
+    DMBleInputTransport *slow=[DMBleInputTransport new];
+    DMStartupManager *slowManager=[DMStartupManager new]; slowManager.connected=@[stalled];
+    slow.manager=(CBCentralManager *)slowManager; slow.rejected=[NSMutableSet set];
+    slow.peripheral=(CBPeripheral *)stalled; slow.candidateConnectionDeadline=NSDate.timeIntervalSinceReferenceDate;
+    [slow recoverConnectingCandidateAtTime:slow.candidateConnectionDeadline];
+    assert(slow.peripheral==nil && slow.rejected.count==0);
+    [slow recoverConnectingCandidateAtTime:slow.candidateRetryAfter];
+    assert(slow.peripheral==(CBPeripheral *)stalled); // A slow valid phone isn't permanently excluded.
+    puts("BLE startup: stalled identity replaced by live link, cooldown retry, late callbacks and cancellation passed");
+}
+
+static void TestDelayedInputService(void) {
+    DMBleInputTransport *ble=[DMBleInputTransport new];
+    DMStartupManager *manager=[DMStartupManager new];
+    DMStartupPeripheral *peer=[DMStartupPeripheral new]; peer.identifier=[NSUUID UUID];
+    ble.manager=(CBCentralManager *)manager; ble.peripheral=(CBPeripheral *)peer;
+    ble.rejected=[NSMutableSet set];
+    [ble centralManager:(CBCentralManager *)manager didConnectPeripheral:(CBPeripheral *)peer];
+    assert(peer.discoveries==1);
+    // Reproduce a notification link whose per-session input service isn't added yet.
+    peer.services=@[];
+    [ble peripheral:(CBPeripheral *)peer didDiscoverServices:nil];
+    assert(ble.rejected.count==0 && manager.cancellations==0 && ble.nextDiscovery>0);
+    [ble retryDiscoveryAtTime:ble.nextDiscovery-0.01]; assert(peer.discoveries==1);
+    [ble retryDiscoveryAtTime:ble.nextDiscovery]; assert(peer.discoveries==2);
+    CBMutableService *service=[[CBMutableService alloc] initWithType:[CBUUID UUIDWithString:DMInputService] primary:YES];
+    peer.services=@[service];
+    [ble peripheral:(CBPeripheral *)peer didDiscoverServices:nil];
+    assert(peer.characteristicDiscoveries==1 && ble.inputService==service);
+    // A cached service can also have missing attributes until Service Changed arrives.
+    [ble peripheral:(CBPeripheral *)peer didDiscoverCharacteristicsForService:service error:nil];
+    assert(ble.rejected.count==0 && ble.nextDiscovery>0);
+    [ble peripheral:(CBPeripheral *)peer didModifyServices:@[service]];
+    assert(ble.inputService==nil && ble.nextDiscovery>0);
+    [ble retryDiscoveryAtTime:ble.nextDiscovery];
+    CBMutableService *fresh=[[CBMutableService alloc] initWithType:service.UUID primary:YES];
+    NSMutableArray *attributes=[NSMutableArray array];
+    for (NSString *uuid in @[DMInputCharacteristic,DMInputProof,DMInputReturn,DMInputKey,DMInputClock,DMInputResume,DMInputReplay]) {
+        [attributes addObject:[[CBMutableCharacteristic alloc] initWithType:[CBUUID UUIDWithString:uuid]
+            properties:CBCharacteristicPropertyRead|CBCharacteristicPropertyWrite value:nil
+            permissions:CBAttributePermissionsReadable|CBAttributePermissionsWriteable]];
+    }
+    fresh.characteristics=attributes; peer.services=@[fresh];
+    [ble peripheral:(CBPeripheral *)peer didDiscoverServices:nil];
+    [ble peripheral:(CBPeripheral *)peer didDiscoverCharacteristicsForService:service error:nil];
+    assert(peer.reads==0); // Ignore late discovery from the invalidated service.
+    [ble peripheral:(CBPeripheral *)peer didDiscoverCharacteristicsForService:fresh error:nil];
+    assert(peer.reads==1 && ble.nonceCharacteristic!=nil && !ble.ready && ble.rejected.count==0);
+    // Late values from the invalidated service cannot reject the current session.
+    CBMutableCharacteristic *obsolete=[[CBMutableCharacteristic alloc] initWithType:[CBUUID UUIDWithString:DMInputKey]
+        properties:CBCharacteristicPropertyRead value:nil permissions:CBAttributePermissionsReadable];
+    [ble peripheral:(CBPeripheral *)peer didUpdateValueForCharacteristic:obsolete error:nil];
+    assert(ble.rejected.count==0);
+    // Even when discovery recovers, an invalid pairing proof still rejects it.
+    ble.challenge=[NSMutableData dataWithLength:16];
+    CBMutableCharacteristic *proof=(CBMutableCharacteristic *)ble.proof;
+    proof.value=[NSMutableData dataWithLength:31];
+    [ble peripheral:(CBPeripheral *)peer didUpdateValueForCharacteristic:proof error:nil];
+    assert(ble.rejected.count==1 && manager.cancellations==1);
+
+    DMBleInputTransport *expired=[DMBleInputTransport new];
+    expired.manager=(CBCentralManager *)manager; expired.peripheral=(CBPeripheral *)peer;
+    expired.rejected=[NSMutableSet set]; expired.discoveryDeadline=NSDate.timeIntervalSinceReferenceDate-1;
+    peer.services=@[];
+    [expired peripheral:(CBPeripheral *)peer didDiscoverServices:nil];
+    assert(expired.rejected.count==1 && manager.cancellations==2 && expired.nextDiscovery==0);
+    expired.closed=YES; expired.nextDiscovery=1;
+    NSUInteger count=peer.discoveries;
+    [expired retryDiscoveryAtTime:2]; assert(peer.discoveries==count);
+    puts("BLE startup: delayed service, stale attributes, Service Changed, bounded retries and authentication rejection passed");
+}
+
 static void TestNativeClassicStreams(void) {
     const uint8_t bytes[] = {'D','M','B','T','0','0','0','6',0,0,0,0,3,'a','b','c'};
     DMStreamChannel *raw = [DMStreamChannel new];
@@ -126,8 +365,8 @@ static void TestVideoAckCadence(void) {
     bridge.videoReceived=8192;
     [bridge acknowledgeVideoAtTime:10.36]; assert(ble.requests==3 && ble.received==8192);
     bridge.wifiActive=YES; bridge.videoReceived=32768;
-    [bridge acknowledgeVideoAtTime:10.41]; assert(ble.requests==3);
-    [bridge acknowledgeVideoAtTime:10.62]; assert(ble.requests==4 && ble.received==32768);
+    [bridge acknowledgeVideoAtTime:10.41]; assert(ble.requests==4 && ble.received==32768);
+    [bridge acknowledgeVideoAtTime:10.62]; assert(ble.requests==4); // No busy Wi-Fi ACKs when idle.
     bridge.wifiActive=NO; bridge.videoReceived=35451;
     [bridge acknowledgeVideoAtTime:10.67]; assert(ble.requests==5 && ble.received==35451);
     puts("Video ACKs: active Classic cadence, idle heartbeat, readiness, Wi-Fi and fallback passed");
@@ -259,6 +498,9 @@ int main(void) {
         [busyBridge receiveEvent:8];
         [busyBridge receiveEvent:8];
         assert(busyBridge.eventMask == 0x80); // Distinct, deduplicated startup rejection.
+        TestActiveServiceRecovery();
+        TestStalledCandidateRecovery();
+        TestDelayedInputService();
         TestNativeClassicStreams();
         TestVideoAckCadence();
         TestDroppedADB();

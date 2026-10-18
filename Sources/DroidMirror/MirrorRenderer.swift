@@ -77,6 +77,8 @@ final class MirrorRenderer: NSObject {
         childEnvironment["DROIDMIRROR_SESSION_STATE"] = dir.appendingPathComponent("state.json").path
         childEnvironment["DYLD_INSERT_LIBRARIES"] = Bundle.main.bundleURL
             .appendingPathComponent("Contents/Frameworks/libDroidMirrorStyle.dylib").path
+        childEnvironment["SCRCPY_ICON_DIR"] = URL(fileURLWithPath: executable)
+            .deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("Resources").path
         childEnvironment["SDL_APP_NAME"] = "DroidMirror"
         childEnvironment["SDL_APP_ID"] = "app.droidmirror.mac"
         let child = Process()

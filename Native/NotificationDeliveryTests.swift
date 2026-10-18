@@ -24,6 +24,16 @@ struct NotificationDeliveryTests {
         }
         precondition(!policy.shouldDeliver(event: ["package": "app.droidmirror.bluetooth"]),
                      "The companion's session history must not loop back to the Mac")
+        for event: [String: Any] in [
+            ["package": "android", "category": "sys"],
+            ["package": "android", "channel": "PHYSICAL_KEYBOARD"],
+            ["package": "com.android.systemui", "channel": "virtual_keyboard"],
+            ["category": "service"], ["category": "transport"], ["progress": true]
+        ] { precondition(!policy.shouldDeliver(event: event)) }
+        for category in ["msg", "call", "alarm", "err"] {
+            precondition(policy.shouldDeliver(event: ["package": "android", "category": category]))
+        }
+        precondition(policy.shouldDeliver(event: ["package": "downloads", "progress": false]))
         print("Notification delivery policy tests passed")
     }
 }

@@ -37,6 +37,11 @@ int main(void) {
         DroidMirrorInstallSessionMenu();
         assert(settings.enabled && settings.target && settings.action == NSSelectorFromString(@"settings:"));
         assert([settings.keyEquivalent isEqualToString:@","]);
+        NSMenuItem *setup = [application.submenu itemWithTag:0x444d5355];
+        assert(setup && setup.enabled && setup.target && setup.action == NSSelectorFromString(@"setup:"));
+        NSInteger count = application.submenu.numberOfItems;
+        DroidMirrorInstallSessionMenu();
+        assert(application.submenu.numberOfItems == count);
 
         SDL_Window *loading = sc_sdl_create_window("DroidMirror — Test", 100, 100, 360, 720,
             SDL_WINDOW_BORDERLESS | SDL_WINDOW_RESIZABLE);

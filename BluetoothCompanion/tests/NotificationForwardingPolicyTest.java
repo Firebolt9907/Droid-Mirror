@@ -23,6 +23,18 @@ public final class NotificationForwardingPolicyTest {
             check(!NotificationForwardingPolicy.eligible(chat, own, flag | Notification.FLAG_AUTO_CANCEL,
                 Notification.VISIBILITY_PRIVATE));
         }
+        check(NotificationForwardingPolicy.routine("android", Notification.CATEGORY_SYSTEM, null, false));
+        check(NotificationForwardingPolicy.routine("android", null, "PHYSICAL_KEYBOARD", false));
+        check(NotificationForwardingPolicy.routine("com.android.systemui", null, "virtual_keyboard", false));
+        check(NotificationForwardingPolicy.routine(chat, Notification.CATEGORY_SERVICE, null, false));
+        check(NotificationForwardingPolicy.routine(chat, Notification.CATEGORY_TRANSPORT, null, false));
+        check(NotificationForwardingPolicy.routine(chat, null, null, true));
+        for (String category : new String[] { null, Notification.CATEGORY_MESSAGE, Notification.CATEGORY_CALL,
+                Notification.CATEGORY_ALARM, Notification.CATEGORY_ERROR }) {
+            check(!NotificationForwardingPolicy.routine("android", category, "alerts", false));
+            check(!NotificationForwardingPolicy.routine(chat, category, null, false));
+        }
+        check(!NotificationForwardingPolicy.routine(chat, Notification.CATEGORY_SYSTEM, "PHYSICAL_KEYBOARD", false));
         System.out.println("Android notification forwarding policy tests passed");
     }
 }

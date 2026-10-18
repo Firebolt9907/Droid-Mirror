@@ -95,8 +95,15 @@ class PhoneNotifications : NotificationListenerService() {
         while (result.toByteArray(Charsets.UTF_8).size > bytes) result = result.dropLast(1)
         return result
     }
+    private fun hasProgress(notification: Notification): Boolean =
+        notification.extras.getBoolean(Notification.EXTRA_PROGRESS_INDETERMINATE, false) ||
+            (notification.extras.getInt(Notification.EXTRA_PROGRESS_MAX, 0) > 0 &&
+                notification.extras.getInt(Notification.EXTRA_PROGRESS, 0) <
+                    notification.extras.getInt(Notification.EXTRA_PROGRESS_MAX, 0))
     private fun eligible(sbn: StatusBarNotification): Boolean = NotificationForwardingPolicy.eligible(
-        sbn.packageName, packageName, sbn.tag, sbn.notification.flags, sbn.notification.visibility)
+        sbn.packageName, packageName, sbn.tag, sbn.notification.flags, sbn.notification.visibility) &&
+        !NotificationForwardingPolicy.routine(sbn.packageName, sbn.notification.category,
+            sbn.notification.channelId, hasProgress(sbn.notification))
     override fun onListenerConnected() {
         synchronized(this) { entries.clear() }
         live = this
@@ -129,6 +136,9 @@ class PhoneNotifications : NotificationListenerService() {
         val result = JSONObject().put("type", "notification").put("id", id(sbn.key)).put("version", entry.version)
             .put("postedAt", sbn.postTime)
             .put("silent", silent).put("package", sbn.packageName)
+            .put("category", notification.category).put("channel", notification.channelId)
+            .put("progress", hasProgress(notification))
+            .put("subtitle", bounded(notification.extras.getCharSequence(Notification.EXTRA_SUB_TEXT), 240))
             .put("ongoing", sbn.isOngoing)
             .put("persistent", notification.flags and (Notification.FLAG_NO_CLEAR or Notification.FLAG_FOREGROUND_SERVICE) != 0)
             .put("app", bounded(label, 120)).put("title", bounded(notification.extras.getCharSequence(Notification.EXTRA_TITLE), 240))
@@ -207,9 +217,9 @@ class PhoneNotifications : NotificationListenerService() {
     }
     @Synchronized fun snapshot(): List<JSONObject> {
         // Purge Mac copies forwarded by older builds without removing Android's
-        // own remote-use history. Small tombstones precede the bounded snapshot.
+        // own notifications. Small tombstones precede the bounded snapshot.
         val history = activeNotifications.orEmpty().filter {
-            NotificationForwardingPolicy.remoteUseAudit(it.packageName, it.tag)
+            !eligible(it)
         }.take(16).map { JSONObject().put("type", "removed").put("id", id(it.key)) }
         return history + entries.values.sortedBy { it.notification.postTime }.takeLast(16)
             .map { payload(it).put("snapshot", true) }

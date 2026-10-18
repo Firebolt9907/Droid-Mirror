@@ -9,12 +9,19 @@ final class BLEController: NSObject, ObservableObject {
     private static let inputServiceID = CBUUID(string: "C356A44E-6F2B-4DA9-85E5-397991B8A610")
     var onEvent: (([String: Any]) -> Void)?
     var onAuthenticated: (() -> Void)?
+    private var receivedFrames = 0
+    private var assembledMessages = 0
+    private var staleFrames = 0
+    private var acknowledgedWrites = 0
+    var diagnostics: String { "rx=\(receivedFrames) assembled=\(assembledMessages) stale=\(staleFrames) written=\(acknowledgedWrites) queued=\(writes.count)" }
     private var session: BLESecureSession?
     private var fragments = BLEFragments()
     private var writes = [Data]()
     private var writing = false
     private var messageID: UInt32 = 1
     private var rejectedPeers = [UUID: Date]()
+    private(set) var supportsClipboard = false
+    private(set) var supportsTaskURLs = false
     var authenticated: Bool { session?.authenticated == true }
 
     @Published var status = "Starting Bluetooth…"
@@ -357,7 +364,7 @@ final class BLEController: NSObject, ObservableObject {
         send(["type": "state", "connected": connected])
     }
 
-    private func resetSecurity() { session = nil; fragments = BLEFragments(); writes.removeAll(); writing = false }
+    private func resetSecurity() { supportsClipboard = false; supportsTaskURLs = false; session = nil; fragments = BLEFragments(); writes.removeAll(); writing = false }
     @discardableResult func send(_ object: [String: Any]) -> Bool {
         guard authenticated, let session else { return false }
         do { try queue(session.seal(object)); return true }
@@ -378,18 +385,22 @@ final class BLEController: NSObject, ObservableObject {
     }
     private func receive(_ value: Data) {
         guard let data = fragments.accept(value) else { return }
+        assembledMessages += 1
         do {
             guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any], let session else { throw BLECryptoError.invalid }
             if object["type"] as? String == "challenge" {
+                status = "Verifying phone authentication challenge…"
                 try queue(JSONSerialization.data(withJSONObject: session.challenge(object))); return
             }
             let plain = try session.open(object)
             lastEndpointResponseAt = Date()
             switch plain["type"] as? String {
             case "ready":
+                supportsClipboard = plain["clipboard"] as? Int == 1
+                supportsTaskURLs = plain["taskUrls"] as? Int == 1
                 status = "Authenticated phone connected"
                 requestEndpoint(); send(["type": "subscribe"]); onAuthenticated?()
-            case "notification", "removed", "actionResult", "dismissResult", "minimizeMirror": onEvent?(plain)
+            case "notification", "removed", "actionResult", "dismissResult", "minimizeMirror", "clipboard", "clipboardStatus", "clipboardResult", "taskContinuation": onEvent?(plain)
             default: accept(try JSONSerialization.data(withJSONObject: plain))
             }
         } catch {
@@ -521,6 +532,8 @@ extension BLEController: CBPeripheralDelegate {
             rebuildBLESession(peripheral)
             return
         }
+        acknowledgedWrites += 1
+        if !authenticated { status = "Waiting for phone authentication response…" }
         writing = false; drain()
     }
 
@@ -544,7 +557,8 @@ extension BLEController: CBPeripheralDelegate {
     }
 
     func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
-        guard phone?.identifier == peripheral.identifier, characteristic === endpointCharacteristic, !stopped else { return }
+        receivedFrames += 1
+        guard phone?.identifier == peripheral.identifier, characteristic === endpointCharacteristic, !stopped else { staleFrames += 1; return }
         if let error {
             status = error.localizedDescription
             return

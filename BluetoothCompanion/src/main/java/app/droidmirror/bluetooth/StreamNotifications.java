@@ -1,6 +1,8 @@
 package app.droidmirror.bluetooth;
 
 import android.app.Notification;
+import android.app.NotificationChannel;
+import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.content.Context;
 import android.content.Intent;
@@ -11,11 +13,13 @@ import android.provider.Settings;
 
 /** One notification becomes a live update only while actual video is flowing. */
 final class StreamNotifications {
+    private static final String CHANNEL = "active-mirroring";
     static final String DISCONNECT = "app.droidmirror.bluetooth.action.DISCONNECT_STREAM";
     static final String MINIMIZE = "app.droidmirror.bluetooth.action.MINIMIZE_STREAM";
     static final String DISMISSED = "app.droidmirror.bluetooth.action.DISMISS_STREAM_UPDATE";
     static final String FINISHED = "app.droidmirror.bluetooth.action.STREAM_FINISHED";
     static final String TOKEN = "session", STARTED = "startedElapsed";
+    static final String TITLE_TEXT = "Phone Mirroring";
 
     static PendingIntent action(Context context, String action, String token) {
         Intent intent = new Intent(context, token.startsWith("adb-") ? AdbStreamService.class : CaptureService.class).setAction(action)
@@ -24,15 +28,18 @@ final class StreamNotifications {
     }
 
     static Notification streaming(Context context, String token, long started, boolean dismissed) {
+        context.getSystemService(NotificationManager.class).createNotificationChannel(
+            new NotificationChannel(CHANNEL, "Phone Mirroring", NotificationManager.IMPORTANCE_LOW));
         Intent details = new Intent(context, StreamDetailsActivity.class)
             .setData(Uri.parse("droidmirror://stream/" + token))
             .putExtra(TOKEN, token).putExtra(STARTED, started);
         PendingIntent open = PendingIntent.getActivity(context, 0, details,
             PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
         String text = mirroringText(context);
-        Notification.Builder builder = new Notification.Builder(context, "capture")
+        Notification.Builder builder = new Notification.Builder(context, CHANNEL)
             .setSmallIcon(R.drawable.ic_screen_share)
-            .setContentTitle(text)
+            .setContentTitle(TITLE_TEXT)
+            .setContentText(text)
             .setContentIntent(open).setOngoing(true).setOnlyAlertOnce(true)
             .setCategory(Notification.CATEGORY_STATUS).setVisibility(Notification.VISIBILITY_PRIVATE)
             .setShowWhen(false)

@@ -17,6 +17,8 @@ int main(int argc,char **argv) {
     hex(proof,32,output); assert(!strcmp(output,"eaa36a8dcfebabd9da451687a4e0091f469c869592241b5ea604cef6a99ccd8d"));
     uint8_t clockTime[8]={0,0,0,0,7,91,205,21}; dm_ble_clock_proof(&keys,clockTime,proof);
     hex(proof,32,output); assert(!strcmp(output,"1161d2415df57690a9d16aef9a8cb69b0fe65629616d147120b08bb6d300af21"));
+    uint8_t nextInput[8]={0,0,0,0,0,0,0,1}; dm_ble_resume_proof(&keys,challenge,nextInput,proof);
+    hex(proof,32,output); assert(!strcmp(output,"bebdb9e5b2a010c52e61baa7667d5a4d113392dd31f7991366d4a7ace3edf7f4"));
     assert(dm_ble_input_seal(&keys,1,plain,13,packet)); hex(packet,37,output);
     // Independently generated with OpenSSL AES-256-CTR and Python HMAC-SHA256.
     assert(!strcmp(output,"00000000000000016b4316245fe8d792ac5a72baf629fb8da00e9d50e02624cd2e99feb996"));

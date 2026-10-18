@@ -24,7 +24,10 @@ import java.util.concurrent.ConcurrentHashMap
 class BlePeripheral(
     private val context: Context,
     private val endpoint: () -> AdbEndpoint?,
-    private val onCommand: (String) -> Unit = {}
+    private val onCommand: (String) -> Unit = {},
+    private val onClipboardSubscription: (Boolean, Long) -> Unit = { _, _ -> },
+    private val onClipboardText: (String) -> Unit = {},
+    private val onTaskSubscription: (Boolean, Long) -> Unit = { _, _ -> }
 ) {
     companion object {
         val SERVICE_UUID: UUID = UUID.fromString("7e57b000-9a6b-4c5d-8e7f-102030405060")
@@ -48,6 +51,24 @@ class BlePeripheral(
     private var advertiseCallback: AdvertiseCallback? = null
     private var publishedPort: Int? = null
     private var revision = 0L
+    private var clipboardDevice: android.bluetooth.BluetoothDevice? = null
+    private var clipboardGeneration = 0L
+    private var taskDevice: android.bluetooth.BluetoothDevice? = null
+    private var taskGeneration = 0L
+
+    @Synchronized fun sendTaskEvent(value: JSONObject, generation: Long) {
+        if (generation != taskGeneration) return
+        val device = taskDevice ?: return
+        val session = sessions[device]?.takeIf { it.authenticated } ?: return
+        runCatching { enqueue(device, session.seal(value)) }.onFailure { revokeSession(device) }
+    }
+
+    @Synchronized fun sendClipboardEvent(value: JSONObject, generation: Long) {
+        if (generation != clipboardGeneration) return
+        val device = clipboardDevice ?: return
+        val session = sessions[device]?.takeIf { it.authenticated } ?: return
+        runCatching { enqueue(device, session.seal(value)) }.onFailure { revokeSession(device) }
+    }
 
     @SuppressLint("MissingPermission")
     fun start(onStatus: (String) -> Unit) {
@@ -56,7 +77,7 @@ class BlePeripheral(
         val bleAdvertiser = bluetooth.bluetoothLeAdvertiser
             ?: return onStatus("BLE advertising is unavailable")
         advertiser = bleAdvertiser
-        val gatt = manager.openGattServer(context, callback)
+        val gatt = app.droidmirror.bluetooth.BleGattServerFactory.open(context, manager, callback)
             ?: return onStatus("Could not open BLE GATT server")
         server = gatt
 
@@ -107,6 +128,10 @@ class BlePeripheral(
         advertiseCallback?.let { advertiser?.stopAdvertising(it) }
         advertiseCallback = null
         advertiser = null
+        clipboardDevice = null
+        onClipboardSubscription(false, ++clipboardGeneration)
+        taskDevice = null
+        onTaskSubscription(false, ++taskGeneration)
         server?.close()
         server = null
         connected.clear()
@@ -153,6 +178,7 @@ class BlePeripheral(
             @Suppress("DEPRECATION")
             server?.notifyCharacteristicChanged(device, item, confirm) == true
         }
+        if (sessions[device]?.authenticated != true) android.util.Log.i("DroidMirrorNotifications", "Handshake indication: accepted=$accepted bytes=${value.size}")
         if (!accepted) {
             android.util.Log.w("DroidMirrorNotifications", "Bluetooth indication was rejected; resetting notification session")
             indicationInFlight.remove(device); revokeSession(device)
@@ -211,6 +237,8 @@ class BlePeripheral(
     private fun revokeSession(device: android.bluetooth.BluetoothDevice) {
         // GATT services share the physical link with mirroring input. Revoking a
         // notification session must not disconnect that other authenticated service.
+        if (clipboardDevice == device) { clipboardDevice = null; onClipboardSubscription(false, ++clipboardGeneration) }
+        if (taskDevice == device) { taskDevice = null; onTaskSubscription(false, ++taskGeneration) }
         subscribed.remove(device)
         indicationInFlight.remove(device)
         pendingIndication.remove(device)
@@ -244,6 +272,7 @@ class BlePeripheral(
                 }, 15000)
             }
             else {
+                revokeSession(device)
                 BleLinkMtu.disconnected(device.address)
                 connected -= device
                 subscribed.remove(device)
@@ -254,6 +283,7 @@ class BlePeripheral(
         }
 
         override fun onNotificationSent(device: android.bluetooth.BluetoothDevice, status: Int) {
+            if (sessions[device]?.authenticated != true) android.util.Log.i("DroidMirrorNotifications", "Handshake indication completed: status=$status")
             indicationInFlight.remove(device)
             if (status == BluetoothGatt.GATT_SUCCESS) drain(device) else revokeSession(device)
         }
@@ -291,6 +321,8 @@ class BlePeripheral(
                 0,
                 null
             )
+            if (sessions[device]?.authenticated != true) android.util.Log.i("DroidMirrorNotifications",
+                "Handshake write: valid=$valid bytes=${value.size}")
             if (valid) {
                 synchronized(this@BlePeripheral) {
                     runCatching {
@@ -298,10 +330,14 @@ class BlePeripheral(
                         val objectValue = JSONObject(String(data, Charsets.UTF_8))
                         val session = sessions[device] ?: BleSecureSession(requireNotNull(BleTrust.key(context))).also { sessions[device] = it }
                         when {
-                            objectValue.optString("type") == "hello" -> enqueue(device, session.hello(objectValue).toString().toByteArray())
+                            objectValue.optString("type") == "hello" -> {
+                                android.util.Log.i("DroidMirrorNotifications", "Sending authentication challenge")
+                                enqueue(device, session.hello(objectValue).toString().toByteArray())
+                            }
                             objectValue.optString("type") == "finish" -> {
                                 session.finish(objectValue)
-                                enqueue(device, session.seal(JSONObject().put("type", "ready")))
+                                android.util.Log.i("DroidMirrorNotifications", "BLE notification session authenticated")
+                                enqueue(device, session.seal(JSONObject().put("type", "ready").put("clipboard", 1).put("taskUrls", 1)))
                             }
                             else -> {
                                 val command = session.open(objectValue)
@@ -311,6 +347,28 @@ class BlePeripheral(
                                     "subscribe" -> {
                                         val snapshot = PhoneNotifications.live?.snapshot()
                                         snapshot?.forEach { enqueue(device, session.seal(it)) }
+                                    }
+                                    "clipboardSubscribe" -> {
+                                        if (command.optBoolean("enabled")) {
+                                            // One paired clipboard owner avoids cross-Mac forwarding.
+                                            clipboardDevice = device
+                                            onClipboardSubscription(true, ++clipboardGeneration)
+                                        } else if (clipboardDevice == device) {
+                                            clipboardDevice = null
+                                            onClipboardSubscription(false, ++clipboardGeneration)
+                                        }
+                                    }
+                                    "clipboardSet" -> {
+                                        if (clipboardDevice == device) onClipboardText(command.optString("text"))
+                                    }
+                                    "taskSubscribe" -> {
+                                        if (command.optBoolean("enabled")) {
+                                            taskDevice = device
+                                            onTaskSubscription(true, ++taskGeneration)
+                                        } else if (taskDevice == device) {
+                                            taskDevice = null
+                                            onTaskSubscription(false, ++taskGeneration)
+                                        }
                                     }
                                     "dismiss" -> {
                                         val success = PhoneNotifications.live?.dismiss(command) == true
@@ -366,6 +424,7 @@ class BlePeripheral(
             val valid = descriptor.uuid == CCC_UUID && !preparedWrite && offset == 0 &&
                 (value.contentEquals(BluetoothGattDescriptor.ENABLE_INDICATION_VALUE) ||
                  value.contentEquals(BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE))
+            android.util.Log.i("DroidMirrorNotifications", "Notification subscription: valid=$valid enabled=${value.contentEquals(BluetoothGattDescriptor.ENABLE_INDICATION_VALUE)}")
             if (valid) {
                 synchronized(this@BlePeripheral) {
                     // Core Bluetooth can resubscribe without disconnecting the

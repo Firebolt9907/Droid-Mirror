@@ -25,6 +25,8 @@ static uint64_t sc_source_event_time_ms(uint64_t timestamp) {
 }
 #ifdef __APPLE__
 #include "droidmirror_keymap.h"
+#include "droidmirror_line_delete.h"
+#include "emoji_text.h"
 #endif
 
 void
@@ -369,6 +371,24 @@ sc_input_manager_process_text_input(struct sc_input_manager *im,
         return;
     }
 
+#ifdef __APPLE__
+    if (im->controller && sc_text_contains_emoji(event->text)) {
+        struct sc_control_msg msg = { .type = SC_CONTROL_MSG_TYPE_SET_CLIPBOARD };
+        msg.set_clipboard.sequence = SC_SEQUENCE_INVALID;
+        msg.set_clipboard.paste = true;
+        msg.set_clipboard.text = strdup(event->text);
+        if (!msg.set_clipboard.text) {
+            LOG_OOM();
+            return;
+        }
+        if (!sc_controller_push_msg(im->controller, &msg)) {
+            free(msg.set_clipboard.text);
+            LOGW("Could not paste emoji");
+        }
+        return;
+    }
+#endif
+
     if (!im->kp->ops->process_text) {
         // The key processor does not support text input
         return;
@@ -707,6 +727,19 @@ sc_input_manager_process_key(struct sc_input_manager *im,
     }
 
     assert(!im->camera);
+
+#ifdef __APPLE__
+    // Command has already been remapped to Control. Expand each press (and
+    // repeat) into a complete selection/delete, and consume its key release.
+    if (sdl_keycode == SDLK_BACKSPACE && ctrl
+            && !(mod & (SDL_KMOD_ALT | SDL_KMOD_GUI | SDL_KMOD_SHIFT))) {
+        if (down) {
+            sc_droidmirror_delete_to_line_start(im->kp,
+                sc_mods_state_from_sdl(mod), SC_SEQUENCE_INVALID);
+        }
+        return;
+    }
+#endif
 
     uint64_t ack_to_wait = SC_SEQUENCE_INVALID;
     bool is_ctrl_v = ctrl && !shift && sdl_keycode == SDLK_V && down && !repeat;

@@ -53,7 +53,7 @@ final class ShizukuDisplayClient implements AutoCloseable {
         return new Shizuku.UserServiceArgs(new ComponentName(context.getPackageName(), DisplayGuardService.class.getName()))
             // Bump when the embedded capture code changes: Shizuku daemons can
             // survive APK replacement and otherwise keep running the old code.
-            .daemon(true).processNameSuffix("display_guard").debuggable(false).version(39);
+            .daemon(true).processNameSuffix("display_guard").debuggable(false).version(45);
     }
     private final ServiceConnection connection = new ServiceConnection() {
         @Override public void onServiceConnected(ComponentName name, IBinder binder) {
@@ -83,9 +83,9 @@ final class ShizukuDisplayClient implements AutoCloseable {
     byte[] phoneAppearance() throws Exception {
         return ready.get(10, TimeUnit.SECONDS).phoneAppearance();
     }
-    void startVideo(ParcelFileDescriptor output, ParcelFileDescriptor controls) throws Exception {
+    void startVideo(ParcelFileDescriptor output, ParcelFileDescriptor controls, String computerName) throws Exception {
         IDisplayGuard remote = ready.get(10, TimeUnit.SECONDS);
-        if (closed || !remote.startCapture(owner, observer, output, controls)) throw new IllegalStateException(remote.getLastError());
+        if (closed || !remote.startCapture(owner, observer, output, controls, computerName, panelOff)) throw new IllegalStateException(remote.getLastError());
     }
     void localUse() {
         if (closed) return;
@@ -124,7 +124,7 @@ final class ShizukuDisplayClient implements AutoCloseable {
                 return;
             }
             long progress = lastVideo;
-            if (progress == 0) return; // Never OFF before an actual media frame was sent.
+            if (progress == 0) return; // Startup OFF has its own bounded guard deadline.
             if (lastPeerHeartbeat == 0) return;
             long peerAge = SystemClock.elapsedRealtime() - lastPeerHeartbeat;
             boolean access = authorized();

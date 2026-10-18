@@ -31,6 +31,12 @@ void dm_ble_clock_proof(const DMBleInputKeys *keys, const uint8_t time[8], uint8
     uint8_t data[sizeof(label)-1+8]; memcpy(data,label,sizeof(label)-1); memcpy(data+sizeof(label)-1,time,8);
     CCHmac(kCCHmacAlgSHA256,keys->authentication,32,data,sizeof(data),proof);
 }
+void dm_ble_resume_proof(const DMBleInputKeys *keys, const uint8_t challenge[16], const uint8_t next[8], uint8_t proof[32]) {
+    const char label[]="DroidMirror BLE resume v1";
+    uint8_t data[sizeof(label)-1+24]; memcpy(data,label,sizeof(label)-1);
+    memcpy(data+sizeof(label)-1,challenge,16); memcpy(data+sizeof(label)-1+16,next,8);
+    CCHmac(kCCHmacAlgSHA256,keys->authentication,32,data,sizeof(data),proof);
+}
 bool dm_ble_input_seal(const DMBleInputKeys *keys, uint64_t sequence,
         const uint8_t *plain, size_t length, uint8_t *packet) {
     if (!sequence || sequence >= INT64_MAX || !length || length > 488) return false;

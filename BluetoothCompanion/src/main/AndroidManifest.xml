@@ -57,5 +57,10 @@
                 android:value="Shows and controls an active ADB screen mirroring session" />
         </service>
         <service android:name=".CaptureService" android:exported="false" android:foregroundServiceType="connectedDevice" />
+        <service android:name=".RemoteUseWarningService" android:exported="true"
+            android:permission="android.permission.DUMP" android:foregroundServiceType="specialUse">
+            <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Keeps the remote-use warning visible until the phone user interacts after screen mirroring ends" />
+        </service>
     </application>
 </manifest>

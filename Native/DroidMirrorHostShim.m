@@ -12,7 +12,6 @@ static BOOL DMQuitting;
 static BOOL DMFinishingQuit;
 static NSUInteger DMQuitGeneration;
 static id DMQuitObserver;
-static id DMRequestObserver;
 static NSTask *DMMirrorTask;
 static void (*DMStopBLE)(void);
 static BOOL DMMirrorStarted;
@@ -35,22 +34,6 @@ static void DMMenuUpdate(NSMenu *menu, SEL selector) {
     DMOriginalMenuUpdate(menu, selector);
     // Repair after SwiftUI's validation/reconstruction, before presentation.
     if (!DMQuitting && DMRefreshBLEMenu) DMRefreshBLEMenu();
-}
-
-// Call the retained host's exported Swift methods with the compiler's Swift
-// calling convention. No guessed object offsets or accessibility access.
-__attribute__((visibility("default")))
-void DroidMirrorRequestMirror(void) {
-    if (DMQuitting) return;
-    typedef void **(*SharedAddress)(void) __attribute__((swiftcall));
-    typedef void (*Refresh)(BOOL, void * __attribute__((swift_context))) __attribute__((swiftcall));
-    typedef void (*Start)(void * __attribute__((swift_context))) __attribute__((swiftcall));
-    SharedAddress shared = (SharedAddress)dlsym(RTLD_DEFAULT, "$s11DroidMirror0B5ModelC6sharedACvau");
-    Refresh refresh = (Refresh)dlsym(RTLD_DEFAULT, "$s11DroidMirror0B5ModelC14refreshDevices8silentlyySb_tF");
-    Start start = (Start)dlsym(RTLD_DEFAULT, "$s11DroidMirror0B5ModelC5startyyF");
-    if (!shared || !refresh || !start) return;
-    void **address = shared();
-    if (address && *address) { refresh(YES, *address); start(*address); }
 }
 
 static void DMFinishQuit(NSApplication *app) {
@@ -226,8 +209,5 @@ static void DMInstallBundledScrcpyResolver(void) {
                 if ([notification.object intValue] == NSProcessInfo.processInfo.processIdentifier)
                     [NSApp terminate:nil];
             }];
-        DMRequestObserver = [[NSDistributedNotificationCenter defaultCenter]
-            addObserverForName:@"app.droidmirror.requestMirror" object:nil queue:NSOperationQueue.mainQueue
-            usingBlock:^(NSNotification *notification) { DroidMirrorRequestMirror(); }];
     });
 }

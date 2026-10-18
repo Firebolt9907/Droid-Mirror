@@ -24,6 +24,7 @@ public final class CaptureService extends Service {
     private static final class SessionState {
         final String token = UUID.randomUUID().toString();
         volatile long startedElapsed;
+        String computerName;
         volatile boolean promotionDismissed;
         volatile ParcelFileDescriptor inputPipe;
         volatile ParcelFileDescriptor controlPipe;
@@ -36,11 +37,10 @@ public final class CaptureService extends Service {
         volatile boolean hasGuard;
         volatile long lastPeerSeen;
         final VideoWindow videoWindow = VideoWindow.bluetooth(5000);
-        final AtomicInteger endEvent = new AtomicInteger();
+        final SessionEndDelivery endEvent = new SessionEndDelivery();
         final AtomicBoolean streamStarted = new AtomicBoolean();
         final AtomicBoolean auditPosted = new AtomicBoolean();
         final AtomicBoolean heartbeatReply = new AtomicBoolean();
-        final CountDownLatch eventReady = new CountDownLatch(1);
     }
     private volatile SessionState current;
     private final BroadcastReceiver screenActions = new BroadcastReceiver() {
@@ -60,6 +60,7 @@ public final class CaptureService extends Service {
     private Thread server;
     private ScheduledExecutorService watchdog;
     private final Object notificationLock = new Object();
+    private int foregroundNotificationId = 1;
 
     public enum ReadyResult { START_REQUESTED, NOT_CONFIGURED, PERMISSION_REQUIRED, BACKGROUND_RESTRICTED, FAILED }
 
@@ -90,9 +91,13 @@ public final class CaptureService extends Service {
         }
     }
     @Override public IBinder onBind(Intent intent) { return null; }
+    private boolean streamingNotification() {
+        SessionState state = current;
+        return state != null && state.streamStarted.get() && !state.stopped && state.endEvent.get() == 0;
+    }
     private Notification notification(String text) {
         SessionState state = current;
-        if (state != null && state.streamStarted.get() && !state.stopped)
+        if (streamingNotification())
             return StreamNotifications.streaming(this, state.token, state.startedElapsed, state.promotionDismissed);
         PendingIntent open = PendingIntent.getActivity(this, 0, new Intent(this, CaptureActivity.class), PendingIntent.FLAG_IMMUTABLE);
         BridgeRuntime runtime = bridge;
@@ -108,7 +113,20 @@ public final class CaptureService extends Service {
     }
     private void refreshNotification() {
         synchronized (notificationLock) {
-            if (!shutdown) getSystemService(NotificationManager.class).notify(1, notification(captureStatus));
+            if (shutdown) return;
+            int next = streamingNotification() ? 4 : 1;
+            NotificationManager notifications = getSystemService(NotificationManager.class);
+            if (next == foregroundNotificationId) {
+                notifications.notify(next, notification(captureStatus));
+            } else {
+                // Readiness may be muted. Updating the streaming notification onto
+                // that blocked channel is ignored by Android, leaving the live card.
+                // Move foreground ownership, then explicitly cancel the old card.
+                if (Build.VERSION.SDK_INT >= 29) startForeground(next, notification(captureStatus), ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE);
+                else startForeground(next, notification(captureStatus));
+                notifications.cancel(foregroundNotificationId);
+                foregroundNotificationId = next;
+            }
         }
     }
     @Override public int onStartCommand(Intent intent, int flags, int id) {
@@ -128,8 +146,8 @@ public final class CaptureService extends Service {
         NotificationManager notifications = getSystemService(NotificationManager.class);
         notifications.createNotificationChannel(new NotificationChannel("capture", "DroidMirror background bridge", NotificationManager.IMPORTANCE_LOW));
         synchronized (notificationLock) {
-            if (Build.VERSION.SDK_INT >= 29) startForeground(1, notification(captureStatus), ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE);
-            else startForeground(1, notification(captureStatus));
+            if (Build.VERSION.SDK_INT >= 29) startForeground(foregroundNotificationId, notification(captureStatus), ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE);
+            else startForeground(foregroundNotificationId, notification(captureStatus));
         }
         if (bridge == null) {
             bridge = new BridgeRuntime(this, this::refreshNotification);
@@ -183,7 +201,8 @@ public final class CaptureService extends Service {
             state.promotionDismissed = true;
             return;
         }
-        if (!state.endEvent.compareAndSet(0, BluetoothWire.SESSION_ENDED)) return;
+        if (!state.endEvent.signal(BluetoothWire.SESSION_ENDED)) return;
+        refreshNotification();
         // Ordinary release restores the panel. Never route notification actions through localUse().
         ShizukuDisplayClient guard = state.guard;
         if (guard != null) guard.close();
@@ -232,6 +251,7 @@ public final class CaptureService extends Service {
             if (Build.VERSION.SDK_INT >= 31 && checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED)
                 throw new SecurityException("Nearby Devices permission was revoked");
             String peer = getSharedPreferences("ready", MODE_PRIVATE).getString("peer", "");
+            state.computerName = SessionAudit.computerName(this, peer);
             wire = new BluetoothWire(new FileOutputStream(socket.getFileDescriptor()), SystemClock::elapsedRealtime, BluetoothWire.videoChunkForMtu(listener.transmitMtu())); state.wire = wire;
             // Bound data queued ahead of the receiver; socket writes can otherwise
             // enqueue seconds of old video even though the radio is reliable.
@@ -241,9 +261,9 @@ public final class CaptureService extends Service {
             state.guard = new ShizukuDisplayClient(this, getSharedPreferences("ready", MODE_PRIVATE).getBoolean("panelOff", true), this::status,
                 (cause, awake) -> {
                     if (!state.stopped) {
-                        state.endEvent.compareAndSet(0, cause == RemoteSession.LOCAL_USE
+                        state.endEvent.signal(cause == RemoteSession.LOCAL_USE
                             ? (awake ? BluetoothWire.PHONE_ON : BluetoothWire.LOCAL_USE_FAILED) : BluetoothWire.SESSION_ENDED);
-                        state.eventReady.countDown();
+                        refreshNotification();
                     }
                 }, posted -> auditEnd(state, posted));
             ParcelFileDescriptor[] pipe = ParcelFileDescriptor.createPipe(); state.inputPipe = pipe[0];
@@ -271,7 +291,7 @@ public final class CaptureService extends Service {
                 // Optional appearance must never prevent capture on unsupported OEMs.
                 try { wire.appearance(state.guard.phoneAppearance()); }
                 catch (Exception unavailable) { android.util.Log.d("DroidMirrorAppearance", "Appearance unavailable", unavailable); }
-                state.guard.startVideo(output, remoteControls);
+                state.guard.startVideo(output, remoteControls, state.computerName);
             }
             ByteArrayOutputStream header = new ByteArrayOutputStream();
             VideoWire.deviceHeader(new DataOutputStream(header), Build.MODEL);
@@ -304,6 +324,7 @@ public final class CaptureService extends Service {
                         if (!state.streamStarted.get()) {
                             state.startedElapsed = SystemClock.elapsedRealtime();
                             if (state.streamStarted.compareAndSet(false, true)) {
+                                SessionAudit.clear(CaptureService.this);
                                 wire.event(BluetoothWire.STREAM_STARTED);
                                 status("Streaming");
                             }
@@ -312,18 +333,17 @@ public final class CaptureService extends Service {
                     }
                 }
             } catch (EOFException captureEnded) {
-                state.eventReady.await(300, TimeUnit.MILLISECONDS); // Allow the shell's oneway callback to reach this process.
+                // Capture EOF can precede display restoration and the shell's
+                // oneway callback. Keep BLE alive until the end reason is sent.
             }
-            if (!state.stopped && state.endEvent.get() != 0) {
-                wire.event(state.endEvent.get());
-                Thread.sleep(150); // Short best-effort radio drain; lock/recovery already happened.
-            }
+            deliverSessionEnd(state, wire);
         } catch (Exception error) {
             android.util.Log.w("DroidMirrorBluetooth", "Bluetooth capture failed", error);
             if (wire != null && !state.streamStarted.get()) {
                 try { wire.event(PhoneUsePolicy.startupFailure(error)); Thread.sleep(100); }
                 catch (IOException | InterruptedException ignored) {}
             }
+            if (wire != null && state.streamStarted.get()) deliverSessionEnd(state, wire);
             status("Bluetooth session unavailable: " + error.getMessage());
         } finally {
             stopSession(); status("Ready for your paired Mac");
@@ -358,7 +378,10 @@ public final class CaptureService extends Service {
                 }
             } catch (IOException error) {
                 if (!state.stopped) android.util.Log.w("DroidMirrorBluetooth", "Input channel ended", error);
-            } finally { synchronized (CaptureService.this) { if (current == state) stopSession(); } }
+            } finally {
+                deliverSessionEnd(state, wire);
+                synchronized (CaptureService.this) { if (current == state) stopSession(); }
+            }
         }, "BluetoothInput").start();
         new Thread(() -> {
             try {
@@ -370,7 +393,10 @@ public final class CaptureService extends Service {
                 }
             } catch (IOException | InterruptedException error) {
                 if (!state.stopped) android.util.Log.w("DroidMirrorBluetooth", "Heartbeat replies ended", error);
-            } finally { synchronized (CaptureService.this) { if (current == state) stopSession(); } }
+            } finally {
+                deliverSessionEnd(state, wire);
+                synchronized (CaptureService.this) { if (current == state) stopSession(); }
+            }
         }, "BluetoothHeartbeatReplies").start();
         new Thread(() -> {
             try (InputStream input = new FileInputStream(descriptor.getFileDescriptor())) {
@@ -380,8 +406,23 @@ public final class CaptureService extends Service {
                 }
             } catch (IOException error) {
                 if (!state.stopped) android.util.Log.w("DroidMirrorBluetooth", "Control replies ended", error);
-            } finally { synchronized (CaptureService.this) { if (current == state) stopSession(); } }
+            } finally {
+                deliverSessionEnd(state, wire);
+                synchronized (CaptureService.this) { if (current == state) stopSession(); }
+            }
         }, "BluetoothControlReplies").start();
+    }
+    private void deliverSessionEnd(SessionState state, BluetoothWire wire) {
+        if (state.stopped) return;
+        try {
+            if (state.endEvent.sendPending(wire::event, 3000)) {
+                Thread.sleep(150); // Let the Mac drain the authenticated event before socket EOF.
+            }
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+        } catch (IOException failure) {
+            android.util.Log.w("DroidMirrorBluetooth", "Could not deliver session end reason", failure);
+        }
     }
     private void sendVideo(BluetoothWire wire, byte[] bytes) throws IOException {
         wire.video(bytes);
@@ -391,6 +432,9 @@ public final class CaptureService extends Service {
         if (state != null) {
             boolean wasStreaming = state.streamStarted.get() && !state.stopped;
             state.stopped = true;
+            // Publish the end before transport/guard cleanup, which can block.
+            // Readiness owns this foreground notification even between sessions.
+            refreshNotification();
             state.videoWindow.close();
             if (state.wirelessUpgrade != null) state.wirelessUpgrade.close();
             if (state.peerTransport != null) state.peerTransport.close();
@@ -409,7 +453,7 @@ public final class CaptureService extends Service {
     }
     private void auditEnd(SessionState state, boolean shellPosted) {
         if (!state.streamStarted.get() || !state.auditPosted.compareAndSet(false, true)) return;
-        if (!shellPosted) SessionAudit.phone(this);
+        if (!shellPosted) SessionAudit.phone(this, state.computerName);
     }
     @Override public void onDestroy() {
         shutdown = true;

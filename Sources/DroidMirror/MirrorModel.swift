@@ -23,8 +23,15 @@ final class MirrorModel: ObservableObject {
     @Published var status = "Connect an Android device to begin"
     @Published var errorMessage: String? {
         didSet {
-            guard let errorMessage else { return }
-            PhoneWindowController.shared.present(title: "Connection failed", message: errorMessage, model: self)
+            guard let errorMessage else {
+                ConnectionLogWindow.shared.close()
+                return
+            }
+            ConnectionLogWindow.shared.close()
+            log = errorMessage
+            let failure = ConnectionFailure.recognize(errorMessage)
+            PhoneWindowController.shared.present(title: failure.title, message: failure.message, model: self)
+            if failure.showsLog { ConnectionLogWindow.shared.present(errorMessage) }
         }
     }
     @Published var sessionNoticeTitle = "Ready to connect"
@@ -45,16 +52,32 @@ final class MirrorModel: ObservableObject {
     @Published var pairingCode = ""
     @Published var connectAddress = ""
     @Published var bluetoothPairingCode = ""
+    @Published private(set) var isPairingBluetooth = false
+    @Published private(set) var savedPairingDeviceID: String?
+    @Published private(set) var verifiedBluetoothDeviceID: String?
+    @Published var pairingError: String?
+    @Published var isOnboarding = false
+
+    func deferAutomaticStartAfterSetup() {
+        autoStartAttemptedFor = selectedID
+    }
 
     func pairBluetooth() {
-        guard let device = selectedDevice, device.isBluetooth, !isStarting, !isMirroring else { return }
+        guard let device = selectedDevice, device.isBluetooth, !isStarting, !isMirroring, !isPairingBluetooth else { return }
         let code = bluetoothPairingCode
+        isPairingBluetooth = true
+        pairingError = nil
         Task {
+            defer { isPairingBluetooth = false }
             do {
                 try await ClassicBluetoothTransport.pair(address: device.id, code: code)
+                savedPairingDeviceID = device.id
                 bluetoothPairingCode = ""
-                status = "Mirroring and notifications paired. Allow notification forwarding in Android’s DroidMirror app."
-            } catch { errorMessage = error.localizedDescription }
+                status = "Pairing code saved. Lock your phone and try mirroring to verify the connection."
+            } catch {
+                pairingError = error.localizedDescription
+                if !isOnboarding { errorMessage = error.localizedDescription }
+            }
         }
     }
 
@@ -123,7 +146,7 @@ final class MirrorModel: ObservableObject {
     }
 
     func refreshDevices(silently: Bool = false) {
-        guard !isStarting else { return }
+        guard !isStarting, !isPairingBluetooth else { return }
         if preferences.transport == .wifiAware {
             devices = []
             selectedID = nil
@@ -154,7 +177,7 @@ final class MirrorModel: ObservableObject {
                 }
                 if parsed.first(where: \ .isOnline) == nil {
                     autoStartAttemptedFor = nil
-                } else if preferences.autoStart, mirrorProcess == nil,
+                } else if preferences.autoStart, !isOnboarding, !isPairingBluetooth, mirrorProcess == nil,
                           let online = parsed.first(where: \ .isOnline),
                           autoStartAttemptedFor != online.id {
                     selectedID = online.id
@@ -201,8 +224,8 @@ final class MirrorModel: ObservableObject {
                     }
                 }
                 restoringBluetoothSelection = false
-                status = paired.isEmpty ? "Pair your phone in Bluetooth settings" : "Ready to mirror via Bluetooth"
-                if preferences.autoStart, let device = selectedDevice,
+                status = paired.isEmpty ? "Pair your phone in Bluetooth settings" : "Bluetooth phone found · use Set Up Phone to verify pairing"
+                if preferences.autoStart, !isOnboarding, !isPairingBluetooth, let device = selectedDevice,
                    device.id == preferences.bluetoothDeviceID,
                    autoStartAttemptedFor != device.id {
                     autoStartAttemptedFor = device.id
@@ -216,12 +239,14 @@ final class MirrorModel: ObservableObject {
     }
 
     func start() {
-        guard mirrorProcess == nil, !isStarting else { return }
+        guard mirrorProcess == nil, !isStarting, !isPairingBluetooth else { return }
         if preferences.transport == .wifiAware {
             errorMessage = "Wi-Fi Aware direct mirroring is not available yet. Check support in connection settings."
             return
         }
         errorMessage = nil
+        verifiedBluetoothDeviceID = nil
+        log = ""
         connectionCancelled = false
         stoppedForInactivity = false
         isStarting = true
@@ -270,7 +295,8 @@ final class MirrorModel: ObservableObject {
                 self.status = "Peer video disconnected · resuming Bluetooth…"
             case .bluetoothActive:
                 self.status = "Bluetooth · up to 15 fps · 128 kbps maximum"
-            case .streamStarted: break
+            case .streamStarted:
+                self.verifiedBluetoothDeviceID = device.id
             case .phoneOn, .phoneLocalUse:
                 if !self.phoneTakenOver {
                     self.phoneTakenOver = true
@@ -280,7 +306,7 @@ final class MirrorModel: ObservableObject {
                 self.errorMessage = PhoneUsePolicy.errorMessage
                 self.status = "Phone in use"
             case .captureFailed:
-                self.errorMessage = "HEVC capture unavailable. Authorize Shizuku, enable Mac connections, and check that this phone supports HEVC encoding."
+                self.errorMessage = "EVENT CAPTURE_FAILED\n" + self.classicBluetooth.diagnostic
             case .sessionEnded:
                 self.sessionEndedOnPhone = true
                 self.status = "Remote session ended"
@@ -397,7 +423,7 @@ final class MirrorModel: ObservableObject {
                     self.presentStoppedMirror()
                 }
                 if process.terminationStatus != 0 && !localUse && self.errorMessage == nil && !self.connectionCancelled {
-                    self.errorMessage = output.split(separator: "\n").suffix(4).joined(separator: "\n").nilIfEmpty ?? "scrcpy exited with code \(process.terminationStatus)"
+                    self.errorMessage = output.nilIfEmpty ?? "scrcpy exited with code \(process.terminationStatus)"
                 }
 
             }

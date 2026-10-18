@@ -51,7 +51,12 @@ struct NotificationDeliveryPolicy {
         // Older companions omit these fields; keep their ordinary notifications
         // working while newer companions filter persistent items at the source.
         let package = event["package"] as? String ?? ""
-        return package != "app.droidmirror.bluetooth" &&
+        let category = event["category"] as? String ?? ""
+        let channel = (event["channel"] as? String ?? "").lowercased()
+        let system = package == "android" || package == "com.android.systemui"
+        let routine = category == "service" || category == "transport" || event["progress"] as? Bool == true ||
+            (system && (category == "sys" || channel == "physical_keyboard" || channel == "virtual_keyboard"))
+        return !routine && package != "app.droidmirror.bluetooth" &&
             event["ongoing"] as? Bool != true && event["persistent"] as? Bool != true
     }
 }

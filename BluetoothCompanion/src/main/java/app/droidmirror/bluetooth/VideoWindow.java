@@ -11,6 +11,10 @@ public final class VideoWindow {
     private long progressNanos = System.nanoTime();
     // Mac detects silent ADB loss after four seconds, then signals over BLE.
     private static final long WIRELESS_RECOVERY_MILLIS = 12000;
+    // Every unacknowledged byte must be replayed over Classic after Wi-Fi loss.
+    // With 40 ms ACKs this still admits the default 12 Mbps Wi-Fi profile while
+    // avoiding megabytes of stale video ahead of the restored Bluetooth encoder.
+    public static final int WIRELESS_WINDOW_BYTES = 128 * 1024;
     private boolean closed;
     private boolean wireless;
     private BluetoothVideoBudget bluetoothBudget;
@@ -58,7 +62,7 @@ public final class VideoWindow {
     public synchronized void useWirelessCapacity() {
         wireless = true;
         progressNanos = System.nanoTime();
-        capacity = 2 * 1024 * 1024;
+        capacity = WIRELESS_WINDOW_BYTES;
         notifyAll();
     }
     public synchronized long acknowledgedBytes() { return acknowledged; }

@@ -2,6 +2,35 @@
 
 A native SwiftUI control center for scrcpy that makes Android mirroring on macOS feel closer to Apple's iPhone Mirroring.
 
+## Guided first-time setup
+
+Open DroidMirror on both devices. New Mac setups open the guide automatically;
+you can reopen it from **DroidMirror → Set Up Phone…** or **Settings → Set up a phone…**.
+The phone launcher walks through the same four steps and remembers where you stopped:
+
+1. **Connect Bluetooth:** allow Nearby devices on Android, pair the phone and Mac
+   in system Bluetooth settings, then select the matching device in each app.
+2. **Prepare your phone:** follow the linked Shizuku setup guide, start Shizuku,
+   and authorize DroidMirror. Shizuku may need starting again after a phone reboot.
+3. **Pair DroidMirror:** tap **Show pairing code** on the phone, save that private
+   code in the Mac guide, and **Enable background bridge** on the phone. This code
+   is separate from the short system Bluetooth pairing code. Saving it to the Mac
+   Keychain does not yet verify the connection.
+4. **Try your first mirror:** lock the phone and press **Mirror my phone** on the Mac.
+   The Mac marks onboarding complete only when mirroring starts successfully.
+
+Notification forwarding and wireless ADB are optional. Android’s **Optional features
+and recovery** includes those settings, display recovery and stopping the bridge.
+Mac automatic connection attempts pause while its setup window is open. Switching
+the selected Mac on Android requires stopping the existing bridge first, so setup
+does not replace trust underneath an active mirror. Existing Mac setups retain
+their configuration and can open the guide manually.
+
+Validation: `bash Native/test-onboarding.sh` checks first-run migration, interrupted
+setup, reopening, draft-code cleanup and renders all four Mac steps. The Android
+activity is covered by the companion’s normal Java/Kotlin compilation; permission
+prompts, Shizuku setup and pairing still require a physical-device walkthrough.
+
 Direct Bluetooth Classic L2CAP is the default source transport: after one-time Android
 setup (Shizuku authorization, a selected paired Mac and **Enable background bridge**),
 press **Mirror on the Mac** to start privileged scrcpy capture. There is no
@@ -50,6 +79,10 @@ grant notification access to DroidMirror; see
 [setup and migration](Native/ANDROID-BRIDGE.md).
 Install the matching Mac and Android builds together. A phone power/screen-lock action ends the session, locks/restores the
 phone through Shizuku, and shows a separate **phone was used** popup on Mac.
+Session shutdown and control-channel disconnects cancel outstanding injected keyboard
+presses, including letters and power/volume keys, so a lost release cannot keep Android's
+screenshot or power-menu button combinations blocked after mirroring. This cleanup is
+shared by Bluetooth and ADB. Regression coverage: `bash Native/test-injected-keys.sh`.
 End-of-session audit notifications stay on the phone; the Mac does not post remote-use history banners. Phone notifications arrive live over encrypted Bluetooth, including during mirroring. Persistent/ongoing service notifications, group summaries, secret notifications, and the companion’s own notifications are excluded. Shell watchdog
 recovery covers app death and stale stream leases; physical-device behavior still
 needs validation. Mouse, keyboard, scrolling and navigation use the Bluetooth control channel through Shizuku. Audio remains available through ADB mode.
@@ -66,6 +99,19 @@ Bluetooth still carries startup and input. Network loss recovers over Bluetooth
 in the same window, then retries LAN followed by wireless ADB.
 See [transport order and validation](Native/PEER-TRANSPORT.md).
 The background bridge does not enable Wireless debugging automatically.
+
+Optional **Mirror clipboard text over Bluetooth** in **Settings → Clipboard** or the visible DroidMirror menu adds two-way text sync, including between mirror sessions. It uses
+the existing encrypted pairing and requires Shizuku; enable it explicitly after
+updating both apps. See [clipboard behavior, limits and validation](Native/CLIPBOARD-SYNC.md).
+
+When the current phone task exposes a supported web URL, a **phone icon** appears
+in the Mac menu bar. Click it to continue in your default browser. Google Docs
+document intents and direct HTTP/HTTPS view intents are supported; other tasks
+stay silent. The icon clears on unsupported tasks or a stale Bluetooth connection.
+This uses the paired encrypted background bridge and Shizuku, including between
+mirror sessions, and requires matching updated Mac and Android builds. It does
+not transfer browser login or document cursor/scroll state. See
+[task continuation behavior and validation](Native/APP-TASKS.md).
 
 With Android gesture navigation enabled, clicking the bottom pill once goes Home,
 twice opens Recents, and three times sends a long Home press for Circle to Search
@@ -97,12 +143,49 @@ single, double and triple clicks, and Control-to-Home uses the same shorter dela
 - Automatic USB and wireless device discovery
 - Guided Android 11+ wireless pairing
 - One-click borderless mirror with 60 fps, zero video buffering, audio forwarding, and clipboard support
+- Insert Mac emojis into the focused phone text field with **Control–Command–Space** or **Edit → Emoji & Symbols** (ADB and Bluetooth). Emoji insertion updates the phone clipboard and preserves the Mac clipboard.
+- **Command–Backspace** deletes from the cursor to the start of the current line, using Shift–Home followed by Backspace.
 - Optional device-screen-off, stay-awake, always-on-top, HEVC, and UHID keyboard modes
 - Native Back, Home, Recents, volume, and power controls (Esc for Back, Control for Home, double-tap Control for App Switcher)
 - Optional touch-style scrolling converts wheel/trackpad movement into real Android swipes, preserving overscroll and pull-to-refresh behavior
 - Drag files onto the scrcpy window to send them to Android's Downloads folder
 
 ## Build and run
+
+To build release versions of both apps and install them on this Mac and a connected,
+authorized Android phone, run:
+
+```sh
+./build-release.sh
+```
+
+This uses JDK 21 by default (or `JAVA_HOME`), the Android SDK from `ANDROID_HOME`
+(default `~/Library/Android/sdk`), and the dependencies listed below. The Mac build
+uses Swift release optimization, optimized native helpers and the existing Mac
+signing identity. Android uses `assembleRelease`, then APK alignment and signing
+with the existing `~/.android/debug.keystore` to allow updates of the development
+app without losing pairing or app data. This is a release build signed for local
+device use. No new signing key is created.
+
+Both builds finish before installation starts. Android updates with `adb install -r`;
+the Mac installs at `/Applications/DroidMirror.app` using the checked, atomic
+installer described below. Installations run sequentially; if either fails, the
+script stops and reports the error. It never uninstalls the phone app to bypass a
+signature mismatch. Reopen the apps after updating to use the new binaries.
+
+```sh
+./build-release.sh --device SERIAL        # Choose among connected phones
+./build-release.sh --build-only           # Produce artifacts without installing
+./build-release.sh --mac-destination "$HOME/Applications/DroidMirror.app"
+```
+
+The destination's parent directory must already exist and be writable. Artifacts
+are `outputs/DroidMirror.app` and `outputs/DroidMirror-Bluetooth-release.apk`, with
+an APK SHA-256 file alongside. For a custom Android signing key, set
+`DROIDMIRROR_ANDROID_KEYSTORE`, `DROIDMIRROR_ANDROID_KEY_ALIAS`,
+`DROIDMIRROR_ANDROID_STORE_PASSWORD`, and `DROIDMIRROR_ANDROID_KEY_PASSWORD`.
+Passwords are passed to the signing tool through environment variables. To select
+another Mac certificate, set `DROIDMIRROR_SIGNING_IDENTITY`.
 
 Requirements: Rust 1.91+ (Cargo), macOS 14+, Xcode command-line tools, and the client dependencies (`brew install meson ninja pkg-config sdl3 ffmpeg libusb`). Building the customized Android server also requires JDK 17+ and Android SDK platform/build-tools 36 (`ANDROID_HOME`, default `~/Library/Android/sdk`). Bluetooth setup also requires the Android companion, Android NDK 28+ and the Rust
 `aarch64-linux-android` target; see the linked guide.

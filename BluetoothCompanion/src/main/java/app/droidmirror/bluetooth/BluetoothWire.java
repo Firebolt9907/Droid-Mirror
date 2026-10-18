@@ -146,6 +146,7 @@ public final class BluetoothWire {
         received=Math.max(received,upgradeCutoff);
         long first=replay.isEmpty() ? videoBytes : replay.peek().offset;
         if (received<first || received>videoBytes) throw new IOException("Invalid Bluetooth resume offset");
+        System.err.println("DroidMirror Bluetooth video replay bytes=" + (videoBytes-received));
         out=classic;
         if (videoWindow!=null) videoWindow.useBluetoothCapacity();
         for (Chunk chunk : replay) {

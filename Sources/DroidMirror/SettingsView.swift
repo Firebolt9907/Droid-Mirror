@@ -1,23 +1,42 @@
 import SwiftUI
 
+@MainActor
+private final class ClipboardConnectionStatus: NSObject, ObservableObject {
+    @Published var text = "Waiting for the background receiver…"
+    override init() {
+        super.init()
+        DistributedNotificationCenter.default().addObserver(self, selector: #selector(receive(_:)),
+            name: Notification.Name("app.droidmirror.receiverStatus"), object: nil)
+    }
+    @objc private func receive(_ event: Notification) {
+        if let status = event.userInfo?["clipboard"] as? String { text = status }
+    }
+    deinit { DistributedNotificationCenter.default().removeObserver(self) }
+}
+
 struct SettingsView: View {
     @EnvironmentObject private var model: MirrorModel
+    @AppStorage("DroidMirror.clipboard.enabled") private var clipboardMirroring = false
+    @StateObject private var clipboardStatus = ClipboardConnectionStatus()
 
     var body: some View {
         Form {
             Section("Connection") {
+                Button("Set up a phone…") { OnboardingWindowController.shared.show(model: model) }
+                Text("Follow the guided setup for Bluetooth, phone permissions and your first mirror.")
+                    .font(.caption).foregroundStyle(.secondary)
                 Picker("Transport", selection: $model.preferences.transport) {
                     ForEach(MirrorTransport.allCases) { Text($0.label).tag($0) }
-                }.disabled(model.isMirroring || model.isStarting)
+                }.disabled(model.isMirroring || model.isStarting || model.isPairingBluetooth)
                 if model.preferences.transport == .bluetoothClassic {
                     Picker("Paired phone", selection: $model.selectedID) {
                         Text("Select a phone").tag(String?.none)
                         ForEach(model.devices) { Text($0.displayName).tag(Optional($0.id)) }
-                    }.disabled(model.isMirroring || model.isStarting)
+                    }.disabled(model.isMirroring || model.isStarting || model.isPairingBluetooth)
                     HStack {
                         SecureField("BLE pairing code from Android", text: $model.bluetoothPairingCode)
                         Button("Pair Mac") { model.pairBluetooth() }
-                            .disabled(model.selectedDevice == nil || model.bluetoothPairingCode.isEmpty)
+                            .disabled(model.selectedDevice == nil || model.bluetoothPairingCode.isEmpty || model.isPairingBluetooth)
                     }.disabled(model.isMirroring || model.isStarting)
                     Text("Once per phone: open Pair Mac (mirroring and notifications) in DroidMirror on Android and paste its code here. This pairs mirroring, notification forwarding and ADB discovery together. Allow notification forwarding on Android once.")
                         .font(.caption).foregroundStyle(.secondary)
@@ -37,6 +56,19 @@ struct SettingsView: View {
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 Text("Bluetooth starts at 320p, up to 15 fps, and a 128 kbps HEVC ceiling, then upgrades video over Iroh to the picture settings below. Video tries direct LAN or Tailscale IPs first, then an already-paired wireless ADB connection, then stays on Bluetooth. Relays and public Iroh discovery are disabled. Wireless ADB fallback requires Wireless debugging and one-time ADB pairing. Mouse, keyboard and navigation stay on Bluetooth. Audio requires a direct ADB session. Authorize Shizuku and enable the background bridge once in the Android companion.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Section("Clipboard") {
+                Toggle("Mirror clipboard text over Bluetooth", isOn: $clipboardMirroring)
+                    .onChange(of: clipboardMirroring) { _, _ in
+                        UserDefaults.standard.synchronize()
+                        DistributedNotificationCenter.default().postNotificationName(
+                            Notification.Name("app.droidmirror.clipboardConfiguration"), object: nil,
+                            userInfo: nil, deliverImmediately: true)
+                    }
+                Text(clipboardMirroring ? clipboardStatus.text : "Clipboard mirroring off")
+                    .font(.caption).foregroundStyle(.secondary)
+                Text("Sync newly copied text in both directions, including between mirror sessions. Requires Bluetooth pairing, the Android background bridge and Shizuku. Text is limited to 4 KiB; marked sensitive clips are skipped.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section("iPhone-like behavior") {

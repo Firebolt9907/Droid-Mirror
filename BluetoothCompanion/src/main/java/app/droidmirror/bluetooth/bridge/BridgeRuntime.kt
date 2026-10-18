@@ -44,6 +44,8 @@ class BridgeRuntime(private val context: Context, private val onChanged: Runnabl
         }
     }
     private lateinit var finder: AdbEndpointFinder
+    private var clipboard: app.droidmirror.bluetooth.ClipboardSyncClient? = null
+    private var taskUrls: app.droidmirror.bluetooth.TaskUrlClient? = null
     private lateinit var ble: BlePeripheral
     private val handler = Handler(Looper.getMainLooper())
     private val refreshRunning = AtomicBoolean(false)
@@ -76,7 +78,16 @@ class BridgeRuntime(private val context: Context, private val onChanged: Runnabl
             onCommand = { command ->
                 if (command == "CONNECTED") update("Mac connected", details)
                 else if (finder.endpoint != null) update("Ready for Mac", details)
-            }
+            },
+            onClipboardSubscription = { enabled, generation -> handler.post {
+                clipboard?.close(); clipboard = null
+                if (enabled && !destroyed) clipboard = app.droidmirror.bluetooth.ClipboardSyncClient(context) { ble.sendClipboardEvent(it, generation) }
+            } },
+            onClipboardText = { text -> handler.post { if (!destroyed) clipboard?.setText(text) } },
+            onTaskSubscription = { enabled, generation -> handler.post {
+                taskUrls?.close(); taskUrls = null
+                if (enabled && !destroyed) taskUrls = app.droidmirror.bluetooth.TaskUrlClient(context) { ble.sendTaskEvent(it, generation) }
+            } }
         )
         runCatching { ble.start { update(it, details) } }
             .onFailure { update("Bluetooth unavailable", "Check Nearby Devices permission and try again.") }
@@ -211,6 +222,8 @@ class BridgeRuntime(private val context: Context, private val onChanged: Runnabl
 
     override fun close() {
         destroyed = true
+        clipboard?.close(); clipboard = null
+        taskUrls?.close(); taskUrls = null
         Shizuku.removeBinderReceivedListener(shizukuReceived)
         Shizuku.removeRequestPermissionResultListener(shizukuPermission)
         runCatching { context.unregisterReceiver(bluetoothChanged) }

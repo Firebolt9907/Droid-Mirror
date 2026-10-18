@@ -45,8 +45,10 @@ final class PhoneWindowController: NSWindowController, NSWindowDelegate {
 
     func rendererClosed() {
         guard let model else { return }
-        model.sessionNoticeTitle = "Connection ended"
-        model.sessionNoticeMessage = "Connect again when you’re ready."
+        if model.errorMessage == nil {
+            model.sessionNoticeTitle = "Connection ended"
+            model.sessionNoticeMessage = "Connect again when you’re ready."
+        }
         showFallback(model: model)
     }
 
@@ -103,6 +105,7 @@ private struct PhoneConnectionView: View {
                 Button(model.sessionNoticeTitle == "Stopped due to inactivity" ? "Reconnect" : "Connect Again") { model.start() }.buttonStyle(.borderedProminent)
                     .disabled(model.isMirroring || model.selectedDevice?.isOnline != true)
                 Button("Settings…") { SettingsWindowController.shared.show(model: model) }.buttonStyle(.link)
+                Button("Set up a phone…") { OnboardingWindowController.shared.show(model: model) }.buttonStyle(.link)
             }
             Spacer()
         }
@@ -112,7 +115,7 @@ private struct PhoneConnectionView: View {
                 if let wallpaper = appearance.wallpaper {
                     Image(nsImage: wallpaper).resizable().scaledToFill()
                         .frame(width: geometry.size.width, height: geometry.size.height)
-                        .blur(radius: 24).overlay(Color.black.opacity(0.58))
+                        .blur(radius: 4).overlay(Color.black.opacity(0.58))
                 } else { Color(white: 0.06) }
             }
         }

@@ -11,7 +11,7 @@ struct NotificationPresentationPolicy {
         let messages = event["messages"] as? [[String: Any]] ?? []
         let fields: [String: Any] = ["app": event["app"] ?? "", "title": event["title"] ?? "",
             "body": messages.isEmpty ? event["body"] ?? "" : "", "actions": event["actions"] ?? [],
-            "conversation": event["conversation"] ?? "", "messages": messages.filter { $0["outgoing"] as? Bool != true }]
+            "subtitle": event["subtitle"] ?? "", "conversation": event["conversation"] ?? "", "messages": messages.filter { $0["outgoing"] as? Bool != true }]
         let data = (try? JSONSerialization.data(withJSONObject: fields, options: [.sortedKeys])) ?? Data()
         let fingerprint = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
         let duplicate = fingerprints[key] == fingerprint
@@ -25,21 +25,44 @@ struct NotificationPresentationPolicy {
 // macOS expands a multiline notification body; retain the conversation rather
 // than flattening Android's MessagingStyle to EXTRA_TEXT (the final message).
 enum NotificationConversationContent {
+    private static func text(_ event: [String: Any], _ key: String) -> String {
+        (event[key] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    static func title(_ event: [String: Any]) -> String {
+        let app = String((text(event, "app").isEmpty ? "Android" : text(event, "app")).prefix(120))
+        let heading = event["fromMe"] as? Bool == true
+            ? ((event["messages"] as? [[String: Any]])?.last?["sender"] as? String ?? "You")
+            : text(event, "title")
+        return heading.isEmpty || heading == app ? app : String(heading.prefix(240)) + " (" + app + ")"
+    }
+
     static func subtitle(_ event: [String: Any]) -> String {
-        let conversation = event["conversation"] as? String ?? ""
-        return String((conversation.isEmpty ? event["title"] as? String ?? "" : conversation).prefix(240))
+        if event["fromMe"] as? Bool == true { return text(event, "title") }
+        let supplied = text(event, "subtitle")
+        if !supplied.isEmpty { return String(supplied.prefix(240)) }
+        let messages = event["messages"] as? [[String: Any]] ?? []
+        if messages.count == 1, let sender = messages[0]["sender"] as? String,
+           !sender.isEmpty, sender != text(event, "title") {
+            return String(sender.prefix(240))
+        }
+        let conversation = text(event, "conversation")
+        return conversation == text(event, "title") ? "" : String(conversation.prefix(240))
     }
 
     static func body(_ event: [String: Any]) -> String {
         guard let messages = event["messages"] as? [[String: Any]], !messages.isEmpty else {
             return String((event["body"] as? String ?? "").prefix(1200))
         }
+        // A single message already has its sender in the heading/subtitle.
+        // Histories still label each line so multiple participants stay clear.
+        let plainMessage = messages.count == 1 && (!text(event, "title").isEmpty || !text(event, "subtitle").isEmpty)
         var lines = messages.suffix(12).compactMap { message -> String? in
             guard let text = message["text"] as? String, !text.isEmpty else { return nil }
             let name = message["outgoing"] as? Bool == true && message["localReply"] as? Bool != true ? "You" : message["sender"] as? String ?? ""
             let sender = String(name.prefix(120))
                 .replacingOccurrences(of: "\n", with: " ").replacingOccurrences(of: "\r", with: " ")
-            return sender.isEmpty ? text : sender + ": " + text
+            return sender.isEmpty || plainMessage ? text : sender + ": " + text
         }
         guard !lines.isEmpty else { return String((event["body"] as? String ?? "").prefix(1200)) }
         var omitted = (event["messagesOmitted"] as? Int ?? 0) + max(0, messages.count - 12)

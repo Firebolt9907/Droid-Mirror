@@ -13,6 +13,7 @@
 static id DMKeyboardMonitor;
 static id DMWindowCloseObserver;
 static BOOL DMCommandQuitActive;
+static BOOL DMEmojiShortcutActive;
 static BOOL DMHostQuitRequested;
 static NSUInteger DMPINSyntheticEventsRemaining;
 static void (*DMOriginalSendEvent)(NSApplication *, SEL, NSEvent *);
@@ -178,6 +179,15 @@ static BOOL DMEventIsQ(NSEvent *event) {
 static DMMirrorQuitTarget *DMMirrorQuit;
 
 static void DMSendEvent(NSApplication *app, SEL selector, NSEvent *event) {
+    if ((event.type == NSEventTypeKeyDown || event.type == NSEventTypeKeyUp) &&
+            event.keyCode == 49 &&
+            (DMEmojiShortcutActive ||
+             (event.modifierFlags & (NSEventModifierFlagControl | NSEventModifierFlagCommand)) ==
+                (NSEventModifierFlagControl | NSEventModifierFlagCommand))) {
+        DMEmojiShortcutActive = event.type == NSEventTypeKeyDown;
+        if (DMEmojiShortcutActive && !event.isARepeat) [app orderFrontCharacterPalette:nil];
+        return;
+    }
     if ((event.type == NSEventTypeKeyDown || event.type == NSEventTypeKeyUp) &&
         DMEventIsQ(event) && (event.modifierFlags & NSEventModifierFlagCommand)) {
         if (event.type == NSEventTypeKeyDown && !event.isARepeat)

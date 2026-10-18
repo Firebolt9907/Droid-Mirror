@@ -20,6 +20,8 @@ final class BleInputServer implements AutoCloseable {
     static final UUID PROOF = UUID.fromString("c356a44e-6f2b-4da9-85e5-397991b8a612");
     static final UUID OUTPUT = UUID.fromString("c356a44e-6f2b-4da9-85e5-397991b8a613");
     static final UUID CLOCK = UUID.fromString("c356a44e-6f2b-4da9-85e5-397991b8a615");
+    static final UUID RESUME = UUID.fromString("c356a44e-6f2b-4da9-85e5-397991b8a616");
+    static final UUID REPLAY = UUID.fromString("c356a44e-6f2b-4da9-85e5-397991b8a617");
     static final UUID KEY = UUID.fromString("c356a44e-6f2b-4da9-85e5-397991b8a614");
     private final String selectedPeer;
     private final byte[] sessionNonce;
@@ -27,6 +29,7 @@ final class BleInputServer implements AutoCloseable {
     private volatile int mtu = 23;
     private final Object returnLock = new Object();
     private byte[] pendingReturn;
+    private byte[] lastReadReturn = new byte[0];
     private CountDownLatch returnRead;
     private BluetoothGattCharacteristic output;
     private final ArrayBlockingQueue<ReturnRecord> replies = new ArrayBlockingQueue<>(32);
@@ -83,7 +86,7 @@ final class BleInputServer implements AutoCloseable {
         ReturnRecord record = new ReturnRecord(bytes);
         try {
             if (!replies.offer(record, 1, TimeUnit.SECONDS)) throw new IOException("BLE return queue full");
-            record.sent.get(5, TimeUnit.SECONDS);
+            record.sent.get(8, TimeUnit.SECONDS);
         } catch (InterruptedException error) { Thread.currentThread().interrupt(); throw new IOException(error); }
         catch (ExecutionException | TimeoutException error) { fail(); throw new IOException("BLE return transmission stalled", error); }
     }
@@ -102,7 +105,8 @@ final class BleInputServer implements AutoCloseable {
                     byte[] packet = returning.seal(Arrays.copyOfRange(record.bytes, offset, Math.min(record.bytes.length, offset + payload)));
                     CountDownLatch sent = new CountDownLatch(1);
                     synchronized (returnLock) { pendingReturn = packet; returnRead = sent; }
-                    if (!sent.await(2, TimeUnit.SECONDS) || closed.get()) throw new IOException("BLE return read stalled");
+                    // Allow the Mac's bounded service rediscovery and same-session proof.
+                    if (!sent.await(6, TimeUnit.SECONDS) || closed.get()) throw new IOException("BLE return read stalled");
 
                 }
                 record.sent.complete(null); record = null;
@@ -168,9 +172,20 @@ final class BleInputServer implements AutoCloseable {
                 }
                 if (OUTPUT.equals(characteristic.getUuid()) && offset == 0 && device.equals(authenticatedPeer)) {
                     synchronized (returnLock) {
-                        server.sendResponse(device, request, BluetoothGatt.GATT_SUCCESS, 0,
-                            pendingReturn == null ? new byte[0] : pendingReturn);
+                        lastReadReturn=pendingReturn == null ? new byte[0] : pendingReturn;
+                        server.sendResponse(device, request, BluetoothGatt.GATT_SUCCESS, 0, lastReadReturn);
                         if (pendingReturn != null) { pendingReturn = null; returnRead.countDown(); returnRead = null; }
+                    }
+                    return;
+                }
+                if (RESUME.equals(characteristic.getUuid()) && offset == 0 && device.equals(authenticatedPeer)) {
+                    byte[] challenge=challenges.get(device.getAddress());
+                    if (challenge==null) { server.sendResponse(device,request,BluetoothGatt.GATT_FAILURE,0,null); return; }
+                    server.sendResponse(device,request,BluetoothGatt.GATT_SUCCESS,0,crypto.resumeState(challenge)); return;
+                }
+                if (REPLAY.equals(characteristic.getUuid()) && offset == 0 && device.equals(authenticatedPeer)) {
+                    synchronized (returnLock) {
+                        server.sendResponse(device,request,BluetoothGatt.GATT_SUCCESS,0,lastReadReturn);
                     }
                     return;
                 }
@@ -245,6 +260,10 @@ final class BleInputServer implements AutoCloseable {
             BluetoothGattCharacteristic.PROPERTY_READ, BluetoothGattCharacteristic.PERMISSION_READ));
         service.addCharacteristic(new BluetoothGattCharacteristic(CLOCK,
             BluetoothGattCharacteristic.PROPERTY_READ, BluetoothGattCharacteristic.PERMISSION_READ));
+        service.addCharacteristic(new BluetoothGattCharacteristic(RESUME,
+            BluetoothGattCharacteristic.PROPERTY_READ, BluetoothGattCharacteristic.PERMISSION_READ));
+        service.addCharacteristic(new BluetoothGattCharacteristic(REPLAY,
+            BluetoothGattCharacteristic.PROPERTY_READ, BluetoothGattCharacteristic.PERMISSION_READ));
         output = new BluetoothGattCharacteristic(OUTPUT, BluetoothGattCharacteristic.PROPERTY_READ, BluetoothGattCharacteristic.PERMISSION_READ);
         service.addCharacteristic(output);
         new Thread(this::sendReplies, "BleControlReplies").start();
@@ -253,7 +272,7 @@ final class BleInputServer implements AutoCloseable {
     @Override public void close() {
         if (!closed.compareAndSet(false, true)) return;
         first.countDown(); records.clear(); challenges.clear(); Arrays.fill(sessionNonce, (byte)0);
-        synchronized (returnLock) { if (returnRead != null) returnRead.countDown(); pendingReturn = null; }
+        synchronized (returnLock) { if (returnRead != null) returnRead.countDown(); pendingReturn = null; lastReadReturn = new byte[0]; }
         ReturnRecord pending;
         while ((pending = replies.poll()) != null) pending.sent.completeExceptionally(new IOException("BLE closed"));
         try { if (advertiser != null) advertiser.stopAdvertising(advertising); } catch (RuntimeException ignored) {}

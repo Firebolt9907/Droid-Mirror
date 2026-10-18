@@ -11,7 +11,8 @@ import java.util.concurrent.TimeUnit;
 
 /** Shell daemon: display recovery, local-use detection and crash-surviving session audit. */
 public final class DisplayGuardService extends IDisplayGuard.Stub {
-    private final DisplayLease lease = new DisplayLease(new PhysicalDisplayPower(), SystemClock::elapsedRealtime);
+    private final com.genymobile.scrcpy.control.IdleUhidKeyboard keyboard = new com.genymobile.scrcpy.control.IdleUhidKeyboard();
+    private final DisplayLease lease = new DisplayLease(new PhysicalDisplayPower(), SystemClock::elapsedRealtime, keyboard::destroy);
     private final LogicalDisplayPower logical = new LogicalDisplayPower();
     private final RemoteSession session = new RemoteSession(SystemClock::elapsedRealtime, this::ended);
     private final ScheduledExecutorService watchdog = Executors.newSingleThreadScheduledExecutor();
@@ -24,6 +25,7 @@ public final class DisplayGuardService extends IDisplayGuard.Stub {
     private long captureStarted;
     private String captureError = "";
     private long lastActivity;
+    private String computerName;
 
     public DisplayGuardService() {
         watchdog.scheduleWithFixedDelay(() -> {
@@ -31,6 +33,11 @@ public final class DisplayGuardService extends IDisplayGuard.Stub {
                 boolean interactive = true;
                 try { interactive = logical.interactive(); } catch (Exception ignored) {}
                 session.tick(interactive); lease.tick();
+                if (lease.owns(owner) && SystemClock.elapsedRealtime() - captureStarted < 1000) {
+                    try { lease.keepDark(owner); } catch (Exception failure) {
+                        session.finish(owner, RemoteSession.RECOVERY);
+                    }
+                }
                 if (session.owner() != null && interactive && SystemClock.elapsedRealtime() - lastActivity >= 1000) {
                     lastActivity = SystemClock.elapsedRealtime();
                     try { logical.keepAwake(); } catch (Exception ignored) {}
@@ -41,16 +48,17 @@ public final class DisplayGuardService extends IDisplayGuard.Stub {
             }
         }, 100, 100, TimeUnit.MILLISECONDS);
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-            synchronized (this) { session.finish(owner, RemoteSession.GUARD_STOP); closeCapture(); lease.recover(); }
+            synchronized (this) { session.finish(owner, RemoteSession.GUARD_STOP); keyboard.destroy(); closeCapture(); lease.recover(); }
         }, "DisplayRecovery"));
     }
     public DisplayGuardService(Context context) { this(); }
     @Override public byte[] phoneAppearance() { return PhoneAppearance.read(); }
-    @Override public synchronized boolean startCapture(IBinder token, IStreamEvents events, ParcelFileDescriptor output, ParcelFileDescriptor controls) {
+    @Override public synchronized boolean startCapture(IBinder token, IStreamEvents events, ParcelFileDescriptor output, ParcelFileDescriptor controls, String computerName, boolean panelOff) {
         if (token == null || owner != null || capture != null || output == null || controls == null || lease.isRestoreNeeded()) {
             if (output != null) try { output.close(); } catch (java.io.IOException ignored) {}
             return false;
         }
+        this.computerName = computerName;
         // Check before owning a session: rejecting local use must not lock, wake,
         // capture, or turn off the phone the person is holding.
         captureError = "";
@@ -72,10 +80,12 @@ public final class DisplayGuardService extends IDisplayGuard.Stub {
             token.linkToDeath(recipient, 0);
             owner = token; death = recipient; observer = events;
             if (!token.isBinderAlive()) throw new RemoteException("App died before capture");
-            // Wake through Android's normal power policy for unattended capture.
-            // Do not dismiss keyguard or alter the user's configured lock policy.
-            if (!logical.interactive()) logical.wake();
             if (!session.begin(token, 10000)) throw new IllegalStateException("Remote session already active");
+            // Own recovery before waking: encoder/transport startup must not leave the
+            // physical lock screen visible while waiting for the first Mac frame.
+            if (panelOff && !lease.acquire(token, 10000)) throw new IllegalStateException(lease.getLastError());
+            if (!logical.interactive()) logical.wake();
+            if (panelOff) lease.keepDark(token);
             Object generation = new Object(); captureGeneration = generation;
             captureStarted = SystemClock.elapsedRealtime(); captureError = "";
             capture = new PrivilegedCapture(output, controls, () -> watchdog.execute(() -> {
@@ -85,6 +95,7 @@ public final class DisplayGuardService extends IDisplayGuard.Stub {
                     }
                 }
             }));
+            keyboard.create();
             return true;
         } catch (Exception | LinkageError | AssertionError failure) {
             android.util.Log.e("DroidMirrorCapture", "Privileged capture startup failed", failure);
@@ -96,10 +107,10 @@ public final class DisplayGuardService extends IDisplayGuard.Stub {
     @Override public synchronized boolean acquire(IBinder token, IStreamEvents events, boolean panelOff) {
         if (owner != token || token == null || !session.owns(token)) return false;
         observer = events;
-        if (panelOff) lease.acquire(token);
+        if (panelOff && !lease.heartbeat(token)) return false;
         return session.heartbeat(token);
     }
-    private void closeCapture() { if (capture != null) capture.close(); }
+    private void closeCapture() { keyboard.destroy(); if (capture != null) { capture.close(); capture = null; } }
     @Override public synchronized boolean upgradeVideo(IBinder token, int maxSize, int fps, int bitRate) {
         if (token == null || owner != token || !session.owns(token) || capture == null) return false;
         try {
@@ -134,6 +145,7 @@ public final class DisplayGuardService extends IDisplayGuard.Stub {
     }
     @Override public synchronized boolean restoreDisplay() {
         session.finish(owner, RemoteSession.RECOVERY);
+        keyboard.destroy();
         closeCapture(); boolean restored = lease.recover(); unlinkOwner(); return restored;
     }
     @Override public boolean grantSecureSettings() {
@@ -158,9 +170,16 @@ public final class DisplayGuardService extends IDisplayGuard.Stub {
         try {
             logical.lock(); // End every remote session behind the keyguard before restoring the panel.
             if (cause == RemoteSession.LOCAL_USE) {
+                SystemClock.sleep(500); // Let the lock screen settle before turning the panel on.
                 if (!lease.recover()) throw new IllegalStateException("Panel restoration pending");
                 logical.wake(); awake = true;
-            } else lease.release(token);
+            } else {
+                // Stop capture before sleeping so input/codec shutdown cannot wake
+                // Android after its transition back to the configured AOD policy.
+                closeCapture();
+                logical.sleep();
+                lease.release(token);
+            }
         } catch (Exception failure) {
             android.util.Log.e("DroidMirrorLease", "Lock or display recovery failed", failure);
             lease.recover();
@@ -170,7 +189,7 @@ public final class DisplayGuardService extends IDisplayGuard.Stub {
             try { events.onEnded(cause, awake); } catch (RemoteException ignored) {}
         }
         closeCapture(); unlinkEndedOwner();
-        boolean posted = SessionAudit.shell();
+        boolean posted = SessionAudit.shell(computerName);
         audits.put(token, posted);
         if (audits.size() > 16) audits.remove(audits.keySet().iterator().next());
         return posted;
@@ -185,6 +204,7 @@ public final class DisplayGuardService extends IDisplayGuard.Stub {
     @Override public void destroy() {
         synchronized (this) {
             session.finish(owner, RemoteSession.GUARD_STOP);
+            keyboard.destroy();
             if (!lease.recover()) return;
             closeCapture(); unlinkOwner(); watchdog.shutdown();
         }

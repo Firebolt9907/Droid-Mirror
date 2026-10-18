@@ -10,6 +10,7 @@ void dm_ble_input_keys(const uint8_t session[32], DMBleInputKeys *keys);
 void dm_ble_output_keys(const uint8_t session[32], DMBleInputKeys *keys);
 void dm_ble_input_proof(const DMBleInputKeys *keys, const uint8_t challenge[16], uint8_t proof[32]);
 void dm_ble_clock_proof(const DMBleInputKeys *keys, const uint8_t time[8], uint8_t proof[32]);
+void dm_ble_resume_proof(const DMBleInputKeys *keys, const uint8_t challenge[16], const uint8_t next[8], uint8_t proof[32]);
 bool dm_ble_input_seal(const DMBleInputKeys *keys, uint64_t sequence,
     const uint8_t *plain, size_t length, uint8_t *packet);
 bool dm_ble_input_open(const DMBleInputKeys *keys, uint64_t sequence,

@@ -181,3 +181,47 @@ confirmed Streaming, successful return records, version 0.20, and the primary
 user's WRITE_SECURE_SETTINGS grant. This active user session was left running.
 The final sustained/repeated automated run did not complete, so this confirms
 the current GUI session, not a measured long-term reconnect success rate.
+
+
+## First-attempt service discovery race
+
+The October 17 22:38 system log shows the input helper attaching to the existing
+notification link at 22:38:20.225, cancelling it at 22:38:20.270, and Android's
+Service Changed notification arriving at 22:38:20.272. The helper then attempted
+another BLE identity until the startup deadline. The next attempt reused the
+original link and reached the renderer. This is consistent with discovery racing
+Android's asynchronous per-session GATT service registration.
+
+The Mac now retries empty, failed or incomplete input-service discovery every
+250 ms (on the existing 200 ms watchdog) for up to four seconds per connected
+candidate. Service Changed during startup clears obsolete attribute references
+and schedules rediscovery within that same budget. Only the input service is
+inspected; callbacks for invalidated characteristics are ignored. A malformed
+nonce or invalid pairing proof still rejects the candidate immediately. An
+active session whose input service changes ends rather than reusing obsolete
+session keys. The overall 15-second startup deadline is unchanged.
+
+ClassicBluetoothStartupTests covers delayed registration, missing attributes,
+Service Changed, obsolete service/value callbacks, eventual nonce discovery,
+invalid proof rejection, retry expiry and cancellation. These tests use fake
+peripherals; repeated physical cold starts remain necessary to measure reliability.
+The change is Mac-only and works with the existing Android companion.
+
+
+### Follow-up: pending BLE identity never reaches discovery
+
+The next reported failure at 22:53:13 selected an advertising identity that
+CoreBluetooth repeatedly failed to make ready. A different identity became a
+ready system link at 22:53:13.814. The input helper remained pending until
+22:53:28; the retry attached to that ready link at 22:53:31 and streamed. The
+service-discovery retry cannot help before didConnectPeripheral is delivered.
+
+A three-second per-candidate connection budget now cancels a silently retrying
+connection and retrieves system-connected links again within the same attempt.
+The stalled identity has a two-second cooldown, rather than a pairing rejection,
+and can be retried if no other candidate works. Late callbacks for the retired
+peripheral are ignored. A connected candidate clears this budget before service
+discovery/authentication. Tests cover fallback to a newly available system link,
+a sole slow candidate becoming eligible again, stale callbacks and cancellation.
+The total startup timeout remains unchanged. Physical cold-start reliability is
+not established by these fake-peripheral regression tests.

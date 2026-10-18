@@ -103,12 +103,15 @@ struct ContentView: View {
             }
             Divider()
             Button("Refresh", systemImage: "arrow.clockwise") { model.refreshDevices() }
+            Button("Set up a phone…", systemImage: "iphone.gen3.radiowaves.left.and.right") {
+                OnboardingWindowController.shared.show(model: model)
+            }
             Button("Connect wirelessly…", systemImage: "wifi") { showWireless = true }
         } label: {
             VStack(alignment: .leading, spacing: 1) {
                 Text(model.selectedDevice?.displayName ?? "No device")
                     .font(.system(size: 13, weight: .semibold)).lineLimit(1)
-                Text(model.isMirroring ? "Mirroring" : (model.selectedDevice?.isOnline == true ? "Ready" : "Not connected"))
+                Text(model.isMirroring ? "Mirroring" : (model.selectedDevice?.isOnline == true ? (model.selectedDevice?.isBluetooth == true ? "Bluetooth paired" : "Ready") : "Not connected"))
                     .font(.caption2).foregroundStyle(.secondary)
             }
             .frame(width: 118, alignment: .leading)

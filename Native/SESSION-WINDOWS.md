@@ -76,4 +76,4 @@ ADB display queries update the same cache for that ADB identifier. Unknown
 geometry stays square until reported, with no device-model preset. Unsupported
 wallpaper reads retain the last successful preview; a new phone without a
 readable static wallpaper uses the neutral background. A companion update is
-required for Shizuku appearance records (APK 0.38, display guard version 39).
+required for Shizuku appearance records (APK 0.38, display guard version 40).

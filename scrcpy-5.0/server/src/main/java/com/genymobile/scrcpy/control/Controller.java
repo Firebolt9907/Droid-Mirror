@@ -88,6 +88,8 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
     private Thread keepActiveThread;
 
     private UhidManager uhidManager;
+    private IdleUhidKeyboard idleUhidKeyboard;
+    private final InjectedKeys injectedKeys = new InjectedKeys();
 
     private final boolean camera;
     private final int displayId;
@@ -304,6 +306,11 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
             startKeepActiveThread();
         }
 
+        if (cleanUp != null) {
+            idleUhidKeyboard = new IdleUhidKeyboard();
+            idleUhidKeyboard.create();
+        }
+
         thread = new Thread(() -> {
             try {
                 control();
@@ -311,7 +318,12 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
                 Ln.e("Controller error", e);
             } finally {
                 stopWheelScroll();
+                releaseInjectedKeys();
                 Ln.d("Controller stopped");
+                if (idleUhidKeyboard != null) {
+                    idleUhidKeyboard.destroy();
+                    idleUhidKeyboard = null;
+                }
                 if (uhidManager != null) {
                     uhidManager.closeAll();
                 }
@@ -328,6 +340,10 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
     public void stop() {
         synchronized (this) {
             stopWheelScroll();
+            if (idleUhidKeyboard != null) {
+                idleUhidKeyboard.destroy();
+                idleUhidKeyboard = null;
+            }
             pillStopped = true;
             cancelPillClicks();
             if (pillHoldTask != null) {
@@ -335,6 +351,7 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
             }
             pillDown = null;
         }
+        releaseInjectedKeys();
         if (keepActiveThread != null) {
             keepActiveThread.interrupt();
         }
@@ -446,6 +463,10 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
                     }
                     return true;
                 case ControlMessage.TYPE_UHID_CREATE:
+                    if (idleUhidKeyboard != null) {
+                        idleUhidKeyboard.destroy();
+                        idleUhidKeyboard = null;
+                    }
                     getUhidManager().open(msg.getId(), msg.getVendorId(), msg.getProductId(), msg.getText(), msg.getData());
                     return true;
                 case ControlMessage.TYPE_UHID_INPUT:
@@ -510,7 +531,8 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
         int actionDisplayId = getActionDisplayId();
         if (actionDisplayId != Device.DISPLAY_ID_NONE) {
             for (KeyEvent event : events) {
-                if (!Device.injectEvent(event, actionDisplayId, Device.INJECT_MODE_ASYNC)) {
+                if (!injectKeyEvent(event.getAction(), event.getKeyCode(), event.getRepeatCount(), event.getMetaState(),
+                        Device.INJECT_MODE_ASYNC)) {
                     return false;
                 }
             }
@@ -709,22 +731,25 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
             return;
         }
         if (count < 3) {
-            Device.pressReleaseKeycode(count == 1 ? KeyEvent.KEYCODE_HOME : KeyEvent.KEYCODE_APP_SWITCH, 0, Device.INJECT_MODE_ASYNC);
+            pressReleaseKeycode(count == 1 ? KeyEvent.KEYCODE_HOME : KeyEvent.KEYCODE_APP_SWITCH, Device.INJECT_MODE_ASYNC);
             return;
         }
         // Match Android input keyevent --longpress, including repeat and FLAG_LONG_PRESS.
-        long downTime = SystemClock.uptimeMillis();
-        Device.injectEvent(new KeyEvent(downTime, downTime, KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_HOME, 0, 0,
-                KeyCharacterMap.VIRTUAL_KEYBOARD, 0, 0, InputDevice.SOURCE_KEYBOARD), 0, Device.INJECT_MODE_ASYNC);
+        injectKeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_HOME, 0, 0, Device.INJECT_MODE_ASYNC);
         EXECUTOR.schedule(() -> {
-            long now = SystemClock.uptimeMillis();
-            if (!pillStopped && navigationMode() == 2) {
-                Device.injectEvent(new KeyEvent(downTime, now, KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_HOME, 1, 0,
-                        KeyCharacterMap.VIRTUAL_KEYBOARD, 0, KeyEvent.FLAG_LONG_PRESS, InputDevice.SOURCE_KEYBOARD),
-                        0, Device.INJECT_MODE_ASYNC);
+            synchronized (Controller.this) {
+                if (pillStopped) {
+                    return; // stop() has already canceled outstanding presses.
+                }
+                try {
+                    if (navigationMode() == 2) {
+                        injectKeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_HOME, 1, 0,
+                                Device.INJECT_MODE_ASYNC, KeyEvent.FLAG_LONG_PRESS);
+                    }
+                } finally {
+                    injectKeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_HOME, 0, 0, Device.INJECT_MODE_ASYNC);
+                }
             }
-            Device.injectEvent(new KeyEvent(downTime, now, KeyEvent.ACTION_UP, KeyEvent.KEYCODE_HOME, 0, 0,
-                    KeyCharacterMap.VIRTUAL_KEYBOARD, 0, 0, InputDevice.SOURCE_KEYBOARD), 0, Device.INJECT_MODE_ASYNC);
         }, android.view.ViewConfiguration.getLongPressTimeout(), TimeUnit.MILLISECONDS);
     }
 
@@ -1002,11 +1027,29 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
     }
 
     private boolean injectKeyEvent(int action, int keyCode, int repeat, int metaState, int injectMode) {
+        return injectKeyEvent(action, keyCode, repeat, metaState, injectMode, 0);
+    }
+
+    private boolean injectKeyEvent(int action, int keyCode, int repeat, int metaState, int injectMode, int eventFlags) {
         int actionDisplayId = getActionDisplayId();
         if (actionDisplayId == Device.DISPLAY_ID_NONE) {
             return false;
         }
-        return Device.injectKeyEvent(action, keyCode, repeat, metaState, actionDisplayId, injectMode);
+        return injectedKeys.inject(action, keyCode, repeat, metaState, actionDisplayId, SystemClock.uptimeMillis(),
+                (a, key, count, meta, display, down, now, flags) ->
+                        injectTrackedKey(a, key, count, meta, display, down, now, flags | eventFlags, injectMode));
+    }
+
+    private boolean injectTrackedKey(int action, int keyCode, int repeat, int metaState, int targetDisplayId,
+            long downTime, long eventTime, int flags, int injectMode) {
+        KeyEvent event = new KeyEvent(downTime, eventTime, action, keyCode, repeat, metaState,
+                KeyCharacterMap.VIRTUAL_KEYBOARD, 0, flags, InputDevice.SOURCE_KEYBOARD);
+        return Device.injectEvent(event, targetDisplayId, injectMode);
+    }
+
+    private void releaseInjectedKeys() {
+        injectedKeys.releaseAll(SystemClock.uptimeMillis(), (action, key, repeat, meta, display, down, now, flags) ->
+                injectTrackedKey(action, key, repeat, meta, display, down, now, flags, Device.INJECT_MODE_ASYNC));
     }
 
     private boolean pressReleaseKeycode(int keyCode, int injectMode) {
@@ -1014,7 +1057,14 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
         if (actionDisplayId == Device.DISPLAY_ID_NONE) {
             return false;
         }
-        return Device.pressReleaseKeycode(keyCode, actionDisplayId, injectMode);
+        boolean down;
+        boolean up;
+        try {
+            down = injectKeyEvent(KeyEvent.ACTION_DOWN, keyCode, 0, 0, injectMode);
+        } finally {
+            up = injectKeyEvent(KeyEvent.ACTION_UP, keyCode, 0, 0, injectMode);
+        }
+        return down && up;
     }
 
     private int getActionDisplayId() {

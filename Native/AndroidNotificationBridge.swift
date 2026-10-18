@@ -125,12 +125,11 @@ final class AndroidNotificationBridge {
             guard let id = event["id"] as? String, let card = event["card"] as? String, let version = event["version"] as? String,
                   let identity = BLETrust.identity else { return }
             let content = UNMutableNotificationContent()
-            let ownMessage = event["fromMe"] as? Bool == true ? (event["messages"] as? [[String: Any]])?.last : nil
-            content.title = ownMessage?["sender"] as? String ?? String((event["app"] as? String ?? "Android").prefix(120))
+            content.title = NotificationConversationContent.title(event)
             content.subtitle = NotificationConversationContent.subtitle(event)
-            content.body = ownMessage?["text"] as? String ?? NotificationConversationContent.body(event)
+            content.body = NotificationConversationContent.body(event)
             if event["isMessage"] as? Bool == true { content.threadIdentifier = identity + ":" + id }
-            let storedKeys = ["id", "version", "app", "title", "body", "conversation", "isMessage", "actions"]
+            let storedKeys = ["id", "version", "app", "title", "subtitle", "body", "conversation", "isMessage", "actions"]
             let storedEvent = event.filter { storedKeys.contains($0.key) }
             content.userInfo = ["phone": identity, "id": id, "version": version, "card": card, "cardEvent": storedEvent,
                 "cardReplies": event["cardReplies"] ?? []]

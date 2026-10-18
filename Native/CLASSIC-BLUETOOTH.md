@@ -336,19 +336,25 @@ an end-to-end latency guarantee: transport and decoder time are additional. The 
 ## Panel-off and recovery
 
 The Shizuku daemon registers the app's Binder death callback before capture or OFF.
-Panel-off is applied only after a media frame is transmitted. It uses scrcpy-style
-physical SurfaceControl/DisplayControl APIs, not brightness changes, sleep-key
-commands, or persistent system settings. It tests NORMAL before OFF and records
-recovery intent before partial multi-display OFF operations.
+When panel-off is enabled, the guard acquires a bounded startup lease and blanks
+before logically waking Android, then reapplies OFF immediately after wake and
+through the first second of capture startup. Recovery APIs are resolved without
+a visible NORMAL preflight. Android wake/driver scheduling may still produce a
+brief transition; the panel no longer waits for encoder startup or a media frame.
+SurfaceControl/DisplayControl restores OFF, DOZE, or DOZE_SUSPEND according to
+Android's display state instead of forcing NORMAL. No brightness or persistent
+system setting is changed.
 
 App death, session stop, Bluetooth/encoder failure, manual recovery, and normal
-guard shutdown lock the phone before restoring the panel. Lock failures are
+guard shutdown lock the phone, stop capture, and confirm logical sleep before
+restoring the panel to Android's requested OFF/doze/AOD policy. Local phone takeover
+still deliberately wakes the lock screen. Lock failures are
 logged; panel restoration still runs so recovery cannot leave it inaccessible.
 A shell watchdog checks every 100 ms. Startup
 has a ten-second grace period; after video starts, the app renews a two-second
 session/display lease every 250 ms after the first media frame while Mac control
 heartbeats remain current. Bluetooth congestion has a five-second peer grace
-period; loss of Shizuku authorization ends the lease immediately. Failed NORMAL
+period; loss of Shizuku authorization ends the lease immediately. Failed restoration
 operations are retried; new OFF requests are refused while recovery is pending.
 Retired/folded display tokens are refreshed after restoration failures.
 
@@ -372,9 +378,9 @@ cannot distinguish raw hardware power presses from all other screen-off causes.
 Long-press menus or presses which produce no screen transition are not detected.
 
 Local takeover invalidates the remote session, requests `IWindowManager.lockNow`,
-checks keyguard lock for up to 500 ms, restores physical panel power, and wakes the
-phone through `IPowerManager`. It never wakes deliberately without confirming the
-lock. A confirmed transition sends PHONE_ON to Mac. Mac shows a separate popup
+checks keyguard lock for up to 500 ms, waits 500 ms before restoring physical panel
+power, and wakes the phone through `IPowerManager`. It never wakes deliberately
+without confirming the lock. A confirmed transition sends PHONE_ON to Mac. Mac shows a separate popup
 headed **phone was used**, with **phone turned on** and the lock/restore result.
 If confirmation fails, PHONE_LOCAL_USE reports that failure without claiming
 success. Streaming ends in both cases; readiness remains available for the next
@@ -382,16 +388,33 @@ Mac-initiated session. Events are best effort if the radio link fails at that mo
 
 At session end, Mac posts **Phone was used remotely** through UserNotifications,
 deduplicating stream-close/quit/disconnect callbacks. The phone's shell watchdog
-posts the same audit title through Android's shell notification command, surviving
-capture-app crash/force-stop while Shizuku remains alive. The app falls back to its
-own notification if that command fails and the app is still running. The end policy
+starts a separate shell touch monitor and the companion's remote-use warning service,
+including after capture-app death while Shizuku remains alive. The warning requests
+Android Live Update promotion and stays visible until five seconds after the first
+physical touch, including lock-screen touches. Later touches do not reset the timer.
+The helper reads contact starts through `getevent -lt`, without injecting or consuming
+input, and exits when the warning is dismissed, replaced, or its app process dies.
+Starting a new stream clears an older warning. On devices without raw touch access,
+unlocking or tapping the warning starts the timer instead. The warning service
+also checks for an already awake, unlocked phone, so an unlock that precedes service
+startup is not lost. Screen-on behind the keyguard alone never starts this timer.
+The streaming card returns to background readiness before transport cleanup, so
+blocked socket/guard cleanup cannot leave the ended stream promoted.
+Readiness and streaming use separate notification IDs. Foreground ownership moves
+back to readiness before the streaming card is cancelled, including when the user
+has muted the readiness channel (Android can ignore updates to a blocked channel).
+If launching the companion
+fails, the companion attempts to start the same warning service directly; no separate
+shell notification is posted. Android controls
+Live Update eligibility and ordering; promotion is a request, not a visibility guarantee.
+The end policy
 commits an end once per session; stop, EOF, local takeover and Binder death cannot
-post repeated shell audits for that session. The notification replaces the prior
+post repeated audits for that session. The notification replaces the prior
 phone audit entry rather than storing a screen recording or a full activity history.
 
 Notifications are subject to OS permissions, Focus/channel settings and process
-availability. Older Android versions lacking the shell notification command cannot
-post a crash notification from a dead app. No implementation can guarantee a Mac
+availability. A crash warning requires the companion warning service to start.
+No implementation can guarantee a Mac
 popup over a disconnected radio or deliver immediately when all relevant processes
 are killed. Reconnection/status notifications are not evidence of an unlock.
 

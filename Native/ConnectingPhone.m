@@ -24,11 +24,13 @@ static void DMHostCommand(NSString *name) {
 @interface DMPhoneActions : NSObject
 - (void)connect:(id)sender;
 - (void)settings:(id)sender;
+- (void)setup:(id)sender;
 - (void)cancel:(id)sender;
 @end
 @implementation DMPhoneActions
 - (void)connect:(id)sender { DMHostCommand(@"app.droidmirror.requestMirror"); }
 - (void)settings:(id)sender { DMHostCommand(@"app.droidmirror.showSettings"); }
+- (void)setup:(id)sender { DMHostCommand(@"app.droidmirror.showOnboarding"); }
 - (void)cancel:(id)sender { DMHostCommand(@"app.droidmirror.cancelMirror"); }
 @end
 static DMPhoneActions *DMActions;
@@ -49,6 +51,15 @@ void DroidMirrorInstallSessionMenu(void) {
     settings.keyEquivalent = @",";
     settings.keyEquivalentModifierMask = NSEventModifierFlagCommand;
     settings.enabled = YES;
+    NSMenuItem *setup = [menu itemWithTag:0x444d5355];
+    if (!setup) {
+        setup = [[NSMenuItem alloc] initWithTitle:@"Set Up Phone…" action:@selector(setup:) keyEquivalent:@""];
+        setup.tag = 0x444d5355;
+        [menu insertItem:setup atIndex:MIN(2, menu.numberOfItems)];
+    }
+    setup.target = DMActions;
+    setup.action = @selector(setup:);
+    setup.enabled = YES;
 }
 
 
@@ -63,8 +74,9 @@ void DroidMirrorInstallSessionMenu(void) {
     NSData *data = [encoded isKindOfClass:NSString.class] ? [[NSData alloc] initWithBase64EncodedString:encoded options:0] : nil;
     CIImage *image = data ? [CIImage imageWithData:data] : nil;
     if (image && image.extent.size.width > 0 && image.extent.size.height > 0) {
+        // The cached thumbnail is enlarged to fill the phone, magnifying this blur too.
         CIImage *blur = [[image imageByClampingToExtent] imageByApplyingFilter:@"CIGaussianBlur"
-            withInputParameters:@{kCIInputRadiusKey:@18}];
+            withInputParameters:@{kCIInputRadiusKey:@0.75}];
         CGImageRef output = [[CIContext contextWithOptions:nil] createCGImage:blur fromRect:image.extent];
         if (output) { self.wallpaper = [[NSImage alloc] initWithCGImage:output size:NSZeroSize]; CGImageRelease(output); }
     }

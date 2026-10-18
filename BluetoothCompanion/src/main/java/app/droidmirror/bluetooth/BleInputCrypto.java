@@ -31,6 +31,13 @@ final class BleInputCrypto {
         byte[] label="DroidMirror BLE clock v1".getBytes(StandardCharsets.US_ASCII);
         return hmac(authentication, ByteBuffer.allocate(label.length+8).put(label).put(time).array());
     }
+    synchronized byte[] resumeState(byte[] challenge) throws GeneralSecurityException {
+        if (challenge.length != 16) throw new GeneralSecurityException("Invalid BLE challenge");
+        byte[] label="DroidMirror BLE resume v1".getBytes(StandardCharsets.US_ASCII);
+        byte[] count=ByteBuffer.allocate(8).putLong(next).array();
+        byte[] proof=hmac(authentication,ByteBuffer.allocate(label.length+24).put(label).put(challenge).put(count).array());
+        return ByteBuffer.allocate(40).put(count).put(proof).array();
+    }
     synchronized byte[] open(byte[] packet) throws GeneralSecurityException {
         if (packet.length <= 24 || packet.length > 512) throw new GeneralSecurityException("Invalid BLE input record size");
         byte[] body = Arrays.copyOf(packet, packet.length - 16);

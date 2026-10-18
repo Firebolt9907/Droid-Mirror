@@ -33,6 +33,25 @@ struct NotificationPresentationTests {
         precondition(NotificationConversationContent.body(conversation).hasPrefix("… 3 earlier messages\n"))
         precondition(NotificationConversationContent.body(["body": "Legacy message"]) == "Legacy message")
         precondition(NotificationConversationContent.body(["messages": [["sender": "A"]], "body": "Fallback"]) == "Fallback")
+        let card: [String: Any] = ["app": "OpenBubbles", "title": "Brian Liu, Peter Yu, Tatha Pandey",
+            "messages": [["sender": "Tatha Pandey", "text": "Hello"]]]
+        precondition(NotificationConversationContent.title(card) == "Brian Liu, Peter Yu, Tatha Pandey (OpenBubbles)")
+        precondition(NotificationConversationContent.subtitle(card) == "Tatha Pandey")
+        precondition(NotificationConversationContent.body(card) == "Hello")
+        var supplied = card
+        supplied["subtitle"] = "App-provided subtitle"
+        precondition(NotificationConversationContent.subtitle(supplied) == "App-provided subtitle")
+        precondition(NotificationConversationContent.body(supplied) == "Hello")
+        supplied["title"] = "Tatha Pandey"; supplied.removeValue(forKey: "subtitle")
+        precondition(NotificationConversationContent.subtitle(supplied).isEmpty)
+        precondition(NotificationConversationContent.body(supplied) == "Hello")
+        precondition(NotificationConversationContent.title(["app": "Chat"]) == "Chat")
+        precondition(NotificationConversationContent.title(["app": "Chat", "title": "Chat"]) == "Chat")
+        precondition(NotificationConversationContent.title(["title": "Alert"]) == "Alert (Android)")
+        var changed: [String: Any] = ["id": "subtitle", "title": "Title", "subtitle": "First"]
+        precondition(!policy.quiet(identity: "phone", event: changed))
+        changed["subtitle"] = "Second"
+        precondition(!policy.quiet(identity: "phone", event: changed))
         print("Snapshot, duplicate weather, and fresh message presentation tests passed")
     }
 }

@@ -20,7 +20,7 @@ final class ClassicBluetoothTransport {
         case wirelessActive = "WIFI_ACTIVE", bluetoothActive = "BLUETOOTH_ACTIVE", wirelessRecovering = "WIFI_RECOVERING"
     }
     private func pollEvents() {
-        guard let outputURL, let data = try? Data(contentsOf: outputURL), data.count <= 16_384 else { return }
+        guard let outputURL, let data = try? Data(contentsOf: outputURL) else { return }
         let lines = String(decoding: data, as: UTF8.self).components(separatedBy: "\n")
         let completed = max(0, lines.count - 1)
         if completed > consumedLines {
@@ -118,8 +118,8 @@ final class ClassicBluetoothTransport {
     }
 
     var diagnostic: String {
-        guard let outputURL, let data = try? Data(contentsOf: outputURL), data.count <= 16_384 else { return "" }
-        return String(decoding: data, as: UTF8.self).split(separator: "\n").suffix(4).joined(separator: "\n")
+        guard let outputURL, let data = try? Data(contentsOf: outputURL) else { return "" }
+        return String(decoding: data, as: UTF8.self)
     }
     static func pairedDevices() async throws -> [AndroidDevice] {
         guard let helperPath else { throw RunnerError.failed("Bluetooth helper missing. Rebuild DroidMirror with build-app.sh.") }
@@ -174,7 +174,6 @@ final class ClassicBluetoothTransport {
             for _ in 0..<500 {
                 guard token == generation else { throw CancellationError() }
                 let data = (try? Data(contentsOf: url)) ?? Data()
-                guard data.count <= 16_384 else { throw RunnerError.failed("Bluetooth helper returned too much output") }
                 let text = String(decoding: data, as: UTF8.self)
                 if text.contains("EVENT PHONE_IN_USE") {
                     throw RunnerError.failed(PhoneUsePolicy.errorMessage)
@@ -187,14 +186,11 @@ final class ClassicBluetoothTransport {
                     monitorEvents(); return Ports(video: video, control: control)
                 }
                 if !child.isRunning {
-                    if text.contains("EVENT CAPTURE_FAILED") {
-                        throw RunnerError.failed("HEVC capture unavailable. Authorize Shizuku, enable Mac connections, and check this phone's HEVC encoder support.")
-                    }
                     throw RunnerError.failed(text.nilIfEmpty ?? "Bluetooth connection failed")
                 }
                 try await Task.sleep(for: .milliseconds(100))
             }
-            throw RunnerError.failed("Bluetooth connection timed out. Enable Mac connections once in Android setup and keep Shizuku running.")
+            throw RunnerError.failed("Bluetooth connection timed out.\n\n" + diagnostic)
         } catch {
             if token == generation { stop() }
             throw error

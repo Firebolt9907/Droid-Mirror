@@ -78,6 +78,15 @@ import CryptoKit
         var assembly = BLEFragments()
         let frames = BLEFragments.split(Data(repeating: 0, count: 100), id: 2, maximum: 20)
         _ = assembly.accept(frames[0]); precondition(assembly.accept(frames[2]) == nil)
+        // Clipboard limits must leave room for JSON escaping and the encrypted envelope.
+        for text in [String(repeating: "x", count: 4096), String(repeating: "😀", count: 1024),
+                     String(repeating: "\u{1}", count: 916)] {
+            let clipboard = try client.seal(["type": "clipboardSet", "text": text])
+            check(clipboard.count <= 8192)
+            let reply = try exchange(JSONSerialization.jsonObject(with: clipboard) as! [String: Any])
+            check(try JSONSerialization.data(withJSONObject: reply).count <= 8192)
+            check(try client.open(reply)["text"] as? String == text)
+        }
         try input.fileHandleForWriting.close(); task.waitUntilExit(); precondition(task.terminationStatus == 0)
         print("PASS: Swift ↔ Android Kotlin mutual authentication, AES-GCM, tampering, replay, duplicate handshake, fragmentation")
     }

@@ -30,6 +30,11 @@ private final class BLEIntegration: NSObject {
     private let enabledKey = "DroidMirror.BLE.enabled"
     private var discoveryNotifications: DiscoveryNotifications?
     private var phoneNotifications: AndroidNotificationBridge?
+    private var clipboard: ClipboardSync?
+    private var taskContinuation: TaskContinuation?
+    private var clipboardItem: NSMenuItem?
+    private var clipboardStatusItem: NSMenuItem?
+    private var remoteClipboardStatus = "Clipboard mirroring off"
     private var menuObservers = [NSObjectProtocol]()
     private var repairingMenu = false
     private var stopped = false
@@ -40,6 +45,8 @@ private final class BLEIntegration: NSObject {
         super.init()
         discoveryNotifications = DiscoveryNotifications(warningsEnabled: !NotificationRuntime.background)
         phoneNotifications = NotificationRuntime.background ? AndroidNotificationBridge() : nil
+        clipboard = NotificationRuntime.background ? ClipboardSync() : nil
+        taskContinuation = NotificationRuntime.background ? TaskContinuation() : nil
         discoveryNotifications?.onResponse = { [weak self] response in self?.phoneNotifications?.respond(response) }
         NotificationRuntime.preferences.register(defaults: [enabledKey: true])
         if NotificationRuntime.background && NotificationRuntime.preferences.bool(forKey: enabledKey) { start() }
@@ -65,6 +72,7 @@ private final class BLEIntegration: NSObject {
         menuObservers.append(distributed.addObserver(forName: Notification.Name("app.droidmirror.receiverStatus"), object: nil, queue: .main) {
             [weak self] event in
             guard !NotificationRuntime.background, let self else { return }
+            self.remoteClipboardStatus = event.userInfo?["clipboard"] as? String ?? self.remoteClipboardStatus
             self.remoteStatus = event.userInfo?["status"] as? String ?? self.remoteStatus
             self.remoteEndpoint = event.userInfo?["endpoint"] as? String ?? self.remoteEndpoint
             self.refreshMenu()
@@ -73,10 +81,16 @@ private final class BLEIntegration: NSObject {
             [weak self] _ in
             guard NotificationRuntime.background, let self else { return }
             BLETrust.invalidate()
+            self.taskContinuation?.clear()
             self.controller?.stop(); self.controller = nil; self.subscriptions.removeAll()
             if NotificationRuntime.preferences.bool(forKey: self.enabledKey) { self.start() }
             self.phoneNotifications?.controller = self.controller
             self.publishStatus()
+        })
+        menuObservers.append(distributed.addObserver(forName: Notification.Name("app.droidmirror.clipboardConfiguration"), object: nil, queue: .main) {
+            [weak self] _ in
+            guard NotificationRuntime.background else { return }
+            self?.clipboard?.configure()
         })
         refreshMenu()
     }
@@ -84,7 +98,9 @@ private final class BLEIntegration: NSObject {
     private func publishStatus() {
         NotificationRuntime.post("app.droidmirror.receiverStatus", info: [
             "status": controller?.status ?? "Bluetooth receiver disabled",
+            "bleDiagnostics": controller?.diagnostics ?? "disabled",
             "notifications": phoneNotifications?.diagnostics ?? "unavailable",
+            "clipboard": clipboard?.status ?? "Clipboard mirroring off",
             "endpoint": controller.flatMap { bridge in bridge.port.map { "\(bridge.tailscaleIP):\($0)" } } ?? "Waiting for Android endpoint"])
     }
 
@@ -92,8 +108,14 @@ private final class BLEIntegration: NSObject {
         let bridge = BLEController()
         controller = bridge
         phoneNotifications?.controller = bridge
+        clipboard?.controller = bridge
+        taskContinuation?.controller = bridge
         bridge.onEvent = { [weak self] event in
-            if event["type"] as? String == "minimizeMirror" {
+            if event["type"] as? String == "taskContinuation" {
+                self?.taskContinuation?.receive(event)
+            } else if (event["type"] as? String)?.hasPrefix("clipboard") == true {
+                self?.clipboard?.receive(event)
+            } else if event["type"] as? String == "minimizeMirror" {
                 guard let pid = self?.mirrorTarget.target() else {
                     NSLog("DroidMirror minimize: no active mirror heartbeat")
                     return
@@ -106,7 +128,11 @@ private final class BLEIntegration: NSObject {
                 self?.phoneNotifications?.receive(event)
             }
         }
-        bridge.onAuthenticated = { [weak self] in self?.phoneNotifications?.flush() }
+        bridge.onAuthenticated = { [weak self] in
+            self?.phoneNotifications?.flush()
+            self?.clipboard?.connected()
+            self?.taskContinuation?.connected()
+        }
         bridge.$status.sink { status in
             NSLog("DroidMirror BLE: %@", status)
         }.store(in: &subscriptions)
@@ -117,6 +143,8 @@ private final class BLEIntegration: NSObject {
         menuObservers.forEach { NotificationCenter.default.removeObserver($0) }
         menuObservers.forEach { DistributedNotificationCenter.default().removeObserver($0) }
         menuObservers.removeAll()
+        clipboard?.stop()
+        taskContinuation?.stop()
         phoneNotifications?.stop()
         discoveryNotifications?.stop()
         timer?.invalidate()
@@ -138,6 +166,14 @@ private final class BLEIntegration: NSObject {
         configure.target = self
         sub.addItem(configure)
         sub.addItem(.separator())
+        let clipboardToggle = NSMenuItem(title: "Mirror clipboard text over Bluetooth", action: #selector(toggleClipboard(_:)), keyEquivalent: "")
+        clipboardToggle.target = self
+        sub.addItem(clipboardToggle)
+        clipboardItem = clipboardToggle
+        let clipboardStatus = NSMenuItem(title: remoteClipboardStatus, action: nil, keyEquivalent: "")
+        sub.addItem(clipboardStatus)
+        clipboardStatusItem = clipboardStatus
+        sub.addItem(.separator())
         let status = NSMenuItem(title: "Starting Bluetooth…", action: nil, keyEquivalent: "")
         let endpoint = NSMenuItem(title: "Waiting for endpoint", action: nil, keyEquivalent: "")
         sub.addItem(status)
@@ -158,6 +194,8 @@ private final class BLEIntegration: NSObject {
     }
 
     private func updateMenu() {
+        clipboardItem?.state = NotificationRuntime.preferences.bool(forKey: ClipboardSync.enabledKey) ? .on : .off
+        clipboardStatusItem?.title = remoteClipboardStatus
         menuItem?.submenu?.items.first?.state = NotificationRuntime.preferences.bool(forKey: enabledKey) ? .on : .off
         statusItem?.title = NotificationRuntime.background ? (controller?.status ?? "Bluetooth discovery disabled") : remoteStatus
         if !NotificationRuntime.background { endpointItem?.title = remoteEndpoint; return }
@@ -179,11 +217,20 @@ private final class BLEIntegration: NSObject {
         if enabled {
             start()
         } else {
+            taskContinuation?.clear()
             controller?.stop()
             controller = nil
             subscriptions.removeAll()
         }
         updateMenu()
+    }
+
+    @objc private func toggleClipboard(_ sender: NSMenuItem) {
+        let enabled = !NotificationRuntime.preferences.bool(forKey: ClipboardSync.enabledKey)
+        NotificationRuntime.preferences.set(enabled, forKey: ClipboardSync.enabledKey)
+        NotificationRuntime.preferences.synchronize()
+        sender.state = enabled ? .on : .off
+        NotificationRuntime.post("app.droidmirror.clipboardConfiguration")
     }
 
     @objc private func configureHost(_ sender: Any?) {

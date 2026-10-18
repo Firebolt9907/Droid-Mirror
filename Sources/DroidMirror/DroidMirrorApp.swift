@@ -4,10 +4,15 @@ import SwiftUI
 
 @MainActor
 final class DroidMirrorAppDelegate: NSObject, NSApplicationDelegate {
+    private lazy var mirrorRequests = MirrorRequestHandler { [weak self] in
+        guard self?.terminationInProgress == false else { return }
+        MirrorModel.shared.start()
+    }
     private var terminationInProgress = false
     private var terminationCleanupComplete = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        _ = mirrorRequests
         installMainMenu()
         Task { await SessionNotifications.shared.requestPermission() }
         DistributedNotificationCenter.default().addObserver(
@@ -18,11 +23,16 @@ final class DroidMirrorAppDelegate: NSObject, NSApplicationDelegate {
         )
         DistributedNotificationCenter.default().addObserver(self, selector: #selector(showSettings(_:)),
             name: Notification.Name("app.droidmirror.showSettings"), object: String(ProcessInfo.processInfo.processIdentifier))
+        DistributedNotificationCenter.default().addObserver(self, selector: #selector(showOnboarding(_:)),
+            name: Notification.Name("app.droidmirror.showOnboarding"), object: String(ProcessInfo.processInfo.processIdentifier))
         DistributedNotificationCenter.default().addObserver(self, selector: #selector(cancelMirror(_:)),
             name: Notification.Name("app.droidmirror.cancelMirror"), object: String(ProcessInfo.processInfo.processIdentifier))
         DistributedNotificationCenter.default().addObserver(self, selector: #selector(inactivityTimeout(_:)),
             name: Notification.Name("app.droidmirror.inactivityTimeout"), object: String(ProcessInfo.processInfo.processIdentifier))
         PhoneWindowController.shared.show(model: MirrorModel.shared)
+        if OnboardingWindowController.needsFirstRun(model: MirrorModel.shared) {
+            OnboardingWindowController.shared.show(model: MirrorModel.shared)
+        }
         MirrorModel.shared.refreshDevices()
     }
 
@@ -34,6 +44,10 @@ final class DroidMirrorAppDelegate: NSObject, NSApplicationDelegate {
         SettingsWindowController.shared.show(model: MirrorModel.shared)
     }
 
+    @objc private func showOnboarding(_ sender: Any?) {
+        OnboardingWindowController.shared.show(model: MirrorModel.shared)
+    }
+
     @objc private func inactivityTimeout(_ sender: Any?) { MirrorModel.shared.stopForInactivity() }
 
     @objc private func cancelMirror(_ sender: Any?) { MirrorModel.shared.stop() }
@@ -43,7 +57,7 @@ final class DroidMirrorAppDelegate: NSObject, NSApplicationDelegate {
         if !model.isMirroring && !model.isStarting {
             model.preferences.transport = .bluetoothClassic
         }
-        SettingsWindowController.shared.show(model: model)
+        OnboardingWindowController.shared.show(model: model)
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
@@ -72,6 +86,9 @@ final class DroidMirrorAppDelegate: NSObject, NSApplicationDelegate {
         let settingsItem = NSMenuItem(title: "Settings…", action: #selector(showSettings(_:)), keyEquivalent: ",")
         settingsItem.target = self
         appMenu.addItem(settingsItem)
+        let setupItem = NSMenuItem(title: "Set Up Phone…", action: #selector(showOnboarding(_:)), keyEquivalent: "")
+        setupItem.target = self
+        appMenu.addItem(setupItem)
         let pairingItem = NSMenuItem(title: "Pair Bluetooth…", action: #selector(pairBluetooth(_:)), keyEquivalent: "")
         pairingItem.target = self
         appMenu.addItem(pairingItem)

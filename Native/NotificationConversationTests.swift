@@ -46,6 +46,16 @@ import Foundation
         event["messages"] = [first, first]
         precondition(identical.update(event, phone: "phone").count == 2, "Two identical messages in one snapshot remain distinct")
         precondition(identical.update(event, phone: "phone").count == 2)
+        var formatted = NotificationConversationState()
+        event["app"] = "OpenBubbles"; event["title"] = "Friends"; event["subtitle"] = "Alice"
+        event["messages"] = [first, second]
+        let formattedCards = formatted.update(event, phone: "phone")
+        for (index, card) in formattedCards.enumerated() {
+            let content = formatted.event(phone: "phone", card: card)!
+            precondition(NotificationConversationContent.title(content) == "Friends (OpenBubbles)")
+            precondition(NotificationConversationContent.subtitle(content) == "Alice")
+            precondition(NotificationConversationContent.body(content) == (index == 0 ? "Hello" : "Next"))
+        }
         print("Separate incoming and You cards, original-message retention, reply statuses, echo deduplication, token refresh, dismissal and restart passed")
     }
 }

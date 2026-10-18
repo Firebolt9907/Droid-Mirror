@@ -27,6 +27,7 @@ final class WirelessVideoUpgrade implements AutoCloseable {
             try {
                 while (!closed) {
                     LocalSocket socket = listener.accept();
+                    System.err.println("DroidMirror video candidate accepted");
                     candidate = socket;
                     if (closed) { socket.close(); break; }
                     boolean committed = false;
@@ -136,6 +137,7 @@ final class WirelessVideoUpgrade implements AutoCloseable {
                 synchronized (transition) {
                     quality.apply(null);
                     wire.fallback(received);
+                    System.err.println("DroidMirror Bluetooth video recovery completed");
                 }
             } catch (IOException failed) { close(); }
             finally { recovering.set(false); }

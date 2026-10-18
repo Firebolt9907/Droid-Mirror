@@ -1,7 +1,6 @@
 package app.droidmirror.bluetooth;
 
 import android.app.Notification;
-import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.Service;
 import android.content.Intent;
@@ -64,12 +63,11 @@ public final class AdbStreamService extends Service {
             return START_NOT_STICKY;
         }
         finishSessionState();
+        SessionAudit.clear(this);
         owner = next;
         token = "adb-" + UUID.randomUUID();
         started = intent.getLongExtra(StreamNotifications.STARTED, SystemClock.elapsedRealtime());
         dismissed = false;
-        NotificationManager notifications = getSystemService(NotificationManager.class);
-        notifications.createNotificationChannel(new NotificationChannel("capture", "Screen mirroring", NotificationManager.IMPORTANCE_LOW));
         if (Build.VERSION.SDK_INT >= 34) startForeground(NOTIFICATION, notification(), ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
         else startForeground(NOTIFICATION, notification());
         final IBinder generation = owner;

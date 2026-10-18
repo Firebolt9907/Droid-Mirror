@@ -444,7 +444,7 @@ static bool DMPeerAddress(void *context, const uint8_t *bytes, size_t length) {
     return YES;
 }
 - (void)sendControl {
-    if (!_ble.ready || !_outgoing.length) return;
+    if ((!_ble.ready && !_ble.recovering) || !_outgoing.length) return;
     if (![_ble send:_outgoing]) [self fail:@"BLE input backlog exceeded"];
     [_outgoing setLength:0]; _outgoingSince=0;
 }
@@ -460,12 +460,12 @@ static bool DMPeerAddress(void *context, const uint8_t *bytes, size_t length) {
 }
 - (void)bleInputReady { [self announceReady]; [self sendControl]; }
 - (void)bleInputFailed:(NSString *)reason { [self fail:reason]; }
-// A short cadence for moving Classic video permits a small radio window.
-// Idle sessions and Wi-Fi retain the lower-traffic heartbeat cadence. The BLE
+// A short cadence for moving video bounds replay on either transport.
+// Idle sessions retain the lower-traffic heartbeat cadence. The BLE
 // queue coalesces cumulative counts if a GATT write is already outstanding.
 - (void)acknowledgeVideoAtTime:(NSTimeInterval)now {
-    BOOL movingClassicVideo = !_wifiActive && _videoReceived != _lastVideoAcknowledged;
-    NSTimeInterval interval = movingClassicVideo ? 0.04 : 0.25;
+    BOOL movingVideo = _videoReceived != _lastVideoAcknowledged;
+    NSTimeInterval interval = movingVideo ? 0.04 : 0.25;
     if (!_l2capReady || !_ble.ready || now - _lastHeartbeatSent < interval) return;
     if (![_ble acknowledgeVideo:_videoReceived]) { [self fail:@"BLE video acknowledgement failed"]; return; }
     _lastVideoAcknowledged = _videoReceived;
@@ -809,6 +809,10 @@ int main(int argc, const char *argv[]) {
             [bridge start:[NSString stringWithUTF8String:argv[2]]]; CFRunLoopRun(); return 0;
         }
         if (argc==3 && !strcmp(argv[1],"--pair")) return DMSavePairing([NSString stringWithUTF8String:argv[2]]);
+        if (argc==3 && !strcmp(argv[1],"--has-pairing")) {
+            puts(DMLoadPairing([NSString stringWithUTF8String:argv[2]]) ? "paired" : "unpaired");
+            return 0;
+        }
         if (argc != 2) { fprintf(stderr, "Usage: DroidMirrorBluetooth ADDRESS | --list\n"); return 2; }
         NSData *pairing=DMLoadPairing([NSString stringWithUTF8String:argv[1]]);
         if (!pairing) { fprintf(stderr,"Pair BLE once in DroidMirror Settings using the code from the Android companion.\n"); return 2; }

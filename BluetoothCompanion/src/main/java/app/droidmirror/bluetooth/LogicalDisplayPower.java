@@ -47,6 +47,21 @@ final class LogicalDisplayPower {
             SystemClock.sleep(10);
         }
     }
+    void sleep() throws Exception {
+        if (power == null) power = service("power", "android.os.IPowerManager");
+        Class.forName("android.os.IPowerManager").getMethod("goToSleep", long.class, int.class, int.class)
+            .invoke(power, SystemClock.uptimeMillis(), 0, 0); // Allow normal doze/AOD policy.
+        Class<?> global = Class.forName("android.hardware.display.DisplayManagerGlobal");
+        Object manager = global.getMethod("getInstance").invoke(null);
+        long deadline = SystemClock.elapsedRealtime() + 1500;
+        while (true) {
+            Object info = global.getMethod("getDisplayInfo", int.class).invoke(manager, 0);
+            int state = info == null ? 0 : info.getClass().getField("state").getInt(info);
+            if (!interactive() && (state == 1 || state == 3 || state == 4)) return;
+            if (SystemClock.elapsedRealtime() >= deadline) throw new IllegalStateException("Display sleep not confirmed");
+            SystemClock.sleep(10);
+        }
+    }
     void wake() throws Exception {
         if (power == null) power = service("power", "android.os.IPowerManager");
         Class.forName("android.os.IPowerManager").getMethod("wakeUp", long.class, int.class, String.class, String.class)

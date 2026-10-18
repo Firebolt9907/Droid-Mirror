@@ -23,6 +23,12 @@ public final class BleInputCryptoTest {
         byte[] clockProof=crypto.clockProof(java.nio.ByteBuffer.allocate(8).putLong(123456789).array());
         StringBuilder clockHex=new StringBuilder(); for(byte b:clockProof) clockHex.append(String.format("%02x",b));
         if(!clockHex.toString().equals("1161d2415df57690a9d16aef9a8cb69b0fe65629616d147120b08bb6d300af21")) throw new AssertionError();
+        byte[] resume=crypto.resumeState(challenge);
+        if (java.nio.ByteBuffer.wrap(resume).getLong()!=1) throw new AssertionError();
+        StringBuilder resumeHex=new StringBuilder(); for(int i=8;i<resume.length;i++) resumeHex.append(String.format("%02x",resume[i]));
+        if(!resumeHex.toString().equals("bebdb9e5b2a010c52e61baa7667d5a4d113392dd31f7991366d4a7ace3edf7f4")) throw new AssertionError();
+        byte[] otherChallenge=challenge.clone(); otherChallenge[0]^=1;
+        if(Arrays.equals(resume,crypto.resumeState(otherChallenge))) throw new AssertionError("Resume proof ignored challenge");
         List<byte[]> records=new ArrayList<>();
         try(DataInputStream in=new DataInputStream(Files.newInputStream(Paths.get(args[0])))) {
             while(in.available()>0) { byte[] record=new byte[in.readUnsignedShort()]; in.readFully(record); records.add(record); }
@@ -35,6 +41,7 @@ public final class BleInputCryptoTest {
             for(int j=0;j<plain.length;++j) if(plain[j]!=(byte)(j+i)) throw new AssertionError("Cross-language payload mismatch");
             reject(crypto,records.get(i)); // Replays cannot be injected twice.
         }
+        if(java.nio.ByteBuffer.wrap(crypto.resumeState(challenge)).getLong()!=records.size()+1) throw new AssertionError("Resume state reset input counter");
         key[0]^=1; BleInputCrypto other=new BleInputCrypto(key); reject(other,records.get(0));
         key[0]^=1;
         BleInputCrypto returning = new BleInputCrypto(key, true), receiver = new BleInputCrypto(key, true);
