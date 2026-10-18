@@ -137,15 +137,30 @@ int main(void) {
         assert(renderer);
         assert(SDL_SetRenderDrawColor(renderer, 0, 0, 255, 255));
         assert(SDL_RenderClear(renderer));
+        // High contrast detail makes the blur and center-preserving zoom visible.
+        assert(SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255));
+        for (int y = 0; y < 720; y += 24) for (int x = 0; x < 360; x += 24) {
+            if ((x / 24 + y / 24) % 2) continue;
+            SDL_FRect square = {x, y, 24, 24};
+            assert(SDL_RenderFillRect(renderer, &square));
+        }
         assert(SDL_RenderPresent(renderer));
         assert(native.contentView.subviews.lastObject != overlay); // SDL inserted video above it.
         DMFinishConnectingPhone();
 
         assert(native.contentView.subviews.lastObject == overlay);
-        CAKeyframeAnimation *reveal = (CAKeyframeAnimation *)[overlay.layer animationForKey:@"firstFrameReveal"];
-        assert(overlay.superview && reveal.duration == 1.25);
+        CALayer *videoLayer = native.contentView.subviews.firstObject.layer;
+        CABasicAnimation *reveal = (CABasicAnimation *)[overlay.layer animationForKey:@"firstFrameReveal"];
+        assert(overlay.superview && reveal.duration == 1.25 * 0.75);
+        CABasicAnimation *zoom = (CABasicAnimation *)[videoLayer animationForKey:@"firstFrameZoom"];
+        assert(zoom && zoom.duration == 1.25);
+        assert([(NSValue *)zoom.fromValue CATransform3DValue].m11 > 1.1);
+        assert(CATransform3DIsIdentity(videoLayer.transform));
+        CABasicAnimation *blur = (CABasicAnimation *)[videoLayer animationForKey:@"firstFrameBlur"];
+        assert(blur && [blur.fromValue doubleValue] == 32 && [blur.toValue doubleValue] == 0);
+        assert(reveal.timingFunction && zoom.timingFunction && blur.timingFunction);
         assert(overlay.layer.zPosition >= native.contentView.subviews.firstObject.layer.zPosition);
-        assert([reveal.values[1] doubleValue] == 1 && [reveal.values[2] doubleValue] > 0.8);
+
         assert(![overlay hitTest:NSMakePoint(NSMidX(overlay.frame), NSMidY(overlay.frame))]);
         assert(!native.movableByWindowBackground);
         // A second frame must not restart or extend the reveal.
@@ -155,6 +170,8 @@ int main(void) {
         PresentState(statePath, @"Disconnected during reveal", NO);
         assert(![overlay.layer animationForKey:@"firstFrameReveal"] && overlay.layer.opacity == 1);
         assert(native.contentView.subviews.lastObject == overlay);
+        assert(![videoLayer animationForKey:@"firstFrameZoom"] && ![videoLayer animationForKey:@"firstFrameBlur"]);
+        assert(!videoLayer.filters.count && CATransform3DIsIdentity(videoLayer.transform));
         NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:1.4];
         while (deadline.timeIntervalSinceNow > 0)
             [NSRunLoop.currentRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.01]];
@@ -166,16 +183,26 @@ int main(void) {
         // animation object, while the real blue Metal picture remains behind it.
         [NSRunLoop.currentRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.35]];
         float earlyOpacity = ((CALayer *)overlay.layer.presentationLayer).opacity;
-        assert(earlyOpacity > 0.7 && earlyOpacity < 1);
+        assert(earlyOpacity > 0 && earlyOpacity < 1);
+        CALayer *earlyVideo = videoLayer.presentationLayer;
+        CGFloat earlyScale = earlyVideo.transform.m11;
+        CGFloat earlyBlur = [[earlyVideo valueForKeyPath:@"filters.DroidMirrorRevealBlur.inputRadius"] doubleValue];
+        assert(earlyScale > 1 && earlyScale < 1.12);
+        assert(earlyBlur > 0 && earlyBlur < 32);
         [NSRunLoop.currentRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.45]];
         float laterOpacity = ((CALayer *)overlay.layer.presentationLayer).opacity;
-        assert(laterOpacity > 0 && laterOpacity < earlyOpacity);
+        assert(laterOpacity >= 0 && laterOpacity < earlyOpacity);
+        CALayer *laterVideo = videoLayer.presentationLayer;
+        assert(laterVideo.transform.m11 >= 1 && laterVideo.transform.m11 < earlyScale);
+        assert([[laterVideo valueForKeyPath:@"filters.DroidMirrorRevealBlur.inputRadius"] doubleValue] < earlyBlur);
         assert(native.contentView.subviews.lastObject == overlay);
         deadline = [NSDate dateWithTimeIntervalSinceNow:0.6];
         while (deadline.timeIntervalSinceNow > 0)
             [NSRunLoop.currentRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.01]];
         assert(!overlay.superview && !overlay.layer.animationKeys.count);
-        // Accessibility skips both the entrance and the first-frame fade.
+        assert(![videoLayer animationForKey:@"firstFrameZoom"] && ![videoLayer animationForKey:@"firstFrameBlur"]);
+        assert(!videoLayer.filters.count && CATransform3DIsIdentity(videoLayer.transform));
+        // Accessibility skips the fade, zoom and blur.
         reduceMotion = YES;
         PresentState(statePath, @"Reduced motion retry", YES);
         NSView *reducedOverlay = native.contentView.subviews.lastObject;
@@ -183,6 +210,8 @@ int main(void) {
         assert(![[activity valueForKey:@"ring"] animationKeys].count);
         DMFinishConnectingPhone();
         assert(!reducedOverlay.superview && ![reducedOverlay.layer animationForKey:@"firstFrameReveal"]);
+        assert(![videoLayer animationForKey:@"firstFrameZoom"] && ![videoLayer animationForKey:@"firstFrameBlur"]);
+        assert(!videoLayer.filters.count);
         method_setImplementation(motionGetter, originalMotionGetter);
         unsetenv("DROIDMIRROR_SESSION_STATE");
         [NSFileManager.defaultManager removeItemAtPath:statePath error:nil];
@@ -195,6 +224,6 @@ int main(void) {
         SDL_DestroyRenderer(renderer);
         SDL_DestroyWindow(video);
         SDL_Quit();
-        puts("PASS: animated loading, interruptible first-frame reveal, reduced motion, shared window and exact corners");
+        puts("PASS: Metal-backed eased fade/zoom/unblur, interruptible reveal, reduced motion, shared window and exact corners");
     }
 }

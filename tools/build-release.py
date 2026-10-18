@@ -17,7 +17,46 @@ ROOT = Path(__file__).resolve().parent.parent
 
 def run(command, *, capture=False, env=None, cwd=ROOT):
     return subprocess.run([str(arg) for arg in command], check=True, cwd=cwd,
-                          env=env, text=True, stdout=subprocess.PIPE if capture else None)
+                          env=env, text=True, stdout=subprocess.PIPE if capture else None,
+                          stderr=subprocess.STDOUT if capture else None)
+
+
+def stop_mac_for_update(env):
+    print('Ending active Mac mirror sessions before updating…', flush=True)
+    # Use the normal quit path so phone display/input cleanup finishes first.
+    # Do not launch the app if it is already closed, or force-kill a stuck session.
+    run(['/usr/bin/osascript', '-e', '''
+if application id "app.droidmirror.mac" is running then
+    tell application id "app.droidmirror.mac" to quit
+    repeat 120 times
+        if application id "app.droidmirror.mac" is not running then return
+        delay 0.25
+    end repeat
+    error "DroidMirror did not quit; stop mirroring and retry the installation."
+end if
+'''], env=env)
+
+
+def start_android_bridge(adb, serial, env):
+    print('Resuming Android background bridge…', flush=True)
+    command = [adb, '-s', serial, 'shell', 'am']
+    action = 'app.droidmirror.bluetooth.action.START_READY'
+    # The foreground entry avoids Android's background-service startup restriction.
+    result = run([*command, 'start', '-W', '-a', action, '-n',
+                  'app.droidmirror.bluetooth/.SilentStartActivity', '-f', '0x10000000'],
+                 capture=True, env=env).stdout
+    if 'Error:' in result or 'Status: timeout' in result:
+        raise RuntimeError(f'Android bridge activity failed: {result.strip()}')
+    # The ordered receiver reports whether saved setup permits a startup request.
+    result = run([*command, 'broadcast', '-a', action, '-n',
+                  'app.droidmirror.bluetooth/.AutomationReceiver', '-f', '0x20'],
+                 capture=True, env=env).stdout
+    if re.search(r'Broadcast completed: result=-1, data="START_REQUESTED"', result):
+        print('Android bridge startup requested (Bluetooth/Shizuku readiness still required).', flush=True)
+    else:
+        print(f'Android bridge needs attention: {result.strip()}\n'
+              'Open DroidMirror on the phone, complete setup and enable the background bridge.',
+              flush=True)
 
 
 def main():
@@ -108,11 +147,13 @@ def main():
     print(f'Release artifacts: {app}\n{apk}', flush=True)
     if args.build_only:
         return
+    stop_mac_for_update(env)
     print(f'Installing Android release on {serial}…', flush=True)
     # Never uninstall or allow a downgrade: retain pairing, Shizuku grants and data.
     run([adb, '-s', serial, 'install', '-r', apk], env=env)
     print(f'Android installed. Installing macOS release at {destination}…', flush=True)
     run([sys.executable, ROOT / 'tools/app-bundle.py', 'install', app, destination], env=env)
+    start_android_bridge(adb, serial, env)
     print(f'Installed both release builds: {destination} and Android {serial}', flush=True)
 
 
