@@ -1,7 +1,28 @@
-/.DS_Store
+# macOS and editor state
+.DS_Store
+._*
+/.vscode/
+
+# Swift and native build state
 /.build
-/.vscode
+/.swiftpm/
+
+# Android build state and machine-specific SDK configuration
 /BluetoothCompanion/.gradle/
+/BluetoothCompanion/.kotlin/
 /BluetoothCompanion/build/
 /BluetoothCompanion/local.properties
+
+# Rust build output
 /PeerTransport/target/
+
+# Generated application bundles, APKs, and build staging directories
+/outputs/**/*.app/
+/outputs/**/*.apk
+/outputs/**/*.apk.sha256
+/outputs/.droidmirror-build.*/
+/outputs/.android-release-*/
+
+# Python bytecode
+__pycache__/
+*.py[cod]
