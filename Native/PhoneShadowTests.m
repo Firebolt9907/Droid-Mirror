@@ -7,11 +7,19 @@
 static BOOL appActive;
 static BOOL TestAppActive(id app, SEL selector) { return appActive; }
 
+@interface ShadowTestScreen : NSObject
+@property(nonatomic) NSRect visibleFrame;
+@end
+@implementation ShadowTestScreen
+@end
+
 @interface ShadowTestWindow : NSWindow
 @property(nonatomic) BOOL testKey;
+@property(nonatomic, strong) ShadowTestScreen *testScreen;
 @end
 @implementation ShadowTestWindow
 - (BOOL)isKeyWindow { return self.testKey; }
+- (NSScreen *)screen { return (NSScreen *)self.testScreen ?: super.screen; }
 @end
 
 int main(void) {
@@ -61,6 +69,24 @@ int main(void) {
         assert(NSEqualRects(shadow.frame, NSInsetRect(phone.frame, -96, -96)));
         assert(CGRectEqualToRect(CGPathGetBoundingBox(controller.phoneShadowLayer.shadowPath),
                                  CGRectMake(0, 0, 500, 700)));
+        // Padding must stop below the menu bar without moving the silhouette.
+        ShadowTestScreen *screen = [ShadowTestScreen new];
+        screen.visibleFrame = NSMakeRect(0, 0, 1440, 875);
+        NSRect usable = screen.visibleFrame;
+        [phone setFrame:NSMakeRect(NSMidX(usable) - 200, NSMaxY(usable) - 600, 400, 600) display:YES];
+        phone.testScreen = screen;
+        [controller positionPhoneShadow];
+        phone.testScreen = nil;
+        assert(NSMaxY(shadow.frame) == NSMaxY(usable));
+        assert(NSMinY(shadow.frame) == NSMinY(phone.frame) - 96);
+        NSRect silhouette = NSOffsetRect(controller.phoneShadowLayer.frame,
+                                         shadow.frame.origin.x, shadow.frame.origin.y);
+        assert(NSEqualRects(silhouette, phone.frame));
+        [phone setFrame:NSMakeRect(NSMidX(usable) - 200, NSMaxY(usable) - 750, 400, 600) display:YES];
+        phone.testScreen = screen;
+        [controller positionPhoneShadow];
+        phone.testScreen = nil;
+        assert(NSEqualRects(shadow.frame, NSInsetRect(phone.frame, -96, -96)));
         [phone orderOut:nil];
         assert(!shadow.visible);
         [phone orderFront:nil];
@@ -69,6 +95,6 @@ int main(void) {
         assert(!shadow.parentWindow && !shadow.visible);
         [phone orderOut:nil];
         method_setImplementation(activeGetter, originalActive);
-        puts("PASS: phone shadow follows window/app focus, resize/status and visibility; preserves frame/input and tears down");
+        puts("PASS: phone shadow follows focus, resize/status and visibility; stays below menu bar, preserves silhouette/frame/input and tears down");
     }
 }

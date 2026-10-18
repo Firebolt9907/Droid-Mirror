@@ -849,11 +849,19 @@ static inline CGFloat DMScreenCornerRadius(CGFloat width) {
 - (void)positionPhoneShadow {
     if (!self.phoneShadowWindow) return;
     NSRect phone = self.window.frame;
-    [self.phoneShadowWindow setFrame:NSInsetRect(phone, -DMPhoneShadowInset, -DMPhoneShadowInset)
-                            display:YES];
+    NSRect shadow = NSInsetRect(phone, -DMPhoneShadowInset, -DMPhoneShadowInset);
+    NSScreen *screen = self.window.screen;
+    if (screen) {
+        // Transparent window padding still participates in the menu bar's
+        // backdrop. Keep it below the menu bar to avoid a dark horizontal edge.
+        CGFloat top = NSMaxY(screen.visibleFrame);
+        shadow.size.height = MAX(0, MIN(NSMaxY(shadow), top) - NSMinY(shadow));
+    }
+    [self.phoneShadowWindow setFrame:shadow display:YES];
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
-    self.phoneShadowLayer.frame = NSMakeRect(DMPhoneShadowInset, DMPhoneShadowInset,
+    self.phoneShadowLayer.frame = NSMakeRect(NSMinX(phone) - NSMinX(shadow),
+                                            NSMinY(phone) - NSMinY(shadow),
                                             phone.size.width, phone.size.height);
     CGFloat radius = DMScreenCornerRadius(phone.size.width);
     self.phoneShadowLayer.shadowPath = [NSBezierPath bezierPathWithRoundedRect:self.phoneShadowLayer.bounds

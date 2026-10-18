@@ -18,6 +18,21 @@ static BOOL DMSessionRunning;
 static BOOL DMStopRequested;
 static NSUInteger DMPresentationGeneration;
 static const CFTimeInterval DMFirstFrameRevealDuration = 1.25;
+static __weak CALayer *DMRevealVideoLayer;
+static NSString *const DMRevealBlurName = @"DroidMirrorRevealBlur";
+
+static void DMCancelVideoReveal(void) {
+    CALayer *layer = DMRevealVideoLayer;
+    [layer removeAnimationForKey:@"firstFrameZoom"];
+    [layer removeAnimationForKey:@"firstFrameBlur"];
+    [CATransaction begin]; [CATransaction setDisableActions:YES];
+    NSMutableArray *filters = [layer.filters mutableCopy];
+    for (CIFilter *filter in filters.copy)
+        if ([filter.name isEqualToString:DMRevealBlurName]) [filters removeObject:filter];
+    layer.filters = filters.count ? filters : nil;
+    [CATransaction commit];
+    DMRevealVideoLayer = nil;
+}
 // Core Animation stores CATransition under this reserved key even when callers
 // supply another key. Use it for replacement and immediate video cancellation.
 static NSString *const DMStatusTransitionKey = @"transition";
@@ -69,7 +84,7 @@ void DroidMirrorInstallSessionMenu(void) {
 }
 
 
-// Animate the status layer only; never transform the live SDL/Metal surface.
+// Keep status motion separate from the first-frame video reveal.
 static BOOL DMPhoneMotionAllowed(NSWindow *window) {
     return window.visible && !window.miniaturized &&
         !NSWorkspace.sharedWorkspace.accessibilityDisplayShouldReduceMotion;
@@ -186,6 +201,7 @@ static void DMShowPhoneState(NSString *title, NSString *message, BOOL connecting
     NSView *screen = window.contentView;
     // Keep wallpaper geometry stable while status controls settle into view.
     ++DMPresentationGeneration;
+    DMCancelVideoReveal();
     BOOL replacingStatus = DMLoadingSurface.superview == screen;
     DMConnectingPhoneView *overlay = replacingStatus ? (DMConnectingPhoneView *)DMLoadingSurface
         : [[DMConnectingPhoneView alloc] initWithFrame:screen.bounds];
@@ -351,17 +367,51 @@ void DMFinishConnectingPhone(void) {
     [CATransaction setDisableActions:YES];
     overlay.layer.opacity = 0;
     [CATransaction commit];
-    // Let the connection state register before gradually uncovering the picture.
-    // The earlier fast ease-out spent almost its entire duration near transparent.
-    CAKeyframeAnimation *reveal = [CAKeyframeAnimation animationWithKeyPath:@"opacity"];
-    reveal.values = @[@1, @1, @0.82, @0.35, @0];
-    reveal.keyTimes = @[@0, @0.12, @0.38, @0.75, @1];
-    reveal.calculationMode = kCAAnimationLinear;
-    reveal.duration = DMFirstFrameRevealDuration;
+    CAMediaTimingFunction *easing = [CAMediaTimingFunction functionWithControlPoints:0.25 :0.1 :0.25 :1];
+    // Animate the real video layer, leaving the window's silhouette, border and
+    // input geometry stable. The model transform remains unchanged throughout.
+    for (NSView *view in screen.subviews) {
+        if (![view.layer isKindOfClass:CAMetalLayer.class]) continue;
+        CALayer *video = view.layer;
+        DMRevealVideoLayer = video;
+        CGFloat scale = 1.12;
+        CGFloat centerX = (0.5 - video.anchorPoint.x) * video.bounds.size.width;
+        CGFloat centerY = (0.5 - video.anchorPoint.y) * video.bounds.size.height;
+        CATransform3D zoom = CATransform3DMakeScale(scale, scale, 1);
+        zoom.m41 = (1 - scale) * centerX;
+        zoom.m42 = (1 - scale) * centerY;
+        CABasicAnimation *settle = [CABasicAnimation animationWithKeyPath:@"transform"];
+        settle.fromValue = [NSValue valueWithCATransform3D:CATransform3DConcat(zoom, video.transform)];
+        settle.toValue = [NSValue valueWithCATransform3D:video.transform];
+        settle.duration = DMFirstFrameRevealDuration;
+        settle.timingFunction = easing;
+        [video addAnimation:settle forKey:@"firstFrameZoom"];
+
+        CIFilter *blur = [CIFilter filterWithName:@"CIGaussianBlur"];
+        blur.name = DMRevealBlurName;
+        [blur setValue:@0 forKey:kCIInputRadiusKey];
+        [CATransaction begin]; [CATransaction setDisableActions:YES];
+        video.filters = [(video.filters ?: @[]) arrayByAddingObject:blur];
+        [CATransaction commit];
+        CABasicAnimation *focus = [CABasicAnimation animationWithKeyPath:
+            [NSString stringWithFormat:@"filters.%@.inputRadius", DMRevealBlurName]];
+        focus.fromValue = @32; focus.toValue = @0;
+        focus.duration = DMFirstFrameRevealDuration;
+        focus.timingFunction = easing;
+        [video addAnimation:focus forKey:@"firstFrameBlur"];
+        break;
+    }
+    // The wallpaper clears slightly ahead of the focus/scale settling so the
+    // blurred, enlarged picture is visible while it resolves into live video.
+    CABasicAnimation *reveal = [CABasicAnimation animationWithKeyPath:@"opacity"];
+    reveal.fromValue = @1; reveal.toValue = @0;
+    reveal.duration = DMFirstFrameRevealDuration * 0.75;
+    reveal.timingFunction = easing;
     [overlay.layer addAnimation:reveal forKey:@"firstFrameReveal"];
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(DMFirstFrameRevealDuration * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         // A disconnect/retry may have reused this surface during the reveal.
         if (generation != DMPresentationGeneration || DMLoadingSurface != overlay) return;
+        DMCancelVideoReveal();
         [overlay.layer removeAllAnimations];
         [overlay removeFromSuperview]; DMLoadingSurface = nil; DMSetChrome(YES);
     });
