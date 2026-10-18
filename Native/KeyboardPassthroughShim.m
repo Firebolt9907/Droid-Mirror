@@ -42,7 +42,11 @@ static void DMReportMirrorVisible(void) {
 }
 __attribute__((visibility("default")))
 void DroidMirrorFrameVisible(void) {
-    dispatch_async(dispatch_get_main_queue(), ^{ DMFinishConnectingPhone(); DMFrameRendered = YES; DMReportMirrorVisible(); });
+    void (^present)(void) = ^{ DMFinishConnectingPhone(); DMFrameRendered = YES; DMReportMirrorVisible(); };
+    // SDL presents on the main thread. Reorder the loading overlay in the same
+    // turn, before Core Animation can expose the new Metal view for a frame.
+    if (NSThread.isMainThread) present();
+    else dispatch_async(dispatch_get_main_queue(), present);
 }
 
 __attribute__((visibility("default")))

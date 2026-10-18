@@ -264,6 +264,8 @@ static void DMShowPhoneState(NSString *title, NSString *message, BOOL connecting
         [DMLoadingSurface removeFromSuperview];
         [screen addSubview:overlay]; DMLoadingSurface = overlay;
     }
+    // SDL may have inserted a Metal view since this status was first installed.
+    [screen addSubview:overlay positioned:NSWindowAbove relativeTo:nil];
     [overlay layoutSubtreeIfNeeded];
     if (DMPhoneMotionAllowed(window)) {
         if (!replacingStatus) {
@@ -331,6 +333,9 @@ void DMFinishConnectingPhone(void) {
     DMConnectingPhoneView *overlay = (DMConnectingPhoneView *)DMLoadingSurface;
     if (!overlay || overlay.revealingVideo) return;
     NSView *screen = overlay.superview;
+    // SDL creates its Metal view after the loading page. Restore the overlay
+    // above that opaque video view before fading it, or the reveal is invisible.
+    [screen addSubview:overlay positioned:NSWindowAbove relativeTo:nil];
     screen.window.movableByWindowBackground = NO;
     DMApplyDeviceCorners(screen);
     [overlay.layer removeAllAnimations];

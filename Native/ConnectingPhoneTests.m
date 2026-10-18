@@ -131,9 +131,20 @@ int main(void) {
         SDL_Window *video = sc_sdl_create_window("DroidMirror — Test", 0, 0, 256, 256, SDL_WINDOW_HIDDEN);
         assert(video == loading);
         assert(native.windowNumber == number);
+        // Reproduce the real path: SDL creates its Metal view after the loading
+        // overlay has already been installed, then presents the first picture.
+        SDL_Renderer *renderer = SDL_CreateRenderer(video, "metal");
+        assert(renderer);
+        assert(SDL_SetRenderDrawColor(renderer, 0, 0, 255, 255));
+        assert(SDL_RenderClear(renderer));
+        assert(SDL_RenderPresent(renderer));
+        assert(native.contentView.subviews.lastObject != overlay); // SDL inserted video above it.
         DMFinishConnectingPhone();
+
+        assert(native.contentView.subviews.lastObject == overlay);
         CAKeyframeAnimation *reveal = (CAKeyframeAnimation *)[overlay.layer animationForKey:@"firstFrameReveal"];
         assert(overlay.superview && reveal.duration == 1.25);
+        assert(overlay.layer.zPosition >= native.contentView.subviews.firstObject.layer.zPosition);
         assert([reveal.values[1] doubleValue] == 1 && [reveal.values[2] doubleValue] > 0.8);
         assert(![overlay hitTest:NSMakePoint(NSMidX(overlay.frame), NSMidY(overlay.frame))]);
         assert(!native.movableByWindowBackground);
@@ -143,6 +154,7 @@ int main(void) {
         // A failure/retry during the fade cancels its stale completion.
         PresentState(statePath, @"Disconnected during reveal", NO);
         assert(![overlay.layer animationForKey:@"firstFrameReveal"] && overlay.layer.opacity == 1);
+        assert(native.contentView.subviews.lastObject == overlay);
         NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:1.4];
         while (deadline.timeIntervalSinceNow > 0)
             [NSRunLoop.currentRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.01]];
@@ -150,7 +162,16 @@ int main(void) {
         assert(native.movableByWindowBackground);
         PresentState(statePath, @"Retry after reveal", YES);
         DMFinishConnectingPhone();
-        deadline = [NSDate dateWithTimeIntervalSinceNow:1.4];
+        // Check the actual presentation layer over time, not just a queued
+        // animation object, while the real blue Metal picture remains behind it.
+        [NSRunLoop.currentRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.35]];
+        float earlyOpacity = ((CALayer *)overlay.layer.presentationLayer).opacity;
+        assert(earlyOpacity > 0.7 && earlyOpacity < 1);
+        [NSRunLoop.currentRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.45]];
+        float laterOpacity = ((CALayer *)overlay.layer.presentationLayer).opacity;
+        assert(laterOpacity > 0 && laterOpacity < earlyOpacity);
+        assert(native.contentView.subviews.lastObject == overlay);
+        deadline = [NSDate dateWithTimeIntervalSinceNow:0.6];
         while (deadline.timeIntervalSinceNow > 0)
             [NSRunLoop.currentRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.01]];
         assert(!overlay.superview && !overlay.layer.animationKeys.count);
@@ -171,6 +192,7 @@ int main(void) {
             assert(![view.identifier isEqualToString:@"DroidMirrorConnecting"]);
         assert(native.windowNumber == number);
         CGPathRelease(loadingPath);
+        SDL_DestroyRenderer(renderer);
         SDL_DestroyWindow(video);
         SDL_Quit();
         puts("PASS: animated loading, interruptible first-frame reveal, reduced motion, shared window and exact corners");
