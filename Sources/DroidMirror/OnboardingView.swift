@@ -40,6 +40,7 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate {
 
 struct OnboardingView: View {
     @EnvironmentObject private var model: MirrorModel
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var step = min(3, max(0, UserDefaults.standard.integer(forKey: "DroidMirror.onboarding.step")))
     @State private var existingPairingID: String?
     @State private var pairingCheckError: String?
@@ -47,6 +48,7 @@ struct OnboardingView: View {
     private let titles = ["Connect Bluetooth", "Prepare your phone", "Pair DroidMirror", "Try your first mirror"]
 
     private var busy: Bool { model.isStarting || model.isMirroring || model.isPairingBluetooth }
+    private var stepAnimation: Animation? { reduceMotion ? nil : .easeInOut(duration: 0.18) }
     private var codeSaved: Bool {
         guard let id = model.selectedID else { return false }
         return existingPairingID == id || model.savedPairingDeviceID == id
@@ -66,19 +68,28 @@ struct OnboardingView: View {
                 ForEach(titles.indices, id: \.self) { index in
                     Capsule().fill(index <= step ? Color.accentColor : Color.secondary.opacity(0.18)).frame(height: 4)
                 }
-            }.accessibilityLabel("Step \(step + 1) of 4")
-            Text("STEP \(step + 1) OF 4").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-            Text(titles[step]).font(.title2.bold())
-            ScrollView {
-                VStack(alignment: .leading, spacing: 16) {
-                    switch step {
-                    case 0: bluetoothStep
-                    case 1: phoneStep
-                    case 2: pairingStep
-                    default: mirrorStep
-                    }
-                }.frame(maxWidth: .infinity, alignment: .leading)
             }
+            .accessibilityLabel("Step \(step + 1) of 4")
+            .animation(stepAnimation, value: step)
+            VStack(alignment: .leading, spacing: 20) {
+                Text("STEP \(step + 1) OF 4").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                Text(titles[step]).font(.title2.bold())
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 16) {
+                        switch step {
+                        case 0: bluetoothStep
+                        case 1: phoneStep
+                        case 2: pairingStep
+                        default: mirrorStep
+                        }
+                    }.frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+            // Each step starts at the top. Only step content transitions;
+            // navigation and pairing/session operations remain immediate.
+            .id(step)
+            .transition(.opacity)
+            .animation(stepAnimation, value: step)
             Divider()
             HStack {
                 Button("Set up later") { OnboardingWindowController.shared.close() }

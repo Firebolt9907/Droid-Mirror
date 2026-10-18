@@ -32,6 +32,12 @@ import Foundation
         queue.enqueue(phone: "phone", command: command("old-pairing", "0"), now: now)
         precondition(queue.expire(phone: "new-phone", now: now).isEmpty)
         precondition(queue.pending.isEmpty)
+        queue.enqueue(phone: "phone", command: command("unlock", "open"), now: now)
+        queue.sent("unlock", now: now.addingTimeInterval(40))
+        precondition(queue.expire(phone: "phone", now: now.addingTimeInterval(45)).isEmpty,
+                     "Slow connection setup must leave time for unlocking")
+        precondition(queue.expire(phone: "phone", now: now.addingTimeInterval(74)).isEmpty)
+        precondition(queue.expire(phone: "phone", now: now.addingTimeInterval(75)).first?.sent == true)
         print("Direct replies, mirror-only opens, acknowledgments, duplicate prevention, expiry and phone isolation passed")
     }
 }

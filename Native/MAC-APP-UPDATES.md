@@ -48,3 +48,13 @@ that its bytes/inode remain intact, that the new inode is published, that rollba
 retains both bundles, and that a missing candidate does not alter the installation.
 The actual signed app check tests the loader path implicated by this crash. It
 separately does not establish Bluetooth connection reliability.
+
+On host launch, an idle app also compares the background receiver's launch time
+with the installed helper executable's modification time. A newer installed helper
+gets a normal quit/relaunch, with a bounded 15-second wait and no forced kill.
+This addresses LaunchServices reusing a receiver still mapped from a bundle moved
+aside by an atomic update. Missing dates preserve the running helper. A running
+renderer defers this refresh until a subsequent idle launch; it does not make
+component replacement during active mirroring seamless. Receiver termination
+stops its Bluetooth integration normally. `Native/test-host-isolation.sh` covers
+the refresh policy and the active-renderer guard.

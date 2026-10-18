@@ -87,6 +87,29 @@ import CryptoKit
             check(try JSONSerialization.data(withJSONObject: reply).count <= 8192)
             check(try client.open(reply)["text"] as? String == text)
         }
+        // URL-safe file payloads avoid slash escaping inflating binary-heavy JSON.
+        for byte: UInt8 in [0, 42, 255] {
+            let binary = Data(repeating: byte, count: 3072)
+            let encoded = binary.base64EncodedString().replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_")
+            let chunk: [String: Any] = ["type": "clipboardFileChunk", "id": UUID().uuidString, "offset": 4_999_998, "data": encoded]
+            let envelope = try client.seal(chunk)
+            check(envelope.count <= 8192)
+            let reply = try exchange(JSONSerialization.jsonObject(with: envelope) as! [String: Any])
+            check(try JSONSerialization.data(withJSONObject: reply).count <= 8192)
+            check(try client.open(reply)["data"] as? String == encoded)
+        }
+        // Scheduling must happen before sealing; both peers must still accept
+        // directional sequences after control traffic overtakes queued file data.
+        var scheduled = BLEOutboundQueue()
+        check(scheduled.append(["type": "clipboardFileChunk", "text": "bulk"], deadline: 60))
+        check(scheduled.append(["type": "ping", "text": "control"], deadline: 60))
+        for expected in ["control", "bulk"] {
+            let event = scheduled.next(now: 1)!.object
+            check(event["text"] as? String == expected)
+            let sealed = try client.seal(event)
+            let reply = try exchange(JSONSerialization.jsonObject(with: sealed) as! [String: Any])
+            check(try client.open(reply)["text"] as? String == expected)
+        }
         try input.fileHandleForWriting.close(); task.waitUntilExit(); precondition(task.terminationStatus == 0)
         print("PASS: Swift ↔ Android Kotlin mutual authentication, AES-GCM, tampering, replay, duplicate handshake, fragmentation")
     }

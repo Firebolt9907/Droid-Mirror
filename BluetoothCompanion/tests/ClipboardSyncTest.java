@@ -11,6 +11,12 @@ public final class ClipboardSyncTest {
         check(!ClipboardTextPolicy.allowed("😀".repeat(1025)));
         check(ClipboardTextPolicy.allowed("\u0001".repeat(916)));
         check(!ClipboardTextPolicy.allowed("\u0001".repeat(917)));
+        check(ClipboardFilePolicy.allowed(0));
+        check(ClipboardFilePolicy.allowed(4_999_999));
+        check(!ClipboardFilePolicy.allowed(5_000_000));
+        check(!ClipboardFilePolicy.allowed(-1));
+        check(ClipboardFilePolicy.nameAllowed("résumé.pdf"));
+        for (String name : new String[]{"", ".", "..", "../escape", "/tmp/file", "a\\b", "a:b", "a\n"}) check(!ClipboardFilePolicy.nameAllowed(name));
         ClipboardChangeTracker state = new ClipboardChangeTracker();
         check(!state.sample("old phone clipboard"));
         check(state.sample("new copy"));

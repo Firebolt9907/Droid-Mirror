@@ -25,9 +25,15 @@ class BlePeripheral(
     private val context: Context,
     private val endpoint: () -> AdbEndpoint?,
     private val onCommand: (String) -> Unit = {},
-    private val onClipboardSubscription: (Boolean, Long) -> Unit = { _, _ -> },
+    private val onClipboardSubscription: (Boolean, Long, Boolean) -> Unit = { _, _, _ -> },
     private val onClipboardText: (String) -> Unit = {},
-    private val onTaskSubscription: (Boolean, Long) -> Unit = { _, _ -> }
+    private val onClipboardFile: (JSONObject) -> Unit = {},
+    private val onMediaSubscription: (Boolean, Long) -> Unit = { _, _ -> },
+    private val onMediaEvent: (JSONObject, () -> Boolean) -> Unit = { _, _ -> },
+    private val onTaskSubscription: (Boolean, Long) -> Unit = { _, _ -> },
+    private val onOpenLink: (String, () -> Boolean, (Boolean) -> Unit) -> Unit = { _, _, reply -> reply(false) },
+    private val onShareLinkResult: (String, Boolean) -> Unit = { _, _ -> },
+    private val onHotspotStart: (() -> Boolean, (String) -> Unit) -> Unit = { _, reply -> reply("unsupported") }
 ) {
     companion object {
         val SERVICE_UUID: UUID = UUID.fromString("7e57b000-9a6b-4c5d-8e7f-102030405060")
@@ -43,6 +49,7 @@ class BlePeripheral(
     private val subscribed = ConcurrentHashMap<android.bluetooth.BluetoothDevice, Boolean>()
     private val indicationInFlight = ConcurrentHashMap.newKeySet<android.bluetooth.BluetoothDevice>()
     private val pendingIndication = ConcurrentHashMap<android.bluetooth.BluetoothDevice, java.util.ArrayDeque<ByteArray>>()
+    private val pendingMessages = ConcurrentHashMap<android.bluetooth.BluetoothDevice, BleOutboundQueue>()
     private val sessions = ConcurrentHashMap<android.bluetooth.BluetoothDevice, BleSecureSession>()
     private val fragments = ConcurrentHashMap<android.bluetooth.BluetoothDevice, BleFragments>()
     private val mtu = ConcurrentHashMap<android.bluetooth.BluetoothDevice, Int>()
@@ -53,21 +60,41 @@ class BlePeripheral(
     private var revision = 0L
     private var clipboardDevice: android.bluetooth.BluetoothDevice? = null
     private var clipboardGeneration = 0L
+    private var linkDevice: android.bluetooth.BluetoothDevice? = null
+    private var linkSession: BleSecureSession? = null
     private var taskDevice: android.bluetooth.BluetoothDevice? = null
     private var taskGeneration = 0L
+    private var mediaDevice: android.bluetooth.BluetoothDevice? = null
+    private var mediaGeneration = 0L
+    private var hotspotEpoch = 0L
+
+    @Synchronized fun shareLink(url: String, request: String): Boolean {
+        val device = linkDevice ?: return false
+        val session = sessions[device]?.takeIf { it.authenticated && it === linkSession } ?: return false
+        return runCatching {
+            enqueueSecure(device, session, JSONObject().put("type", "shareLink").put("url", url).put("request", request))
+        }.getOrElse { revokeSession(device); false }
+    }
+
+    @Synchronized fun sendMediaEvent(value: JSONObject, generation: Long) {
+        if (generation != mediaGeneration) return
+        val device = mediaDevice ?: return
+        val session = sessions[device]?.takeIf { it.authenticated } ?: return
+        runCatching { enqueueSecure(device, session, value) }.onFailure { revokeSession(device) }
+    }
 
     @Synchronized fun sendTaskEvent(value: JSONObject, generation: Long) {
         if (generation != taskGeneration) return
         val device = taskDevice ?: return
         val session = sessions[device]?.takeIf { it.authenticated } ?: return
-        runCatching { enqueue(device, session.seal(value)) }.onFailure { revokeSession(device) }
+        runCatching { enqueueSecure(device, session, value) }.onFailure { revokeSession(device) }
     }
 
     @Synchronized fun sendClipboardEvent(value: JSONObject, generation: Long) {
         if (generation != clipboardGeneration) return
         val device = clipboardDevice ?: return
         val session = sessions[device]?.takeIf { it.authenticated } ?: return
-        runCatching { enqueue(device, session.seal(value)) }.onFailure { revokeSession(device) }
+        runCatching { enqueueSecure(device, session, value) }.onFailure { revokeSession(device) }
     }
 
     @SuppressLint("MissingPermission")
@@ -125,11 +152,14 @@ class BlePeripheral(
 
     @SuppressLint("MissingPermission")
     fun stop() {
+        ++hotspotEpoch
         advertiseCallback?.let { advertiser?.stopAdvertising(it) }
         advertiseCallback = null
         advertiser = null
+        mediaDevice = null
+        onMediaSubscription(false, ++mediaGeneration)
         clipboardDevice = null
-        onClipboardSubscription(false, ++clipboardGeneration)
+        onClipboardSubscription(false, ++clipboardGeneration, false)
         taskDevice = null
         onTaskSubscription(false, ++taskGeneration)
         server?.close()
@@ -137,6 +167,7 @@ class BlePeripheral(
         connected.clear()
         subscribed.clear()
         indicationInFlight.clear()
+        pendingMessages.clear()
         pendingIndication.clear()
         sessions.clear(); fragments.clear(); mtu.clear()
     }
@@ -155,7 +186,7 @@ class BlePeripheral(
                 }
             recipients.forEach { subscription ->
                 sessions[subscription.first]?.takeIf { it.authenticated }?.let { session ->
-                    enqueue(subscription.first, session.seal(JSONObject(String(value, Charsets.UTF_8))))
+                    enqueueSecure(subscription.first, session, JSONObject(String(value, Charsets.UTF_8)))
                 }
             }
         }
@@ -201,16 +232,38 @@ class BlePeripheral(
     }
 
     @Synchronized
+    private fun enqueueSecure(device: android.bluetooth.BluetoothDevice, session: BleSecureSession, value: JSONObject): Boolean {
+        if (subscribed[device] != true || sessions[device] !== session || !session.authenticated) return false
+        val queue = pendingMessages.getOrPut(device) { BleOutboundQueue() }
+        // Preserve notification/update/removal order. Only file chunks yield to
+        // control traffic; snapshots must not arrive after a newer tombstone.
+        val bulk = value.optString("type") == "clipboardFileChunk"
+        if (!queue.append(value.toString(), bulk, android.os.SystemClock.elapsedRealtime(), value.optString("type") == "pong")) {
+            revokeSession(device)
+            return false
+        }
+        drain(device)
+        return sessions[device] === session
+    }
+
+    @Synchronized
     private fun drain(device: android.bluetooth.BluetoothDevice) {
         if (indicationInFlight.contains(device)) return
-        val frame = pendingIndication[device]?.pollFirst() ?: return
+        val frames = pendingIndication.getOrPut(device) { java.util.ArrayDeque() }
+        if (frames.isEmpty()) {
+            val json = pendingMessages[device]?.next(android.os.SystemClock.elapsedRealtime()) ?: return
+            val session = sessions[device]?.takeIf { it.authenticated } ?: return
+            val sealed = runCatching { session.seal(JSONObject(json)) }.getOrElse { revokeSession(device); return }
+            frames.addAll(BleFragments.split(sealed, nextMessage++, (mtu[device] ?: 23) - 3))
+        }
+        val frame = frames.pollFirst() ?: return
         characteristic?.let { sendUpdate(device, it, true, frame) }
     }
 
     @Synchronized
     fun sendEvent(value: JSONObject) {
         sessions.entries.filter { it.value.authenticated }.forEach { (device, session) ->
-            runCatching { enqueue(device, session.seal(value)) }.onFailure { revokeSession(device) }
+            runCatching { enqueueSecure(device, session, value) }.onFailure { revokeSession(device) }
         }
     }
 
@@ -235,13 +288,16 @@ class BlePeripheral(
 
     @Synchronized
     private fun revokeSession(device: android.bluetooth.BluetoothDevice) {
+        ++hotspotEpoch
         // GATT services share the physical link with mirroring input. Revoking a
         // notification session must not disconnect that other authenticated service.
-        if (clipboardDevice == device) { clipboardDevice = null; onClipboardSubscription(false, ++clipboardGeneration) }
+        if (mediaDevice == device) { mediaDevice = null; onMediaSubscription(false, ++mediaGeneration) }
+        if (clipboardDevice == device) { clipboardDevice = null; onClipboardSubscription(false, ++clipboardGeneration, false) }
         if (taskDevice == device) { taskDevice = null; onTaskSubscription(false, ++taskGeneration) }
         subscribed.remove(device)
         indicationInFlight.remove(device)
         pendingIndication.remove(device)
+        pendingMessages.remove(device)
         sessions.remove(device)
         fragments.remove(device)
     }
@@ -253,7 +309,7 @@ class BlePeripheral(
         }
     }
     @Synchronized fun revokeTrust() {
-        sessions.clear(); fragments.clear(); pendingIndication.clear()
+        sessions.clear(); fragments.clear(); pendingIndication.clear(); pendingMessages.clear()
         revokeClients()
     }
 
@@ -278,6 +334,7 @@ class BlePeripheral(
                 subscribed.remove(device)
                 indicationInFlight.remove(device)
                 pendingIndication.remove(device)
+                pendingMessages.remove(device)
                 sessions.remove(device); fragments.remove(device); mtu.remove(device)
             }
         }
@@ -331,35 +388,99 @@ class BlePeripheral(
                         val session = sessions[device] ?: BleSecureSession(requireNotNull(BleTrust.key(context))).also { sessions[device] = it }
                         when {
                             objectValue.optString("type") == "hello" -> {
+                                ++hotspotEpoch
                                 android.util.Log.i("DroidMirrorNotifications", "Sending authentication challenge")
                                 enqueue(device, session.hello(objectValue).toString().toByteArray())
                             }
                             objectValue.optString("type") == "finish" -> {
                                 session.finish(objectValue)
                                 android.util.Log.i("DroidMirrorNotifications", "BLE notification session authenticated")
-                                enqueue(device, session.seal(JSONObject().put("type", "ready").put("clipboard", 1).put("taskUrls", 1)))
+                                enqueueSecure(device, session, JSONObject().put("type", "ready").put("sessionHealth", 1).put("clipboard", 1).put("clipboardFiles", 1).put("taskUrls", 1).put("linkSharing", 1).put("media", 1)
+                                    .put("hotspot", if (Build.VERSION.SDK_INT >= 30) 1 else 0))
                             }
                             else -> {
                                 val command = session.open(objectValue)
                                 when (command.optString("type")) {
+                                    "hotspotStart" -> {
+                                        val request = command.optString("request")
+                                        require(request.matches(Regex("[A-Za-z0-9-]{1,64}")))
+                                        val epoch = hotspotEpoch
+                                        onHotspotStart({ synchronized(this@BlePeripheral) {
+                                            hotspotEpoch == epoch && sessions[device] === session && session.authenticated
+                                        } }) { status -> synchronized(this@BlePeripheral) {
+                                            // A reply can only return to the original authenticated session.
+                                            if (hotspotEpoch == epoch && sessions[device] === session && session.authenticated) {
+                                                runCatching { enqueueSecure(device, session, JSONObject()
+                                                    .put("type", "hotspotResult").put("request", request).put("status", status)) }
+                                                    .onFailure { revokeSession(device) }
+                                            }
+                                        } }
+                                    }
+                                    "linkSubscribe" -> { linkDevice = device; linkSession = session }
+                                    "shareLinkResult" -> {
+                                        if (device == linkDevice && session === linkSession) {
+                                            onShareLinkResult(command.optString("request"), command.optBoolean("success"))
+                                        }
+                                    }
+                                    "openLink" -> {
+                                        val request = command.optString("request")
+                                        require(runCatching { UUID.fromString(request) }.isSuccess)
+                                        val url = command.optString("url")
+                                        val epoch = hotspotEpoch
+                                        onOpenLink(url, { synchronized(this@BlePeripheral) {
+                                            hotspotEpoch == epoch && sessions[device] === session && session.authenticated
+                                        } }) { success -> synchronized(this@BlePeripheral) {
+                                            if (hotspotEpoch == epoch && sessions[device] === session && session.authenticated) {
+                                                runCatching { enqueueSecure(device, session, JSONObject().put("type", "openLinkResult")
+                                                    .put("request", request).put("success", success)) }
+                                                    .onFailure { revokeSession(device) }
+                                            }
+                                        } }
+                                    }
+                                    "ping" -> {
+                                        val request = command.getString("request")
+                                        require(request.matches(Regex("[A-Za-z0-9-]{1,64}")))
+                                        enqueueSecure(device, session, JSONObject().put("type", "pong").put("request", request))
+                                    }
                                     "get" -> publish(device, command.optLong("request"))
                                     "state" -> onCommand(if (command.optBoolean("connected")) "CONNECTED" else "DISCONNECTED")
                                     "subscribe" -> {
                                         val snapshot = PhoneNotifications.live?.snapshot()
-                                        snapshot?.forEach { enqueue(device, session.seal(it)) }
+                                        snapshot?.forEach { enqueueSecure(device, session, it) }
                                     }
                                     "clipboardSubscribe" -> {
                                         if (command.optBoolean("enabled")) {
                                             // One paired clipboard owner avoids cross-Mac forwarding.
                                             clipboardDevice = device
-                                            onClipboardSubscription(true, ++clipboardGeneration)
+                                            onClipboardSubscription(true, ++clipboardGeneration, command.optBoolean("files"))
                                         } else if (clipboardDevice == device) {
                                             clipboardDevice = null
-                                            onClipboardSubscription(false, ++clipboardGeneration)
+                                            onClipboardSubscription(false, ++clipboardGeneration, false)
                                         }
+                                    }
+                                    "clipboardFileBegin", "clipboardFileChunk", "clipboardFileAck", "clipboardFileCancel" -> {
+                                        if (clipboardDevice == device) onClipboardFile(command)
                                     }
                                     "clipboardSet" -> {
                                         if (clipboardDevice == device) onClipboardText(command.optString("text"))
+                                    }
+                                    "mediaSubscribe" -> {
+                                        if (command.optBoolean("enabled")) {
+                                            mediaDevice = device
+                                            onMediaSubscription(true, ++mediaGeneration)
+                                        } else if (mediaDevice == device) {
+                                            mediaDevice = null
+                                            onMediaSubscription(false, ++mediaGeneration)
+                                        }
+                                    }
+                                    "mediaState", "mediaCommand" -> {
+                                        val generation = mediaGeneration
+                                        if (mediaDevice == device) onMediaEvent(command) {
+                                            synchronized(this@BlePeripheral) {
+                                                mediaGeneration == generation && mediaDevice == device &&
+                                                    sessions[device] === session && session.authenticated
+                                            }
+                                        }
                                     }
                                     "taskSubscribe" -> {
                                         if (command.optBoolean("enabled")) {
@@ -372,12 +493,25 @@ class BlePeripheral(
                                     }
                                     "dismiss" -> {
                                         val success = PhoneNotifications.live?.dismiss(command) == true
-                                        enqueue(device, session.seal(JSONObject().put("type", "dismissResult")
-                                            .put("request", command.optString("request")).put("success", success)))
+                                        enqueueSecure(device, session, JSONObject().put("type", "dismissResult")
+                                            .put("request", command.optString("request")).put("success", success))
                                     }
                                     "action" -> {
-                                        val success = PhoneNotifications.live?.perform(command) == true
-                                        enqueue(device, session.seal(JSONObject().put("type", "actionResult").put("request", command.optString("request")).put("success", success)))
+                                        val listener = PhoneNotifications.live
+                                        if (command.optString("action") == "open" && listener != null) {
+                                            listener.openAfterUnlock(command, { synchronized(this@BlePeripheral) {
+                                                sessions[device] === session && session.authenticated
+                                            } }) { success -> synchronized(this@BlePeripheral) {
+                                                if (sessions[device] === session && session.authenticated) {
+                                                    runCatching { enqueueSecure(device, session, JSONObject().put("type", "actionResult")
+                                                        .put("request", command.optString("request")).put("success", success)) }
+                                                        .onFailure { revokeSession(device) }
+                                                }
+                                            } }
+                                        } else {
+                                            val success = listener?.perform(command) == true
+                                            enqueueSecure(device, session, JSONObject().put("type", "actionResult").put("request", command.optString("request")).put("success", success))
+                                        }
                                     }
                                     else -> error("Invalid command")
                                 }

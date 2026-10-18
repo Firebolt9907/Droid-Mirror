@@ -56,6 +56,9 @@ public class SurfaceEncoder implements AsyncProcessor {
     private int consecutiveErrors;
     private long maxFrameAgeUs;
     private int maxAdaptiveBitRate;
+    private int minAdaptiveBitRate;
+
+    public void setMinAdaptiveBitRate(int value) { minAdaptiveBitRate = value; }
 
     /** Optional ceiling for bandwidth probing on freshness-controlled transports. */
     public void setMaxAdaptiveBitRate(int value) { maxAdaptiveBitRate = value; }
@@ -295,9 +298,11 @@ public class SurfaceEncoder implements AsyncProcessor {
         MediaCodec.BufferInfo bufferInfo = new MediaCodec.BufferInfo();
         FrameFreshness freshness = maxFrameAgeUs > 0 ? new FrameFreshness(maxFrameAgeUs) : null;
         int currentBitRate = videoBitRate;
-        BitrateRecovery bitrateRecovery = freshness != null && maxAdaptiveBitRate > videoBitRate
-                ? new BitrateRecovery(videoBitRate, maxAdaptiveBitRate, 2000000)
-                : new BitrateRecovery(videoBitRate);
+        int ceiling = Math.max(videoBitRate, maxAdaptiveBitRate);
+        long recoveryIntervalUs = ceiling > videoBitRate ? 2000000 : 10000000;
+        BitrateRecovery bitrateRecovery = minAdaptiveBitRate > 0
+                ? new BitrateRecovery(videoBitRate, ceiling, recoveryIntervalUs, Math.min(videoBitRate, minAdaptiveBitRate))
+                : new BitrateRecovery(videoBitRate, ceiling, recoveryIntervalUs);
 
         boolean eos;
         do {
@@ -319,7 +324,7 @@ public class SurfaceEncoder implements AsyncProcessor {
                             parameters.putInt(MediaCodec.PARAMETER_KEY_VIDEO_BITRATE, currentBitRate);
                             parameters.putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0);
                             codec.setParameters(parameters);
-                            Ln.i("Bluetooth video fell behind; requesting current keyframe at " + currentBitRate + " bit/s");
+                            Ln.i("Video fell behind; requesting current keyframe at " + currentBitRate + " bit/s");
                         }
                         if (!send) continue;
                         if (!isConfig) {
@@ -331,7 +336,7 @@ public class SurfaceEncoder implements AsyncProcessor {
                                 parameters.putInt(MediaCodec.PARAMETER_KEY_VIDEO_BITRATE, recovered);
                                 codec.setParameters(parameters);
                                 currentBitRate = recovered;
-                                Ln.i("Bluetooth video " + (backlogged ? "queue building; adjusting to " : "healthy; increasing ")
+                                Ln.i("Video " + (backlogged ? "queue building; adjusting to " : "healthy; increasing ")
                                         + recovered + " bit/s");
                             }
                         }

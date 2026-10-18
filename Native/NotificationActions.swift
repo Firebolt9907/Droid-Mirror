@@ -6,7 +6,7 @@ struct NotificationActionQueue {
     struct Pending {
         let phone: String
         let command: [String: Any]
-        let expires: Date
+        var expires: Date
         var sent = false
         var needsMirror: Bool { command["action"] as? String == "open" }
     }
@@ -32,7 +32,14 @@ struct NotificationActionQueue {
         pending.values.contains { $0.phone == phone && !$0.sent && $0.needsMirror }
     }
 
-    mutating func sent(_ request: String) { pending[request]?.sent = true }
+    mutating func sent(_ request: String, now: Date = Date()) {
+        guard var action = pending[request] else { return }
+        action.sent = true
+        // Android may wait up to 30 seconds for unlock. Connection startup
+        // must not consume that receipt window or cause a premature failure.
+        if action.needsMirror { action.expires = max(action.expires, now.addingTimeInterval(35)) }
+        pending[request] = action
+    }
     @discardableResult mutating func acknowledge(_ request: String) -> Bool {
         pending.removeValue(forKey: request) != nil
     }

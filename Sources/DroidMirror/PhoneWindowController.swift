@@ -88,6 +88,7 @@ private final class PhoneFallbackWindow: NSWindow {
 }
 
 private struct PhoneConnectionView: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @EnvironmentObject private var model: MirrorModel
     var body: some View {
         let appearance = PhoneAppearanceSnapshot(device: model.selectedDevice)
@@ -95,9 +96,12 @@ private struct PhoneConnectionView: View {
             Spacer()
             Image(systemName: "iphone.gen3.radiowaves.left.and.right")
                 .font(.system(size: 42, weight: .light)).foregroundStyle(.secondary)
+                .symbolEffect(.pulse, options: .repeating, isActive: model.isStarting && !reduceMotion)
             Text(model.isStarting ? "Connecting to \(appearance.name ?? model.selectedDevice?.displayName ?? "your phone")…" : model.sessionNoticeTitle).font(.title2.weight(.semibold))
+                .contentTransition(.opacity)
             Text(model.sessionNoticeMessage).font(.callout).foregroundStyle(.secondary)
                 .multilineTextAlignment(.center).lineLimit(10)
+                .contentTransition(.opacity)
             if model.isStarting {
                 ProgressView()
                 Button("Cancel") { model.stop() }
@@ -120,6 +124,8 @@ private struct PhoneConnectionView: View {
             }
         }
         .clipShape(PhoneScreenShape(topRatio: appearance.topRatio, bottomRatio: appearance.bottomRatio))
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.28), value: model.isStarting)
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.28), value: model.sessionNoticeTitle)
         .preferredColorScheme(.dark)
     }
 }

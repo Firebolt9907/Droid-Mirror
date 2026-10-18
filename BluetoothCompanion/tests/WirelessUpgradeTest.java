@@ -94,9 +94,17 @@ public final class WirelessUpgradeTest {
             });
             try { sending.get(30,java.util.concurrent.TimeUnit.MILLISECONDS); throw new AssertionError("Expanded before receiver confirmation"); }
             catch (java.util.concurrent.TimeoutException expected) {}
-            wire.enableWirelessThroughput(); sending.get(2,java.util.concurrent.TimeUnit.SECONDS);
+            wire.enableWirelessThroughput();
+            long deadline=System.nanoTime()+2_000_000_000L;
+            while (!sending.isDone() && System.nanoTime()<deadline) {
+                Thread.sleep(5);
+                long inFlight=window.inFlightBytes();
+                check(inFlight<=VideoWindow.WIRELESS_WINDOW_BYTES);
+                window.acknowledge(window.acknowledgedBytes()+inFlight);
+            }
+            sending.get(2,java.util.concurrent.TimeUnit.SECONDS);
             long sent = BluetoothWire.VIDEO_WINDOW_BYTES + largeFrame.length;
-            check(window.inFlightBytes()==sent);
+            check(window.acknowledgedBytes()+window.inFlightBytes()==sent);
             window.acknowledge(sent); check(window.inFlightBytes()==0);
             try { window.acknowledge(sent+1); throw new AssertionError(); } catch (IOException expected) {}
             check(Arrays.equals(largeFrame,decode(wifi.toByteArray(),40)));

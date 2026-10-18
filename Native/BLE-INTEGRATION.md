@@ -183,7 +183,7 @@ of that final layout remains limited by a Bluetooth authentication reconnect sta
 The prior Mac bridge's `dev.bleadb.bridge.macos` / `tailscaleIP` preference is
 imported on first use. DroidMirror stores its own copy under `DroidMirror.BLE.host`.
 If no address is saved, it learns `ip` from Android. Use the DroidMirror menu's
-**Wireless ADB over Bluetooth** submenu to change the address, check status, or
+**Background Bluetooth** submenu to change the address, check status, or
 disable discovery. Quit the separate BLEADBBridge Mac app to avoid competing
 Bluetooth clients. Discovery continues in the helper when the mirroring host quits.
 
@@ -200,16 +200,17 @@ The Android companion's stock-Android Wi-Fi and ADB authorization requirements
 remain unchanged. This integration does not bypass pairing or enable cellular-only
 Wireless Debugging.
 
-Build the integrated library:
+Build the integrated app after ending active mirror sessions and quitting the app
+and its background helper. The build stages and signs the complete bundle:
 
 ```sh
-xcrun swiftc -module-cache-path /private/tmp/droidmirror-swift-module-cache -emit-library -module-name DroidMirrorBLE -target arm64-apple-macosx14.0 -framework AppKit -framework CoreBluetooth -framework UserNotifications -framework Security Native/NotificationRuntime.swift Native/NotificationPresentationPolicy.swift Native/NotificationDismissal.swift Native/NotificationIconAttachment.swift Native/NotificationCommunicationContent.swift Native/BLEController.swift Native/BLEIntegration.swift Native/BLEMenu.swift Native/DiscoveryNotifications.swift Native/BLESecurity.swift Native/AndroidNotificationBridge.swift -o outputs/DroidMirror.app/Contents/Frameworks/libDroidMirrorBLE.dylib
+./build-app.sh
 ```
 
 Run the no-device subprocess tests:
 
 ```sh
-xcrun swiftc -module-cache-path /private/tmp/droidmirror-swift-module-cache -target arm64-apple-macosx14.0 -framework AppKit -framework CoreBluetooth Native/NotificationRuntime.swift Native/BLESecurity.swift Native/BLEController.swift Native/BLEProcessTests.swift -o /private/tmp/droidmirror-ble-tests
+xcrun swiftc -module-cache-path /private/tmp/droidmirror-swift-module-cache -target arm64-apple-macosx14.0 -framework AppKit -framework CoreBluetooth Native/NotificationRuntime.swift Native/BLESecurity.swift Native/BLESession.swift Native/BLEController.swift Native/BLEProcessTests.swift -o /private/tmp/droidmirror-ble-tests
 /private/tmp/droidmirror-ble-tests
 ```
 
@@ -218,3 +219,65 @@ notification subscription changes. The Mac toggles a cached subscription off
 before enabling it again. This lets the UI-less receiver authenticate anew when
 Android replaces its GATT server or the helper restarts while another Bluetooth
 service keeps the physical link alive.
+
+## Idle BLE session interface
+
+Core Bluetooth may retain duplicate notification service UUIDs after Android
+replaces a GATT server. On October 18, the Mac repeatedly wrote handle `0x00b2`
+(ATT write-not-permitted), while Android's live characteristic was `0x00a8`.
+Reconnecting selected the same cached service and never completed authentication.
+The receiver now tries each distinct service object once before reconnecting,
+clearing subscription state, fragment queues and security state for each attempt.
+Callbacks for a previously selected characteristic or service are ignored. Every
+replacement candidate must complete the existing authenticated handshake; queued
+commands are not replayed across candidates. This addresses stale service selection
+without assuming that Classic/LE coexistence itself proves a transport failure.
+
+The **Background Bluetooth** menu controls the authenticated background session
+used by notifications, clipboard, links, media, task continuation, and hotspot
+commands. **Automatically connect Wireless ADB** is a separate, default-off
+option; saving the phone address does not restart the BLE session. BLE connection
+status and legacy ADB status are reported separately.
+
+Companions advertising `sessionHealth: 1` in the encrypted `ready` message support
+an encrypted `ping` / `pong` exchange, correlated by request UUID. Idle operation
+requires neither an ADB endpoint nor an ADB process. Older companions retain the
+endpoint-request health fallback, but endpoint errors do not mark BLE offline.
+The existing 10-second maintenance tick enforces handshake, request and stalled
+write deadlines. A 12-second heartbeat deadline is checked on that tick, so a
+missing response is normally detected within roughly 12–24 seconds.
+
+`BLEController.request(_:expecting:timeout:id:completion:)` reports a matching
+application response, timeout, session loss, or queue rejection. ATT write
+acknowledgments are not application success. Deadlines use monotonic uptime and
+include queue time. Requests are not retried across sessions: callers must decide
+whether retrying an operation is safe. Link sharing uses this API; existing
+notification and hotspot policies keep their feature-specific correlation.
+
+Both peers bound outbound queues and schedule plaintext messages before sealing.
+Health probes/replies take priority over waiting messages.
+Up to four control messages may pass waiting file chunks before a chunk gets a
+turn. Each encrypted message's fragments finish before the next message starts,
+keeping directional sequence and reassembly checks intact. Notification snapshots,
+updates and removals retain FIFO order. Queued messages expire after 60 seconds
+(or the request's earlier deadline on Mac). An already-started message cannot be
+retracted; a timeout can mean that an action ran but its confirmation was lost.
+
+Session reset invalidates outstanding requests and clears clipboard transfers,
+media proxies, continuation UI and pending hotspot/link actions immediately.
+After service invalidation, the controller discards GATT handles and security
+state, rediscovers, mutually authenticates with fresh session keys, and restores
+feature subscriptions. These changes do not make replacing the mirroring input
+service during an active mirror seamless; updates must still end that session
+gracefully before replacement.
+
+Validation:
+
+```sh
+bash Native/test-ble-session.sh
+# Build the companion first so these tests use current Android Kotlin classes.
+bash Native/test-integrated-ble.sh
+```
+
+Physical-device checks remain necessary for a locked phone, Bluetooth off/on,
+companion update/restart, and simultaneous mirroring/file/control traffic.

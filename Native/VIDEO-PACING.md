@@ -29,3 +29,28 @@ while keeping the buffer fixed to isolate renderer overhead. Live smoothness
 has not been measured by the preference/build checks.
 
 Upstream reference: [video buffering](https://github.com/Genymobile/scrcpy/blob/master/doc/video.md#buffering).
+
+## Recovery from seconds of video backlog
+
+The hybrid Wi-Fi profile previously reset `maxFrameAgeUs` to zero, disabling
+the stale-frame guard after upgrading from Classic. Both hybrid profiles now
+discard encoder output older than 500 ms and resume only on a current keyframe.
+Keyframe requests retry at most once per 500 ms while waiting: an IDR requested
+behind a blocked output pipe can itself be stale when dequeued.
+
+The hybrid encoder can adapt down to 64 kbps on either transport. Previously
+Wi-Fi had no freshness-based bitrate feedback; simply enabling it with the
+old half-target floor would still leave a 12 Mbps profile stuck above 6 Mbps
+on a slow link. Quality recovers toward the requested profile after ten seconds
+of continuous healthy encoder output. The playback buffer preference is unchanged.
+
+`DroidMirrorPerformance` logs now include `maxCaptureAgeMs`, measured after
+sending each complete video packet from the Android relay. This includes encoder,
+pipe and sender backpressure, but excludes subsequent Mac decoding/presentation.
+The 500 ms guard is not an end-to-end latency guarantee: a packet already being
+sent must finish to preserve framing and authenticated transport replay offsets.
+
+`bash Native/test-wireless-upgrade.sh` covers a synthetic five-second encoder
+backlog, stale IDR retries, reference-safe recovery, Wi-Fi bitrate contraction
+below half its target, and authenticated handoff/fallback continuity. Phone-screen
+comparison is still required to establish displayed latency.

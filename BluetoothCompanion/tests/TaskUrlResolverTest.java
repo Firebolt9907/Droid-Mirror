@@ -8,6 +8,12 @@ public final class TaskUrlResolverTest {
         if (!java.util.Objects.equals(expected, actual)) throw new AssertionError("Unexpected resolution");
     }
     public static void main(String[] args) {
+        String docUrl = TaskUrlResolver.resolve(DOCS, EDITOR, VIEW, "content://uniqueId/abcdefghij_123");
+        equal("https://example.com/current", TaskUrlResolver.currentUrl("https://example.com/current", "https://example.com/old", "https://example.com/old"));
+        equal(null, TaskUrlResolver.currentUrl(null, "https://example.com/old", "https://example.com/old"));
+        equal(null, TaskUrlResolver.currentUrl("javascript:alert(1)", null, null));
+        equal(docUrl, TaskUrlResolver.currentUrl(null, "content://uniqueId/abcdefghij_123", docUrl));
+        equal(null, TaskUrlResolver.currentUrl(null, "content://uniqueId/abcdefghij_123", null));
         equal("https://docs.google.com/document/d/abcdefghij_123/edit",
                 TaskUrlResolver.resolve(DOCS, EDITOR, VIEW, "content://uniqueId/abcdefghij_123"));
         equal("https://example.com/document?a=1#section", TaskUrlResolver.resolve("app.other", "Editor", VIEW, "https://example.com/document?a=1#section"));

@@ -9,11 +9,21 @@ final class BLEController: NSObject, ObservableObject {
     private static let inputServiceID = CBUUID(string: "C356A44E-6F2B-4DA9-85E5-397991B8A610")
     var onEvent: (([String: Any]) -> Void)?
     var onAuthenticated: (() -> Void)?
+    var onDisconnected: (() -> Void)?
+    private let requests = BLERequests()
+    private var outbound = BLEOutboundQueue()
+    private var supportsSessionHealth = false
+    private var heartbeatPending = false
+    private var writeStartedAt: TimeInterval?
+    // ADB is an explicit legacy action, independent of the idle BLE session.
+    static let automaticADBKey = "DroidMirror.BLE.automaticADB"
+    private var wantsADB = false
+    private var uptime: TimeInterval { ProcessInfo.processInfo.systemUptime }
     private var receivedFrames = 0
     private var assembledMessages = 0
     private var staleFrames = 0
     private var acknowledgedWrites = 0
-    var diagnostics: String { "rx=\(receivedFrames) assembled=\(assembledMessages) stale=\(staleFrames) written=\(acknowledgedWrites) queued=\(writes.count)" }
+    var diagnostics: String { "rx=\(receivedFrames) assembled=\(assembledMessages) stale=\(staleFrames) written=\(acknowledgedWrites) queued=\(writes.count) messages=\(outbound.count) requests=\(requests.count)" }
     private var session: BLESecureSession?
     private var fragments = BLEFragments()
     private var writes = [Data]()
@@ -21,7 +31,11 @@ final class BLEController: NSObject, ObservableObject {
     private var messageID: UInt32 = 1
     private var rejectedPeers = [UUID: Date]()
     private(set) var supportsClipboard = false
+    private(set) var supportsClipboardFiles = false
+    private(set) var supportsMedia = false
     private(set) var supportsTaskURLs = false
+    private(set) var supportsHotspot = false
+    private(set) var supportsLinkSharing = false
     var authenticated: Bool { session?.authenticated == true }
 
     @Published var status = "Starting Bluetooth…"
@@ -29,6 +43,7 @@ final class BLEController: NSObject, ObservableObject {
         didSet { NotificationRuntime.preferences.set(tailscaleIP, forKey: Self.savedIPKey) }
     }
     @Published var port: Int?
+    @Published var adbStatus = "Wireless ADB off"
     @Published var adbOutput = ""
     @Published var isADBConnected = false
     @Published var lastEndpointReceived: Date?
@@ -36,6 +51,7 @@ final class BLEController: NSObject, ObservableObject {
     private var central: CBCentralManager!
     private var phone: CBPeripheral?
     private var endpointCharacteristic: CBCharacteristic?
+    private var serviceCandidates = BLEServiceCandidates<CBService>()
     private var adbTaskRunning = false
     private var connectedEndpoint: String?
     private var healthTimer: DispatchSourceTimer?
@@ -52,6 +68,8 @@ final class BLEController: NSObject, ObservableObject {
     override init() {
         tailscaleIP = NotificationRuntime.preferences.string(forKey: Self.savedIPKey)
             ?? UserDefaults(suiteName: "dev.bleadb.bridge.macos")?.string(forKey: "tailscaleIP") ?? ""
+        wantsADB = NotificationRuntime.preferences.bool(forKey: Self.automaticADBKey)
+        if wantsADB { adbStatus = "Waiting for Android endpoint…" }
         super.init()
         if !tailscaleIP.isEmpty { NotificationRuntime.preferences.set(tailscaleIP, forKey: Self.savedIPKey) }
         central = CBCentralManager(delegate: self, queue: nil)
@@ -88,6 +106,7 @@ final class BLEController: NSObject, ObservableObject {
 
     private func connect(_ peripheral: CBPeripheral) {
         central.stopScan()
+        serviceCandidates.reset()
         phone = peripheral
         bleAttemptStartedAt = Date()
         lastEndpointResponseAt = nil
@@ -112,10 +131,18 @@ final class BLEController: NSObject, ObservableObject {
         send(["type": "get", "request": requestID])
     }
 
+    func configureADB() {
+        tailscaleIP = NotificationRuntime.preferences.string(forKey: Self.savedIPKey) ?? ""
+        wantsADB = NotificationRuntime.preferences.bool(forKey: Self.automaticADBKey)
+        if wantsADB { requestEndpoint(); connectADB(force: true) }
+        else { pendingADBConnect = false; adbStatus = "Wireless ADB off" }
+    }
+
     func connectADB(force: Bool = false) {
         guard !stopped else { return }
+        wantsADB = true
         guard let port, !tailscaleIP.trimmingCharacters(in: .whitespaces).isEmpty else {
-            status = port == nil ? "Waiting for Android endpoint…" : "Enter the fixed Tailscale IP"
+            adbStatus = port == nil ? "Waiting for Android endpoint…" : "Enter the fixed Tailscale IP"
             return
         }
         let endpoint = "\(tailscaleIP.trimmingCharacters(in: .whitespaces)):\(port)"
@@ -125,14 +152,14 @@ final class BLEController: NSObject, ObservableObject {
         }
         if !force, isADBConnected, connectedEndpoint == endpoint { return }
         guard let adb = Self.findADB() else {
-            status = "adb not found"
+            adbStatus = "adb not found"
             adbOutput = "Install Android platform-tools or place adb in PATH."
             return
         }
         adbTaskRunning = true
         pendingADBConnect = false
         isADBConnected = false
-        status = "Connecting ADB to \(endpoint)…"
+        adbStatus = "Connecting ADB to \(endpoint)…"
         DispatchQueue.global(qos: .userInitiated).async {
             let task = Process()
             task.executableURL = adb
@@ -141,14 +168,15 @@ final class BLEController: NSObject, ObservableObject {
                 let text = try Self.runBounded(task, timeout: 10)
                 DispatchQueue.main.async {
                     guard !self.stopped else { return }
-                    self.adbOutput = text
                     self.adbTaskRunning = false
+                    guard self.wantsADB else { return }
+                    self.adbOutput = text
                     let lower = text.lowercased()
                     let connected = task.terminationStatus == 0 &&
                         (lower.contains("connected to ") || lower.contains("already connected to "))
                     self.isADBConnected = connected
                     self.connectedEndpoint = connected ? endpoint : nil
-                    self.status = connected ? "Connected to \(endpoint)" : "Unable to connect"
+                    self.adbStatus = connected ? "Connected to \(endpoint)" : "Unable to connect"
                     self.reportADBState(connected)
                     if self.pendingADBConnect || self.desiredEndpoint() != endpoint {
                         self.pendingADBConnect = false
@@ -159,10 +187,11 @@ final class BLEController: NSObject, ObservableObject {
                 DispatchQueue.main.async {
                     guard !self.stopped else { return }
                     self.adbTaskRunning = false
+                    guard self.wantsADB else { return }
                     self.isADBConnected = false
                     self.connectedEndpoint = nil
                     self.adbOutput = error.localizedDescription
-                    self.status = "Could not launch adb"
+                    self.adbStatus = "Could not launch adb"
                     self.reportADBState(false)
                     if self.pendingADBConnect {
                         self.pendingADBConnect = false
@@ -203,8 +232,14 @@ final class BLEController: NSObject, ObservableObject {
 
     private func maintainBLESession() {
         guard !stopped else { return }
+        requests.expire(now: uptime)
         guard let phone else {
             scan()
+            return
+        }
+
+        if let started = writeStartedAt, uptime - started > 15 {
+            rebuildBLESession(phone)
             return
         }
 
@@ -223,22 +258,54 @@ final class BLEController: NSObject, ObservableObject {
             return
         }
 
-        requestEndpoint()
+        if wantsADB { requestEndpoint() }
+        if authenticated && supportsSessionHealth {
+            guard !heartbeatPending else { return }
+            heartbeatPending = true
+            request(["type": "ping"], expecting: "pong", timeout: 12) { [weak self] outcome in
+                guard let self else { return }
+                self.heartbeatPending = false
+                if case .timedOut = outcome, let current = self.phone { self.rebuildBLESession(current) }
+            }
+        } else {
+            // Older companions answer endpoint requests even without an ADB endpoint.
+            requestEndpoint()
+        }
     }
 
     private func rebuildBLESession(_ peripheral: CBPeripheral) {
-        resetSecurity()
+        // A reconnect otherwise selects the same stale cached service forever.
+        // Each candidate gets a fresh handshake, queues and sequence counters.
+        if !stopped, phone === peripheral, serviceCandidates.current != nil,
+           tryNextService(peripheral) { return }
         status = "Refreshing Bluetooth connection…"
+        serviceCandidates.reset()
         endpointCharacteristic = nil
         phone = nil
         bleAttemptStartedAt = nil
         lastEndpointResponseAt = nil
         pendingRequestID = nil
         pendingRequestStartedAt = nil
+        resetSecurity()
         central.cancelPeripheralConnection(peripheral)
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
             self?.scan()
         }
+    }
+
+    @discardableResult
+    private func tryNextService(_ peripheral: CBPeripheral) -> Bool {
+        let previous = endpointCharacteristic
+        endpointCharacteristic = nil
+        pendingRequestID = nil; pendingRequestStartedAt = nil
+        lastEndpointResponseAt = nil
+        resetSecurity()
+        if let previous, previous.isNotifying { peripheral.setNotifyValue(false, for: previous) }
+        guard let service = serviceCandidates.next() else { return false }
+        bleAttemptStartedAt = Date()
+        status = "Discovering notification characteristic…"
+        peripheral.discoverCharacteristics([Self.endpointID], for: service)
+        return true
     }
 
     private func desiredEndpoint() -> String? {
@@ -248,7 +315,7 @@ final class BLEController: NSObject, ObservableObject {
     }
 
     private func pollADBState() {
-        guard !stopped, isADBConnected,
+        guard !stopped, wantsADB, isADBConnected,
               !adbTaskRunning,
               let endpoint = connectedEndpoint,
               let adb = Self.findADB()
@@ -263,6 +330,7 @@ final class BLEController: NSObject, ObservableObject {
             DispatchQueue.main.async {
                 guard let self, !self.stopped else { return }
                 self.adbTaskRunning = false
+                guard self.wantsADB else { return }
                 if self.pendingADBConnect {
                     self.pendingADBConnect = false
                     self.connectADB(force: true)
@@ -271,7 +339,7 @@ final class BLEController: NSObject, ObservableObject {
                 guard output != "device" else { return }
                 self.isADBConnected = false
                 self.connectedEndpoint = nil
-                self.status = "Phone offline — waiting for Android"
+                self.adbStatus = "Phone offline — waiting for Android"
                 self.adbOutput = output
                 self.reportADBState(false)
                 self.connectADB(force: true)
@@ -311,6 +379,7 @@ final class BLEController: NSObject, ObservableObject {
 
     func stop() {
         stopped = true
+        resetSecurity()
         healthTimer?.cancel()
         endpointTimer?.cancel()
         reportADBState(false)
@@ -318,13 +387,14 @@ final class BLEController: NSObject, ObservableObject {
         if let phone { central.cancelPeripheralConnection(phone) }
         phone = nil
         endpointCharacteristic = nil
+        serviceCandidates.reset()
     }
 
     private func accept(_ data: Data) {
         guard !stopped else { return }
         do {
             let object = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-            guard let object else { status = "Invalid Android response"; return }
+            guard let object else { adbStatus = "Invalid Android endpoint response"; return }
             // Ignore delayed replies from a previous request, but accept pushed updates.
             if let request = object["request"] as? UInt64,
                let pendingRequestID, request != pendingRequestID { return }
@@ -337,11 +407,11 @@ final class BLEController: NSObject, ObservableObject {
                 port = nil
                 isADBConnected = false
                 connectedEndpoint = nil
-                status = "Android: \(error)"
+                if wantsADB { adbStatus = "Android: \(error)" }
                 return
             }
             guard let newPort = object["port"] as? Int, (1...65_535).contains(newPort) else {
-                status = "Android sent an invalid response"
+                adbStatus = "Android sent an invalid endpoint response"
                 return
             }
             let changed = port != nil && port != newPort
@@ -353,10 +423,9 @@ final class BLEController: NSObject, ObservableObject {
             // Tailscale addresses are stable. Learn it once, then preserve the
             // user's saved value instead of replacing it on every BLE response.
             if tailscaleIP.isEmpty, let ip = object["ip"] as? String { tailscaleIP = ip }
-            status = "Endpoint available"
-            connectADB(force: changed)
+            if wantsADB { connectADB(force: changed) }
         } catch {
-            status = "Could not decode Android response"
+            adbStatus = "Could not decode Android endpoint response"
         }
     }
 
@@ -364,11 +433,42 @@ final class BLEController: NSObject, ObservableObject {
         send(["type": "state", "connected": connected])
     }
 
-    private func resetSecurity() { supportsClipboard = false; supportsTaskURLs = false; session = nil; fragments = BLEFragments(); writes.removeAll(); writing = false }
+    private func resetSecurity() {
+        let hadSession = session != nil
+        supportsLinkSharing = false; supportsMedia = false; supportsClipboard = false
+        supportsClipboardFiles = false; supportsTaskURLs = false; supportsHotspot = false
+        supportsSessionHealth = false; heartbeatPending = false
+        session = nil; fragments = BLEFragments(); writes.removeAll(); outbound.reset()
+        writing = false; writeStartedAt = nil
+        requests.reset()
+        if hadSession { onDisconnected?() }
+    }
+
+    /// True means accepted into the bounded queue, not performed on the phone.
     @discardableResult func send(_ object: [String: Any]) -> Bool {
-        guard authenticated, let session else { return false }
-        do { try queue(session.seal(object)); return true }
-        catch { if let phone { rebuildBLESession(phone) }; return false }
+        enqueue(object, deadline: uptime + 60)
+    }
+    private func enqueue(_ object: [String: Any], deadline: TimeInterval) -> Bool {
+        guard !stopped, authenticated, endpointCharacteristic != nil,
+              outbound.append(object, deadline: deadline) else { return false }
+        drain()
+        return true
+    }
+
+    /// Replies are correlated by UUID and type. No automatic retry of side effects.
+    @discardableResult func request(_ object: [String: Any], expecting reply: String,
+                                   timeout: TimeInterval = 15, id: String = UUID().uuidString,
+                                   completion: @escaping (BLERequestOutcome) -> Void) -> String? {
+        guard !stopped, authenticated, timeout.isFinite, timeout > 0 else { completion(.notQueued); return nil }
+        let deadline = uptime + timeout
+        guard requests.add(id: id, reply: reply, deadline: deadline, completion: completion) else {
+            completion(.notQueued); return nil
+        }
+        var command = object; command["request"] = id
+        guard enqueue(command, deadline: deadline) else {
+            requests.finish(id, outcome: .notQueued); return nil
+        }
+        return id
     }
     private func queue(_ value: Data) throws {
         guard let phone, endpointCharacteristic != nil else { throw BLECryptoError.invalid }
@@ -379,8 +479,15 @@ final class BLEController: NSObject, ObservableObject {
         messageID &+= 1; writes.append(contentsOf: frames); drain()
     }
     private func drain() {
-        guard !writing, !writes.isEmpty, let phone, let endpointCharacteristic else { return }
+        guard !writing, let phone, let endpointCharacteristic else { return }
+        if writes.isEmpty {
+            guard authenticated, let session, let message = outbound.next(now: uptime) else { return }
+            do { try queue(session.seal(message.object)) }
+            catch { rebuildBLESession(phone) }
+            return
+        }
         writing = true
+        writeStartedAt = uptime
         phone.writeValue(writes.removeFirst(), for: endpointCharacteristic, type: .withResponse)
     }
     private func receive(_ value: Data) {
@@ -394,13 +501,21 @@ final class BLEController: NSObject, ObservableObject {
             }
             let plain = try session.open(object)
             lastEndpointResponseAt = Date()
+            requests.receive(plain, now: uptime)
             switch plain["type"] as? String {
             case "ready":
+                supportsSessionHealth = plain["sessionHealth"] as? Int == 1
                 supportsClipboard = plain["clipboard"] as? Int == 1
+                supportsClipboardFiles = plain["clipboardFiles"] as? Int == 1
+                supportsMedia = plain["media"] as? Int == 1
                 supportsTaskURLs = plain["taskUrls"] as? Int == 1
+                supportsHotspot = plain["hotspot"] as? Int == 1
+                supportsLinkSharing = plain["linkSharing"] as? Int == 1
                 status = "Authenticated phone connected"
-                requestEndpoint(); send(["type": "subscribe"]); onAuthenticated?()
-            case "notification", "removed", "actionResult", "dismissResult", "minimizeMirror", "clipboard", "clipboardStatus", "clipboardResult", "taskContinuation": onEvent?(plain)
+                if wantsADB || !supportsSessionHealth { requestEndpoint() }
+                send(["type": "subscribe"]); onAuthenticated?()
+            case "pong": break
+            case "shareLink", "openLinkResult", "mediaState", "mediaCommand", "mediaStatus", "notification", "removed", "actionResult", "dismissResult", "minimizeMirror", "clipboard", "clipboardStatus", "clipboardResult", "clipboardFileBegin", "clipboardFileChunk", "clipboardFileAck", "clipboardFileCancel", "taskContinuation", "hotspotResult": onEvent?(plain)
             default: accept(try JSONSerialization.data(withJSONObject: plain))
             }
         } catch {
@@ -413,6 +528,14 @@ final class BLEController: NSObject, ObservableObject {
 
 extension BLEController: CBCentralManagerDelegate {
     func centralManagerDidUpdateState(_ central: CBCentralManager) {
+        guard !stopped else { return }
+        if central.state != .poweredOn {
+            serviceCandidates.reset()
+            phone = nil; endpointCharacteristic = nil
+            bleAttemptStartedAt = nil; lastEndpointResponseAt = nil
+            pendingRequestID = nil; pendingRequestStartedAt = nil
+            resetSecurity()
+        }
         switch central.state {
         case .poweredOn:
             status = "Bluetooth ready"
@@ -447,6 +570,8 @@ extension BLEController: CBCentralManagerDelegate {
         error: Error?
     ) {
         guard phone?.identifier == peripheral.identifier else { return }
+        serviceCandidates.reset()
+        resetSecurity()
         status = error?.localizedDescription ?? "Connection failed"
         if phone?.identifier == peripheral.identifier { phone = nil }
         endpointCharacteristic = nil
@@ -463,44 +588,47 @@ extension BLEController: CBCentralManagerDelegate {
         error: Error?
     ) {
         guard phone?.identifier == peripheral.identifier else { return }
-        resetSecurity()
+        serviceCandidates.reset()
         phone = nil
         endpointCharacteristic = nil
         bleAttemptStartedAt = nil
         lastEndpointResponseAt = nil
         pendingRequestID = nil
         pendingRequestStartedAt = nil
-        if !isADBConnected { status = "Looking for Android over BLE…" }
+        status = "Looking for Android over BLE…"
+        resetSecurity()
         scan()
     }
 }
 
 extension BLEController: CBPeripheralDelegate {
     func peripheral(_ peripheral: CBPeripheral, didModifyServices invalidatedServices: [CBService]) {
-        guard phone?.identifier == peripheral.identifier,
+        guard !stopped, phone?.identifier == peripheral.identifier,
               invalidatedServices.contains(where: { $0.uuid == Self.serviceID }) else { return }
         // Companion updates/restarts replace GATT handles while the input
         // connection can remain alive. Never keep writing to stale handles.
-        resetSecurity()
+        status = "Rediscovering Bluetooth services…"
         endpointCharacteristic = nil
         pendingRequestID = nil
         pendingRequestStartedAt = nil
         lastEndpointResponseAt = nil
         bleAttemptStartedAt = Date()
+        resetSecurity()
+        serviceCandidates.reset()
         peripheral.discoverServices([Self.serviceID])
     }
     func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
         guard phone?.identifier == peripheral.identifier, !stopped else { return }
-        guard error == nil,
-              let service = peripheral.services?.first(where: { $0.uuid == Self.serviceID })
+        let services = peripheral.services?.filter { $0.uuid == Self.serviceID } ?? []
+        guard error == nil, !services.isEmpty
         else {
             status = error?.localizedDescription ?? "BLE service was not found"
             rejectedPeers[peripheral.identifier] = Date().addingTimeInterval(30)
             rebuildBLESession(peripheral)
             return
         }
-        status = "Discovering notification characteristic…"
-        peripheral.discoverCharacteristics([Self.endpointID], for: service)
+        serviceCandidates.reset(services)
+        tryNextService(peripheral)
     }
 
     func peripheral(
@@ -508,7 +636,8 @@ extension BLEController: CBPeripheralDelegate {
         didDiscoverCharacteristicsFor service: CBService,
         error: Error?
     ) {
-        guard phone?.identifier == peripheral.identifier, !stopped else { return }
+        guard phone?.identifier == peripheral.identifier, !stopped,
+              service === serviceCandidates.current else { return }
         guard error == nil,
               let item = service.characteristics?.first(where: { $0.uuid == Self.endpointID })
         else {
@@ -528,13 +657,14 @@ extension BLEController: CBPeripheralDelegate {
     func peripheral(_ peripheral: CBPeripheral, didWriteValueFor characteristic: CBCharacteristic, error: Error?) {
         guard phone?.identifier == peripheral.identifier, characteristic === endpointCharacteristic, !stopped else { return }
         if let error {
+            NSLog("DroidMirror BLE write failed: %@", error.localizedDescription)
             status = error.localizedDescription
             rebuildBLESession(peripheral)
             return
         }
         acknowledgedWrites += 1
         if !authenticated { status = "Waiting for phone authentication response…" }
-        writing = false; drain()
+        writing = false; writeStartedAt = nil; drain()
     }
 
     func peripheral(

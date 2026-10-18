@@ -1,13 +1,31 @@
 # Android 17 App Tasks / Continue On investigation
 
+Actual Gmail draft handoff payload extraction was investigated separately in
+[HANDOFF-PAYLOAD.md](HANDOFF-PAYLOAD.md). The tested secure shell-peer transport
+failed attestation; no draft fallback URL was retrieved. Gmail's handoff
+eligibility should not be presented as working web continuation.
+
 ## Implemented task URL continuation
 
 The Android background bridge now starts a separate Shizuku `TaskUrlBridgeService`
 only while an authenticated Mac subscribes using `taskSubscribe`. It reads the
 top task on the phone's default display using structured `getTasks` every two
-seconds. `TaskUrlResolver` accepts HTTP/HTTPS VIEW intents or the tested Google
-Docs editor's `content://uniqueId/DOCUMENT_ID` format. Unsupported tasks and
-lookup failures send a clear event. No URLs are persisted or logged.
+seconds. It requests `AssistContent` for that task, with screenshots and view
+structure capture disabled, and accepts only a validated HTTP/HTTPS web URI
+explicitly supplied by the app. This reads current content rather than assuming
+the launch intent tracks browser navigation. Chrome and Tangent Browser both
+returned current-page URLs in live tests; Docs supplied its own document URL,
+including a document-tab parameter. Other cooperating apps work without a new
+package-specific rule. Unsupported tasks and lookup failures send a clear event.
+No URLs are persisted or logged.
+
+If assist content has no usable URL, the tested Google Docs
+`content://uniqueId/DOCUMENT_ID` conversion remains available. Generic HTTP/HTTPS
+launch URLs are no longer a fallback: a browser can retain the initial URL after
+navigation or a switch to private content. Each assist request has its own
+receiver and a 1.5-second timeout; replies arriving after the deadline are
+discarded. The top task ID and activity are checked again before publishing a
+result, so switching apps during a lookup cannot publish the previous task.
 
 Events use the existing encrypted, sequence-checked BLE session and are scoped
 to the subscribing device and subscription generation. Old peers that do not
@@ -18,9 +36,10 @@ the default browser. No URL goes through distributed process notifications.
 Suggestions clear on unsupported tasks, lost authentication, receiver shutdown,
 or eight seconds without a refreshed event. This works between mirror sessions.
 
-This is task-intent URL discovery, not full Continue On payload extraction. It
-does not read arbitrary intent extras, browser tab contents, document positions,
-or login credentials. Launcher intents with no URL produce no suggestion.
+This is assist-content and task-intent URL discovery, not full Continue On
+payload extraction. It reads the app-published web URI, not screenshot pixels,
+page bodies, arbitrary intent extras, or login credentials. Apps that do not
+publish a URL or support the Docs conversion produce no suggestion.
 App-specific URI mappings and hidden task APIs may need maintenance. The base
 intent can be stale if an app changes content without updating it; document
 switching was verified for Docs' separate-task path only.
@@ -28,7 +47,10 @@ switching was verified for Docs' separate-task path only.
 Validation: `bash Native/test-task-continuation.sh` covers URL rules, malformed
 metadata, authentication, expiration and clearing, plus the status item's button
 and browser action. The production `TaskUrlReader` was also compiled to DEX and
-run read-only through ADB against the open document, returning the expected URL.
+run read-only through ADB against Docs and Tangent, returning their current URLs.
+The permission-checked assist lookup also returned Chrome's current URL. URL
+policy tests cover preferring a fresh assist URL, rejecting a stale browser launch
+URL when no live URL exists, unsafe URIs, and retaining the Docs conversion.
 Full live BLE + Shizuku behavior requires installing matching builds. End active
 mirror sessions gracefully before either app is updated.
 

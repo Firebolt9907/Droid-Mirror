@@ -17,6 +17,8 @@ classpath="$task_build:$classes:$stdlib:$json"
   "$root/Native/tests/BLESecurityPeer.java"
 "$task_java/bin/javac" -cp "$classpath" -d "$task_build" "$root/BluetoothCompanion/tests/ConversationPayloadTest.java"
 "$task_java/bin/java" -cp "$classpath" ConversationPayloadTest
+"$task_java/bin/javac" -cp "$classpath" -d "$task_build" "$root/BluetoothCompanion/tests/BleOutboundQueueTest.java"
+"$task_java/bin/java" -cp "$classpath" BleOutboundQueueTest
 "$task_java/bin/javac" -d "$task_build" \
   "$root/BluetoothCompanion/tests/stubs/android/content/Context.java" \
   "$root/BluetoothCompanion/tests/stubs/android/content/SharedPreferences.java" \
@@ -31,6 +33,6 @@ classpath="$task_build:$classes:$stdlib:$json"
 clang -I"$root/Native" "$root/Native/BleInputCrypto.c" "$root/Native/BleInputCryptoTests.c" -o "$task_build/input-crypto-tests"
 "$task_build/input-crypto-tests"
 xcrun swiftc -module-cache-path /private/tmp/droidmirror-swift-module-cache \
-  "$root/Native/BLESecurity.swift" "$root/Native/BLESecurityTests.swift" \
+  "$root/Native/BLESession.swift" "$root/Native/BLESecurity.swift" "$root/Native/BLESecurityTests.swift" \
   -o "$task_build/security-tests"
 "$task_build/security-tests" "$task_java/bin/java" "$classpath"

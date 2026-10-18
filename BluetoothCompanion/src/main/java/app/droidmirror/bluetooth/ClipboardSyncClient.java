@@ -19,6 +19,8 @@ public final class ClipboardSyncClient implements AutoCloseable {
     private final ScheduledExecutorService work = Executors.newSingleThreadScheduledExecutor();
     private final Consumer<JSONObject> events;
     private final Shizuku.UserServiceArgs args;
+    private final ClipboardFileTransfer files;
+    private final boolean filesEnabled;
     private volatile IClipboardBridge remote;
     private volatile boolean closed;
     private boolean binding;
@@ -31,10 +33,12 @@ public final class ClipboardSyncClient implements AutoCloseable {
         }
         @Override public void onServiceDisconnected(ComponentName name) { remote = null; binding = false; }
     };
-    public ClipboardSyncClient(Context context, Consumer<JSONObject> events) {
+    public ClipboardSyncClient(Context context, boolean filesEnabled, Consumer<JSONObject> events) {
         this.events = events;
+        this.filesEnabled = filesEnabled;
+        files = new ClipboardFileTransfer(context, event -> main.post(() -> { if (!closed) events.accept(event); }));
         args = new Shizuku.UserServiceArgs(new ComponentName(context.getPackageName(), ClipboardBridgeService.class.getName()))
-            .daemon(false).processNameSuffix("clipboard_bridge").debuggable(false).version(2);
+            .daemon(false).processNameSuffix("clipboard_bridge").debuggable(false).version(3);
         main.post(this::connect);
         work.scheduleWithFixedDelay(this::poll, 0, 750, TimeUnit.MILLISECONDS);
     }
@@ -63,7 +67,7 @@ public final class ClipboardSyncClient implements AutoCloseable {
         if (closed) return;
         IClipboardBridge service = remote;
         if (service == null || !ShizukuDisplayClient.authorized()) {
-            changes.reset(); status("unavailable"); return;
+            files.reset(); changes.reset(); status("unavailable"); return;
         }
         try {
             String text = service.readText();
@@ -71,18 +75,31 @@ public final class ClipboardSyncClient implements AutoCloseable {
             // Reconnecting never sends the phone's pre-existing clipboard.
             String availability = service.getStatus();
             if ("ready".equals(availability)) {
+                if (filesEnabled) {
+                    try { files.poll(service); } catch (Exception failure) { files.reset(); }
+                }
                 if (changes.sample(text)) emit("clipboard", "text", text);
-            } else changes.reset();
+            } else { files.reset(); changes.reset(); }
             status(availability);
         } catch (android.os.RemoteException | RuntimeException failure) {
-            remote = null; changes.reset(); status("unavailable");
+            remote = null; files.reset(); changes.reset(); status("unavailable");
             main.post(() -> { unbind(); binding = false; });
         }
+    }
+    public void fileEvent(JSONObject event) {
+        if (closed || !filesEnabled) return;
+        try { work.execute(() -> {
+            if (closed) return;
+            try {
+                if (remote != null && ShizukuDisplayClient.authorized()) files.receive(event, remote);
+            } catch (Exception failure) { files.reset(); }
+        }); } catch (java.util.concurrent.RejectedExecutionException ignored) {}
     }
     public void setText(String text) {
         if (closed || !ClipboardTextPolicy.allowed(text)) return;
         try { work.execute(() -> {
             if (closed) return;
+            files.reset();
             boolean success = false;
             try {
                 IClipboardBridge service = remote;

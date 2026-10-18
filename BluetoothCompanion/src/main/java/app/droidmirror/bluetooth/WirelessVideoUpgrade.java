@@ -38,7 +38,7 @@ final class WirelessVideoUpgrade implements AutoCloseable {
                         DataInputStream input = new DataInputStream(socket.getInputStream());
                         OutputStream output = socket.getOutputStream();
                         byte[] nonce = new byte[32]; new SecureRandom().nextBytes(nonce);
-                        output.write("DMWIFI04".getBytes(java.nio.charset.StandardCharsets.US_ASCII));
+                        output.write("DMWIFI05".getBytes(java.nio.charset.StandardCharsets.US_ASCII));
                         output.write(nonce); output.flush();
                         byte[] requested = new byte[WirelessVideoProfile.WIRE_SIZE]; input.readFully(requested);
                         byte[] proof = new byte[32]; input.readFully(proof);
@@ -60,19 +60,24 @@ final class WirelessVideoUpgrade implements AutoCloseable {
                         long lastWarmup=System.nanoTime();
                         while (input.available()==0) {
                             if (closed || System.nanoTime()>=until) throw new IOException("Wireless video warm-up timed out");
-                            byte[] record=preview.poll();
+                            BluetoothWire.Preview.Record record=preview.poll();
                             if (record!=null) {
-                                warmup.writeInt(record.length); warmup.write(record); warmup.flush();
+                                if (record.bytes==null) { warmup.writeInt(-2); warmup.writeLong(record.timestamp); }
+                                else { warmup.writeInt(record.bytes.length); warmup.write(record.bytes); }
+                                warmup.flush();
                                 lastWarmup=System.nanoTime();
                             } else if (System.nanoTime()-lastWarmup>=100_000_000L) {
                                 // Recheck delivery even while capture is idle. These
                                 // copies stay on the candidate and never reach the decoder.
+                                long sample=System.nanoTime();
                                 byte[] frame=wire.previewFrame();
                                 if(frame!=null) {
+                                    wire.previewLatencySample(sample);
                                     for(int offset=0;offset<frame.length;) {
                                         int length=Math.min(8192,frame.length-offset);
                                         warmup.writeInt(length); warmup.write(frame,offset,length); offset+=length;
                                     }
+                                    warmup.writeInt(-2); warmup.writeLong(sample);
                                     warmup.writeInt(0); warmup.flush();
                                 }
                                 lastWarmup=System.nanoTime();

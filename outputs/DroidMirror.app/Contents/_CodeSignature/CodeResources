@@ -10,7 +10,7 @@
 		<dict>
 			<key>cdhash</key>
 			<data>
-			Yen+1U4ajSPajn4NygMX8DoCOPA=
+			ACF9mnetC2kqvHlRU2c455sPkFw=
 			</data>
 			<key>requirement</key>
 			<string>identifier libDroidMirrorBLE and anchor apple generic and certificate leaf[subject.CN] = "Apple Development: rishushar99@gmail.com (ZPFJS288H9)" and certificate 1[field.1.2.840.113635.100.6.2.1] /* exists */</string>
@@ -19,7 +19,7 @@
 		<dict>
 			<key>cdhash</key>
 			<data>
-			0DHygieFAq279wMw3UqlXHve+b4=
+			Gc4bijnqWJiGsaTbtSQ4oDitmLw=
 			</data>
 			<key>requirement</key>
 			<string>identifier libDroidMirrorHostShim and anchor apple generic and certificate leaf[subject.CN] = "Apple Development: rishushar99@gmail.com (ZPFJS288H9)" and certificate 1[field.1.2.840.113635.100.6.2.1] /* exists */</string>
@@ -28,7 +28,7 @@
 		<dict>
 			<key>cdhash</key>
 			<data>
-			YCEV1iCIRRZdSPMPgt+wDjpnkT0=
+			EEtnaf6gT4lJLDlb81SaXyMD7ig=
 			</data>
 			<key>requirement</key>
 			<string>identifier libDroidMirrorStyle and anchor apple generic and certificate leaf[subject.CN] = "Apple Development: rishushar99@gmail.com (ZPFJS288H9)" and certificate 1[field.1.2.840.113635.100.6.2.1] /* exists */</string>
@@ -37,7 +37,7 @@
 		<dict>
 			<key>cdhash</key>
 			<data>
-			Xe4BSjHixrkPrgWvsPIsgHuf7Ik=
+			CAZsquXmejtP3N8ya+nfc4V6XdA=
 			</data>
 			<key>requirement</key>
 			<string>identifier libDroidMirrorStyleOriginal and anchor apple generic and certificate leaf[subject.CN] = "Apple Development: rishushar99@gmail.com (ZPFJS288H9)" and certificate 1[field.1.2.840.113635.100.6.2.1] /* exists */</string>
@@ -55,7 +55,7 @@
 		<dict>
 			<key>cdhash</key>
 			<data>
-			ufKyr49jkssGyK6nrrGs0m4kFI4=
+			zEkIbMw9j8sNqkX2nuNAf/fqRts=
 			</data>
 			<key>requirement</key>
 			<string>identifier "app.droidmirror.notifications" and anchor apple generic and certificate leaf[subject.CN] = "Apple Development: rishushar99@gmail.com (ZPFJS288H9)" and certificate 1[field.1.2.840.113635.100.6.2.1] /* exists */</string>
@@ -73,7 +73,7 @@
 		<dict>
 			<key>cdhash</key>
 			<data>
-			IqN4jieG3FN7tkieWxdRKu7av4I=
+			Z08JcI0eCU9BvEbiLoz7fPxSMYY=
 			</data>
 			<key>requirement</key>
 			<string>identifier DroidMirrorBluetooth and anchor apple generic and certificate leaf[subject.CN] = "Apple Development: rishushar99@gmail.com (ZPFJS288H9)" and certificate 1[field.1.2.840.113635.100.6.2.1] /* exists */</string>
@@ -100,7 +100,7 @@
 		<dict>
 			<key>cdhash</key>
 			<data>
-			geeFJGJfz0YRAshF0z2LWESPVr4=
+			NlnBiynyReSHv3yPQGXGbgZxYRw=
 			</data>
 			<key>requirement</key>
 			<string>identifier "scrcpy-server" and anchor apple generic and certificate leaf[subject.CN] = "Apple Development: rishushar99@gmail.com (ZPFJS288H9)" and certificate 1[field.1.2.840.113635.100.6.2.1] /* exists */</string>
@@ -114,14 +114,30 @@
 			<key>requirement</key>
 			<string>identifier scrcpy and anchor apple generic and certificate leaf[subject.CN] = "Apple Development: rishushar99@gmail.com (ZPFJS288H9)" and certificate 1[field.1.2.840.113635.100.6.2.1] /* exists */</string>
 		</dict>
+		<key>Library/LaunchAgents/app.droidmirror.background.plist</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			XR4G6AcXTX8hXSPn+4nWgEJNUKiV9Og862Lk0jbFmlc=
+			</data>
+		</dict>
 		<key>MacOS/DroidMirrorHost</key>
 		<dict>
 			<key>cdhash</key>
 			<data>
-			nBbUBUA1yxa6uXNd5IVaxjavT6o=
+			pB83npnJ8qq7ScY5KXNC62Gwfpg=
 			</data>
 			<key>requirement</key>
 			<string>identifier DroidMirrorHost and anchor apple generic and certificate leaf[subject.CN] = "Apple Development: rishushar99@gmail.com (ZPFJS288H9)" and certificate 1[field.1.2.840.113635.100.6.2.1] /* exists */</string>
+		</dict>
+		<key>PlugIns/DroidMirrorShare.appex</key>
+		<dict>
+			<key>cdhash</key>
+			<data>
+			otq014n29pji5Wu1ZejONM9nAeA=
+			</data>
+			<key>requirement</key>
+			<string>identifier "app.droidmirror.mac.share" and anchor apple generic and certificate leaf[subject.CN] = "Apple Development: rishushar99@gmail.com (ZPFJS288H9)" and certificate 1[field.1.2.840.113635.100.6.2.1] /* exists */</string>
 		</dict>
 	</dict>
 	<key>rules</key>

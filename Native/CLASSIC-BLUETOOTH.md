@@ -266,8 +266,9 @@ without smoothing the drop. Idle heartbeats do not count as bandwidth samples,
 and Wi-Fi fallback resets the estimate. This permits higher bitrate without a
 fixed small window starving the radio. It measures delivered traffic, not unused
 link capacity; encoder probes supply the additional traffic to discover headroom.
-Idle heartbeats and Wi-Fi ACKs remain at 250 ms. Use matching Mac and companion
-builds. The preview APK is `outputs/DroidMirror-Bluetooth-low-latency-debug.apk`;
+Idle heartbeats remain at 250 ms. Moving Wi-Fi video also uses 40 ms ACKs,
+with a 128 KiB outstanding window to bound the bytes that must replay over Classic.
+Use matching Mac and companion builds. The preview APK is `outputs/DroidMirror-Bluetooth-low-latency-debug.apk`;
 use it with `outputs/DroidMirror.app`. The portable regression suite
 (`bash Native/test-wireless-upgrade.sh`) checks delivery estimates, bandwidth
 probing, ACK timing, window backpressure and handoff/fallback accounting. Actual
@@ -480,3 +481,36 @@ including queue drain, while sender timing includes any blocked writes.
 These measurements characterize transport capacity without concurrent BLE input;
 leave headroom for BLE, retransmissions and encoded keyframe bursts before choosing
 a video bitrate. A configured 64 kbps encoder target is not a measured radio limit.
+
+## Recovery during an active transport change
+
+Wi-Fi changes can invalidate the Mac's cached BLE input service even when the
+Android capture session remains alive. The Mac now pauses BLE operations, rediscovers
+the service and completes a fresh pairing proof within four seconds. The original
+session nonce must match; an app replacement or restarted capture cannot inherit
+an existing mirror. Classic video and the renderer sockets remain open.
+
+Recovery characteristics `…a616` and `…a617` reconcile an ATT write or return read
+whose callback CoreBluetooth discarded. The first reports the phone's next input
+sequence with an HMAC bound to the fresh authentication challenge. The Mac retries
+only the exact saved ciphertext when the phone proves that packet was not accepted;
+otherwise it continues at the existing sequence. The second returns the last read
+return packet, verified with its original MAC and sequence and delivered at most
+once. Neither direction resets its counters or relaxes ordinary sequence validation.
+Unsent commands stay queued until proof, recovery state and clock validation finish.
+The Android return sender allows six seconds for this bounded rediscovery.
+
+Video fallback retains the authenticated handoff nonce and exact received byte
+offset. Wi-Fi's unacknowledged window is capped at 128 KiB rather than 2 MiB: the
+larger window could leave over a megabyte to replay over Classic before another
+upgrade was possible. The 40 ms moving-video ACK cadence provides credit for the
+default 12 Mbps profile without that backlog. A silent network loss still requires
+stall detection and replay, so a brief video pause is possible during a switch.
+
+Validation by Jeffrey Turkstra on 2026-10-18: the paired phone completed
+Wi-Fi → Classic → Wi-Fi with the same installed Mac helper and rendering process,
+including real VideoToolbox playback and BLE service invalidation during Wi-Fi loss.
+A separate session replayed 129,789 bytes, within the 128 KiB budget, and successfully
+upgraded again. Phone Wi-Fi was restored after both tests. The portable handoff
+suite passes, including Java/C recovery proof vectors, exact-ciphertext retry,
+already-accepted input suppression, return replay, and unchanged decoder bytes.

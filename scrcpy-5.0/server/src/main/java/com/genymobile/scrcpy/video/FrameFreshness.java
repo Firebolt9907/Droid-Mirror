@@ -5,15 +5,21 @@ public final class FrameFreshness {
     private final long maxAgeUs;
     private boolean waitingForKeyframe;
     private boolean requestSync;
+    private long lastSyncUs;
     public FrameFreshness(long maxAgeUs) { this.maxAgeUs = maxAgeUs; }
     public boolean shouldSend(long ptsUs, long nowUs, boolean config, boolean keyframe) {
         if (config) return true;
-        if (nowUs - ptsUs > maxAgeUs) {
-            if (!waitingForKeyframe) requestSync = true;
+        boolean stale = nowUs - ptsUs > maxAgeUs;
+        if (stale || (waitingForKeyframe && !keyframe)) {
+            // A requested IDR may itself age out behind a blocked transport.
+            // Retry at a bounded cadence until a current IDR actually arrives.
+            if (!waitingForKeyframe || nowUs - lastSyncUs >= maxAgeUs) {
+                requestSync = true;
+                lastSyncUs = nowUs;
+            }
             waitingForKeyframe = true;
             return false;
         }
-        if (waitingForKeyframe && !keyframe) return false;
         waitingForKeyframe = false;
         return true;
     }

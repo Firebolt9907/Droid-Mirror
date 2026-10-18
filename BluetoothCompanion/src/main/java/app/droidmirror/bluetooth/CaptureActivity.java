@@ -212,6 +212,7 @@ public final class CaptureActivity extends Activity {
 
     private void showOptions() {
         LinearLayout options = column(); options.setPadding(dp(20), dp(8), dp(20), dp(8));
+        options.addView(text("When the background bridge is enabled, DroidMirror restarts it automatically after a reboot and your first unlock. Keep Bluetooth permissions allowed. On non-rooted phones, start Shizuku again after each reboot; mirroring becomes ready once Shizuku is running and authorized. Stopping the background bridge also disables its automatic restart. Some phones require allowing auto-start in their battery settings.", 15, false));
         options.addView(button("Allow notification forwarding (optional)", () -> open(new Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))));
         if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED)
             options.addView(button("Allow DroidMirror status notifications", () -> requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, 3)));

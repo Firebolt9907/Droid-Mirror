@@ -3,6 +3,8 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 work=$(mktemp -d /tmp/droidmirror-handoff-tests.XXXXXX)
 trap 'rm -rf "$work"' EXIT
+clang -fsanitize=address,undefined -g Native/ClassicBluetoothWire.c Native/VideoPathLatencyTests.c -o "$work/latency"
+"$work/latency"
 src=BluetoothCompanion/src/main/java/app/droidmirror/bluetooth
 javac -d "$work" "$src/PeerAddress.java" BluetoothCompanion/tests/PeerAddressTest.java
 java -cp "$work" app.droidmirror.bluetooth.PeerAddressTest

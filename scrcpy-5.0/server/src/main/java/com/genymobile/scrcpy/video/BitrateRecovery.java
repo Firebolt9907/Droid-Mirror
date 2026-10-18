@@ -14,9 +14,14 @@ public final class BitrateRecovery {
 
     /** Probe available bandwidth above startup quality without raising the congestion floor. */
     public BitrateRecovery(int initial, int ceiling, long recoveryIntervalUs) {
-        if (initial <= 0 || ceiling < initial || recoveryIntervalUs <= 0) throw new IllegalArgumentException();
+        this(initial, ceiling, recoveryIntervalUs, Math.min(initial, Math.max(32000, initial / 2)));
+    }
+
+    public BitrateRecovery(int initial, int ceiling, long recoveryIntervalUs, int minimum) {
+        if (initial <= 0 || ceiling < initial || recoveryIntervalUs <= 0 || minimum <= 0 || minimum > initial)
+            throw new IllegalArgumentException();
         target = ceiling; current = initial;
-        floor = Math.min(initial, Math.max(32000, initial / 2));
+        floor = minimum;
         this.recoveryIntervalUs = recoveryIntervalUs;
     }
 

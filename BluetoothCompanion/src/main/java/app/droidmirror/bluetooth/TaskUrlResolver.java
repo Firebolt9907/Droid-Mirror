@@ -4,6 +4,13 @@ import java.net.URI;
 
 /** App-specific rules stay here; unsupported or ambiguous metadata has no result. */
 public final class TaskUrlResolver {
+    public static String currentUrl(String assistUrl, String intentData, String resolvedIntentUrl) {
+        if (webUrl(assistUrl)) return assistUrl;
+        // A generic launch URL can be stale after browser navigation or a tab switch.
+        // Retain only the validated Docs content-ID adapter as an intent fallback.
+        return intentData != null && intentData.startsWith("content://uniqueId/")
+                && webUrl(resolvedIntentUrl) ? resolvedIntentUrl : null;
+    }
     public static String resolve(String pkg, String activity, String action, String data) {
         if (!"android.intent.action.VIEW".equals(action) || data == null) return null;
         if (webUrl(data)) return data;

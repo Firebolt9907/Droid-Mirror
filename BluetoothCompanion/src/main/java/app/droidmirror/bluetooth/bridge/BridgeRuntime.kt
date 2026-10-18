@@ -45,7 +45,20 @@ class BridgeRuntime(private val context: Context, private val onChanged: Runnabl
     }
     private lateinit var finder: AdbEndpointFinder
     private var clipboard: app.droidmirror.bluetooth.ClipboardSyncClient? = null
+    private var media: PhoneMediaSync? = null
+    private val sharedLinks = mutableMapOf<String, java.util.function.Consumer<Boolean>>()
+    fun shareLink(url: String, reply: java.util.function.Consumer<Boolean>): String? {
+        if (destroyed || sharedLinks.isNotEmpty() || !app.droidmirror.bluetooth.TaskUrlResolver.webUrl(url)) {
+            reply.accept(false); return null
+        }
+        val id = java.util.UUID.randomUUID().toString()
+        sharedLinks[id] = reply
+        if (!ble.shareLink(url, id)) { sharedLinks.remove(id); reply.accept(false); return null }
+        return id
+    }
+    fun cancelSharedLink(id: String) { sharedLinks.remove(id) }
     private var taskUrls: app.droidmirror.bluetooth.TaskUrlClient? = null
+    private var hotspot: app.droidmirror.bluetooth.HotspotClient? = null
     private lateinit var ble: BlePeripheral
     private val handler = Handler(Looper.getMainLooper())
     private val refreshRunning = AtomicBoolean(false)
@@ -71,6 +84,7 @@ class BridgeRuntime(private val context: Context, private val onChanged: Runnabl
         private set
 
     fun start() {
+        hotspot = app.droidmirror.bluetooth.HotspotClient(context)
         finder = AdbEndpointFinder(context)
         ble = BlePeripheral(
             context = context,
@@ -79,14 +93,31 @@ class BridgeRuntime(private val context: Context, private val onChanged: Runnabl
                 if (command == "CONNECTED") update("Mac connected", details)
                 else if (finder.endpoint != null) update("Ready for Mac", details)
             },
-            onClipboardSubscription = { enabled, generation -> handler.post {
+            onClipboardSubscription = { enabled, generation, files -> handler.post {
                 clipboard?.close(); clipboard = null
-                if (enabled && !destroyed) clipboard = app.droidmirror.bluetooth.ClipboardSyncClient(context) { ble.sendClipboardEvent(it, generation) }
+                if (enabled && !destroyed) clipboard = app.droidmirror.bluetooth.ClipboardSyncClient(context, files) { ble.sendClipboardEvent(it, generation) }
             } },
             onClipboardText = { text -> handler.post { if (!destroyed) clipboard?.setText(text) } },
+            onClipboardFile = { event -> handler.post { if (!destroyed) clipboard?.fileEvent(event) } },
+            onMediaSubscription = { enabled, generation -> handler.post {
+                media?.close(); media = null
+                if (enabled && !destroyed) media = PhoneMediaSync(context) { ble.sendMediaEvent(it, generation) }
+            } },
+            onMediaEvent = { event, authorized -> handler.post {
+                if (!destroyed && authorized()) media?.receive(event)
+            } },
             onTaskSubscription = { enabled, generation -> handler.post {
                 taskUrls?.close(); taskUrls = null
                 if (enabled && !destroyed) taskUrls = app.droidmirror.bluetooth.TaskUrlClient(context) { ble.sendTaskEvent(it, generation) }
+            } },
+            onShareLinkResult = { id, success -> handler.post { sharedLinks.remove(id)?.accept(success) } },
+            onOpenLink = { url, authorized, reply -> handler.post {
+                val client = taskUrls
+                if (!destroyed && authorized() && client != null) client.openBrowser(url, { !destroyed && authorized() }, reply)
+                else reply(false)
+            } },
+            onHotspotStart = { authorized, reply -> handler.post {
+                if (!destroyed && authorized()) hotspot?.start { reply(it) }
             } }
         )
         runCatching { ble.start { update(it, details) } }
@@ -222,7 +253,10 @@ class BridgeRuntime(private val context: Context, private val onChanged: Runnabl
 
     override fun close() {
         destroyed = true
+        media?.close(); media = null
+        hotspot?.close(); hotspot = null
         clipboard?.close(); clipboard = null
+        sharedLinks.values.toList().forEach { it.accept(false) }; sharedLinks.clear()
         taskUrls?.close(); taskUrls = null
         Shizuku.removeBinderReceivedListener(shizukuReceived)
         Shizuku.removeRequestPermissionResultListener(shizukuPermission)

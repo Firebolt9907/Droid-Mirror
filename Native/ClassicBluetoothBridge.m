@@ -8,6 +8,7 @@
 #import <signal.h>
 #import <string.h>
 #import "ClassicBluetoothWire.h"
+#import "VideoPathLatency.h"
 #import "PhoneAppearance.h"
 #import "BleInputTransport.h"
 #import "BleInputCrypto.h"
@@ -57,7 +58,11 @@ static NSData *DMUpgradeProof(NSData *key, const char *direction, const uint8_t 
 
 @interface DMClassicBridge : NSObject <IOBluetoothL2CAPChannelDelegate, DMBleInputDelegate, NSStreamDelegate> {
     DMClassicWire _wire, _returnWire, _wifiWire;
+    DMLatencySamples _bluetoothLatency, _candidateLatency;
 }
+@property(nonatomic) NSTimeInterval latencyBadSince;
+@property(nonatomic) NSTimeInterval latencyRetryAfter;
+@property(nonatomic) BOOL wifiIsPeer;
 @property(nonatomic) int wifiSocket;
 @property(nonatomic) BOOL probingWiFi;
 @property(nonatomic) void *peerLibrary;
@@ -117,6 +122,7 @@ static NSData *DMUpgradeProof(NSData *key, const char *direction, const uint8_t 
 @property(nonatomic) BOOL failing;
 @property(nonatomic) uint8_t eventMask;
 @property(nonatomic, copy) NSString *connectionStage;
+- (void)recordLatency:(uint64_t)timestamp wireless:(BOOL)wireless;
 - (void)startBleWhenAndroidReady;
 - (void)shutdownForTermination;
 - (void)connectClassicBaseband;
@@ -145,7 +151,23 @@ static bool DMPeerAddress(void *context, const uint8_t *bytes, size_t length) {
     return [(__bridge DMClassicBridge *)context receivePeerAddress:bytes length:length];
 }
 
+static void DMBluetoothLatency(void *context, uint64_t timestamp) {
+    [(__bridge DMClassicBridge *)context recordLatency:timestamp wireless:NO];
+}
+static void DMWirelessLatency(void *context, uint64_t timestamp) {
+    [(__bridge DMClassicBridge *)context recordLatency:timestamp wireless:YES];
+}
+
 @implementation DMClassicBridge
+- (void)recordLatency:(uint64_t)timestamp wireless:(BOOL)wireless {
+    double delay=NSProcessInfo.processInfo.systemUptime-(double)timestamp/1e9;
+    dm_latency_add(wireless ? &_candidateLatency : &_bluetoothLatency,delay);
+    if (wireless && _wifiActive && _wifiIsPeer) {
+        if (dm_latency_slower(&_bluetoothLatency,&_candidateLatency)) {
+            if (!_latencyBadSince) _latencyBadSince=NSProcessInfo.processInfo.systemUptime;
+        } else _latencyBadSince=0;
+    }
+}
 - (void)probePeer {
     if (_failing || _benchmark || _wifiActive || _wifiRecovering || _probingWiFi || _wifiSocket >= 0) return;
     if (!_peerHandle) {
@@ -170,6 +192,9 @@ static bool DMPeerAddress(void *context, const uint8_t *bytes, size_t length) {
             _peerAddAddress(_peerHandle,bytes[8],bytes+9,(uint16_t)bytes[25]<<8|bytes[26]);
         }
     }
+    if (NSProcessInfo.processInfo.systemUptime < _latencyRetryAfter) {
+        printf("EVENT LAN_UNAVAILABLE\n"); fflush(stdout); return;
+    }
     [self probeWiFi:_peerPort];
 }
 - (void)stopPeer {
@@ -180,6 +205,9 @@ static bool DMPeerAddress(void *context, const uint8_t *bytes, size_t length) {
 - (void)probeWiFi:(uint16_t)port {
     if (_probingWiFi || _wifiSocket >= 0 || _wifiRecovering || _benchmark) return;
     _probingWiFi=YES;
+    _candidateLatency=(DMLatencySamples){0};
+    _latencyBadSince=0;
+    BOOL isPeer=port == _peerPort;
     if (_videoProbeAttempts++ < 3) fprintf(stderr,"Trying %s video\n",port == _peerPort ? "direct IP (LAN/VPN)" : "wireless ADB");
     NSData *key=_pairingKey;
     NSData *profile=_wirelessProfile;
@@ -196,7 +224,7 @@ static bool DMPeerAddress(void *context, const uint8_t *bytes, size_t length) {
             struct sockaddr_in address={0}; address.sin_family=AF_INET;
             address.sin_addr.s_addr=htonl(INADDR_LOOPBACK); address.sin_port=htons(port);
             uint8_t hello[40], response[48];
-            if (!connect(fd,(struct sockaddr *)&address,sizeof(address)) && DMReadExact(fd,hello,sizeof(hello)) && !memcmp(hello,"DMWIFI04",8)) {
+            if (!connect(fd,(struct sockaddr *)&address,sizeof(address)) && DMReadExact(fd,hello,sizeof(hello)) && !memcmp(hello,"DMWIFI05",8)) {
                 nonce=[NSData dataWithBytes:hello+8 length:32];
                 NSData *proof=DMUpgradeProof(key,"client",hello+8,profile.bytes,profile.length);
                 NSMutableData *request=[profile mutableCopy]; [request appendData:proof];
@@ -219,6 +247,13 @@ static bool DMPeerAddress(void *context, const uint8_t *bytes, size_t length) {
                         uint32_t encodedLength;
                         if (!DMReadExact(fd,&encodedLength,4)) break;
                         int32_t length=(int32_t)ntohl(encodedLength);
+                        if (length == -2) {
+                            uint64_t timestamp;
+                            if (!DMReadExact(fd,&timestamp,8)) break;
+                            timestamp=CFSwapInt64BigToHost(timestamp);
+                            dispatch_sync(dispatch_get_main_queue(), ^{ [self recordLatency:timestamp wireless:YES]; });
+                            continue;
+                        }
                         if (length == -1) { warmed=confirmed; break; }
                         if (length < 0 || length > 8192) break;
                         uint8_t video[8192];
@@ -228,6 +263,19 @@ static bool DMPeerAddress(void *context, const uint8_t *bytes, size_t length) {
                         // The first marker may finish a partial frame. Require
                         // two further frames and a sustained delivery interval.
                         if (!confirmed && frames >= 3 && NSDate.timeIntervalSinceReferenceDate-started >= 0.25) {
+                            __block BOOL acceptable=YES;
+                            dispatch_sync(dispatch_get_main_queue(), ^{
+                                if (isPeer) acceptable=dm_latency_ready(&self->_bluetoothLatency,&self->_candidateLatency)
+                                    && !dm_latency_slower(&self->_bluetoothLatency,&self->_candidateLatency);
+                            });
+                            if (!acceptable) {
+                                __block BOOL measured=NO;
+                                dispatch_sync(dispatch_get_main_queue(), ^{ measured=dm_latency_ready(&self->_bluetoothLatency,&self->_candidateLatency); });
+                                if (!measured) continue;
+                                dispatch_async(dispatch_get_main_queue(), ^{ self.latencyRetryAfter=NSProcessInfo.processInfo.systemUptime+60; });
+                                fprintf(stderr,"Direct IP video is slower than Bluetooth or lacks latency samples; keeping Bluetooth\n");
+                                break;
+                            }
                             const uint8_t ready=1;
                             if (send(fd,&ready,1,0)!=1) break;
                             confirmed=YES;
@@ -258,10 +306,12 @@ static bool DMPeerAddress(void *context, const uint8_t *bytes, size_t length) {
             if (cutoff < self.videoReceived) { close(fd); [self fail:@"Invalid Wi-Fi video cutoff"]; return; }
             fcntl(fd,F_SETFL,O_NONBLOCK);
             fprintf(stderr,"Video handoff authenticated over %s\n",port == self.peerPort ? "direct IP (LAN/VPN)" : "wireless ADB");
+            self.wifiIsPeer=isPeer;
             self.wifiNonce=nonce;
             self.wifiSocket=fd; self.wifiCutoff=cutoff; self.wifiLastData=NSDate.timeIntervalSinceReferenceDate;
             self.wifiPendingSince=NSDate.timeIntervalSinceReferenceDate;
             dm_classic_wire_init_video_only(&self->_wifiWire);
+            self->_wifiWire.latency=DMWirelessLatency;
             // The worker consumed the complete authenticated header and magic
             // before committing, so a truncated probe cannot replace Bluetooth.
             const uint8_t magic[]="DMBT0006";
@@ -310,6 +360,11 @@ static bool DMPeerAddress(void *context, const uint8_t *bytes, size_t length) {
             if (![_ble requestBluetoothVideo:_videoReceived nonce:_wifiNonce]) [self fail:@"BLE video recovery request failed"];
         }
         return;
+    }
+    if (_wifiIsPeer && _latencyBadSince && NSProcessInfo.processInfo.systemUptime-_latencyBadSince >= 2) {
+        fprintf(stderr,"Direct IP video delivery is slower than Bluetooth; recovering Bluetooth\n");
+        _latencyRetryAfter=NSProcessInfo.processInfo.systemUptime+60;
+        [self fallbackToBluetooth]; return;
     }
     if (NSDate.timeIntervalSinceReferenceDate-_wifiLastData > 4) {
         fprintf(stderr,"Peer video stalled: queued=%lu received=%llu\n",(unsigned long)_pending.length,(unsigned long long)_videoReceived);
@@ -533,6 +588,7 @@ static bool DMPeerAddress(void *context, const uint8_t *bytes, size_t length) {
         for (size_t i=0;i<length;++i) if (bytes[i] != (uint8_t)(_benchmarkBytes+i)) [self fail:@"Benchmark byte loss or corruption"];
         _benchmarkBytes+=length; _benchmarkLast=_lastData; return;
     }
+    _wire.latency = DMBluetoothLatency;
     _wire.appearance = DMAppearance;
     if (!dm_classic_wire_feed_ble(&_wire, data, length, DMVideo, DMEvent, NULL, NULL, (__bridge void *)self))
         [self fail:@"Invalid Bluetooth stream or video backlog exceeded; update the Android companion and Mac app"];

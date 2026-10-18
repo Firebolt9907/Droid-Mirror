@@ -9,8 +9,11 @@
 static const CGFloat DMToolbarHeight = 58.0;
 static const CGFloat DMToolbarCornerRadius = 24.0;
 static const CGFloat DMToolbarShadowInset = 18.0;
+static const CGFloat DMPhoneShadowInset = 96.0;
 static const NSTimeInterval DMCtrlDoubleTapInterval = 0.18;
 static void *DMControllerKey = &DMControllerKey;
+static void *DMPhoneShadowVisibilityKey = &DMPhoneShadowVisibilityKey;
+static NSString *const DMToolbarRevealKey = @"DroidMirrorToolbarReveal";
 
 static inline CGFloat DMScreenCornerRadius(CGFloat width) {
     return MIN(24.0, MAX(16.0, width * 0.042));
@@ -37,6 +40,9 @@ static inline CGFloat DMScreenCornerRadius(CGFloat width) {
 @property(nonatomic, weak) NSWindow *window;
 @property(nonatomic) SDL_Window *sdlWindow;
 @property(nonatomic, strong) NSView *screenView;
+@property(nonatomic, strong) NSPanel *phoneShadowWindow;
+@property(nonatomic, strong) CALayer *phoneShadowLayer;
+@property(nonatomic, strong) NSArray *phoneShadowFocusObservers;
 @property(nonatomic, strong) DMToolbarView *toolbar;
 @property(nonatomic, strong) NSPanel *toolbarWindow;
 @property(nonatomic, strong) NSView *toolbarContainer;
@@ -95,6 +101,11 @@ static inline CGFloat DMScreenCornerRadius(CGFloat width) {
 - (void)updateCameraCutouts:(NSArray<NSValue *> *)cutouts;
 - (NSEvent *)handleCutoutMouseEvent:(NSEvent *)event;
 - (instancetype)initWithWindow:(NSWindow *)window;
+- (void)showToolbar;
+- (void)hideToolbar;
+- (void)buildPhoneShadow;
+- (void)positionPhoneShadow;
+- (void)updatePhoneShadowVisibility;
 @end
 
 @implementation DMWindowController
@@ -123,11 +134,11 @@ static inline CGFloat DMScreenCornerRadius(CGFloat width) {
         NSWindowCollectionBehaviorParticipatesInCycle | NSWindowCollectionBehaviorFullScreenPrimary;
     window.opaque = NO;
     window.backgroundColor = NSColor.clearColor;
-    window.hasShadow = YES;
+    window.hasShadow = NO;
+    [self buildPhoneShadow];
     window.movableByWindowBackground = NO;
     window.minSize = NSMakeSize(310, 520);
-    [window addChildWindow:_toolbarWindow ordered:NSWindowAbove];
-    [self positionToolbar];
+    [self showToolbar];
     __weak typeof(self) weakSelf = self;
     _resizeObserver = [[NSNotificationCenter defaultCenter] addObserverForName:NSWindowDidResizeNotification object:window queue:NSOperationQueue.mainQueue usingBlock:^(__unused NSNotification *note) { [weakSelf positionToolbar]; }];
     _moveObserver = [[NSNotificationCenter defaultCenter] addObserverForName:NSWindowDidMoveNotification object:window queue:NSOperationQueue.mainQueue usingBlock:^(__unused NSNotification *note) { [weakSelf positionToolbar]; }];
@@ -152,6 +163,14 @@ static inline CGFloat DMScreenCornerRadius(CGFloat width) {
     if (_resizeObserver) [[NSNotificationCenter defaultCenter] removeObserver:_resizeObserver];
     if (_moveObserver) [[NSNotificationCenter defaultCenter] removeObserver:_moveObserver];
     if (_toolbarWindow) [_window removeChildWindow:_toolbarWindow];
+    for (id observer in _phoneShadowFocusObservers) {
+        [[NSNotificationCenter defaultCenter] removeObserver:observer];
+    }
+    if (_phoneShadowWindow) {
+        [_window removeObserver:self forKeyPath:@"visible" context:DMPhoneShadowVisibilityKey];
+        [_window removeChildWindow:_phoneShadowWindow];
+        [_phoneShadowWindow orderOut:nil];
+    }
     [_pinDetectionTimer invalidate];
     [_ctrlTapTimer invalidate];
     _pendingCommandDownEvent = nil;
@@ -176,13 +195,44 @@ static inline CGFloat DMScreenCornerRadius(CGFloat width) {
     if (hidden) {
         [self.pinPopover close];
         [self.settingsPopover close];
-        [self.window removeChildWindow:self.toolbarWindow];
-        [self.toolbarWindow orderOut:nil];
+        [self hideToolbar];
     } else {
-        [self.window addChildWindow:self.toolbarWindow ordered:NSWindowAbove];
-        [self positionToolbar];
-        [self.toolbarWindow orderFront:nil];
+        [self showToolbar];
     }
+}
+
+- (void)hideToolbar {
+    [self.toolbarContainer.layer removeAnimationForKey:DMToolbarRevealKey];
+    [self.window removeChildWindow:self.toolbarWindow];
+    [self.toolbarWindow orderOut:nil];
+}
+
+- (void)showToolbar {
+    if (self.cameraCutouts.count) { [self hideToolbar]; return; }
+    for (NSView *view in self.window.contentView.subviews) {
+        if ([view.identifier isEqualToString:@"DroidMirrorConnecting"]) {
+            [self hideToolbar]; return;
+        }
+    }
+    BOOL wasVisible = self.toolbarWindow.visible;
+    if (!wasVisible) {
+        CALayer *layer = self.toolbarContainer.layer;
+        [layer removeAnimationForKey:DMToolbarRevealKey];
+        if (self.window.visible && !self.window.miniaturized &&
+                !NSWorkspace.sharedWorkspace.accessibilityDisplayShouldReduceMotion) {
+            // Animate presentation only: the panel and its controls are fully
+            // available immediately. Hiding never waits for a completion block.
+            CABasicAnimation *reveal = [CABasicAnimation animationWithKeyPath:@"opacity"];
+            reveal.fromValue = @0;
+            reveal.toValue = @1;
+            reveal.duration = 0.18;
+            reveal.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseOut];
+            [layer addAnimation:reveal forKey:DMToolbarRevealKey];
+        }
+    }
+    [self.window addChildWindow:self.toolbarWindow ordered:NSWindowAbove];
+    [self positionToolbar];
+    [self.toolbarWindow orderFront:nil];
 }
 
 - (NSEvent *)handleCutoutMouseEvent:(NSEvent *)event {
@@ -732,10 +782,90 @@ static inline CGFloat DMScreenCornerRadius(CGFloat width) {
     }
 }
 
+- (void)buildPhoneShadow {
+    // A separate, click-through surface lets the shadow extend beyond the
+    // clipped video without changing the phone's frame or input coordinates.
+    _phoneShadowWindow = [[NSPanel alloc] initWithContentRect:NSZeroRect
+        styleMask:NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel
+        backing:NSBackingStoreBuffered defer:NO];
+    _phoneShadowWindow.opaque = NO;
+    _phoneShadowWindow.backgroundColor = NSColor.clearColor;
+    _phoneShadowWindow.hasShadow = NO;
+    _phoneShadowWindow.ignoresMouseEvents = YES;
+    _phoneShadowWindow.hidesOnDeactivate = NO;
+    _phoneShadowWindow.releasedWhenClosed = NO;
+    _phoneShadowWindow.contentView.wantsLayer = YES;
+    _phoneShadowLayer = [CALayer layer];
+    _phoneShadowLayer.shadowColor = NSColor.blackColor.CGColor;
+    _phoneShadowLayer.shadowOpacity = 0.60;
+    _phoneShadowLayer.shadowRadius = 28.0;
+    _phoneShadowLayer.shadowOffset = CGSizeMake(0, -10);
+    [_phoneShadowWindow.contentView.layer addSublayer:_phoneShadowLayer];
+    [self positionPhoneShadow];
+    [self.window addChildWindow:_phoneShadowWindow ordered:NSWindowBelow];
+    __weak typeof(self) weakSelf = self;
+    NSMutableArray *observers = [NSMutableArray array];
+    for (NSNotificationName name in @[NSWindowDidBecomeKeyNotification, NSWindowDidResignKeyNotification,
+                                      NSApplicationDidBecomeActiveNotification, NSApplicationDidResignActiveNotification]) {
+        id object = [name isEqualToString:NSWindowDidBecomeKeyNotification] ||
+                    [name isEqualToString:NSWindowDidResignKeyNotification] ? self.window : NSApp;
+        [observers addObject:[NSNotificationCenter.defaultCenter addObserverForName:name object:object
+            queue:NSOperationQueue.mainQueue usingBlock:^(__unused NSNotification *note) {
+                [weakSelf updatePhoneShadowVisibility];
+            }]];
+    }
+    self.phoneShadowFocusObservers = observers;
+    [self.window addObserver:self forKeyPath:@"visible" options:NSKeyValueObservingOptionInitial
+                    context:DMPhoneShadowVisibilityKey];
+}
+
+- (void)observeValueForKeyPath:(NSString *)keyPath ofObject:(id)object
+                       change:(NSDictionary *)change context:(void *)context {
+    if (context != DMPhoneShadowVisibilityKey) {
+        [super observeValueForKeyPath:keyPath ofObject:object change:change context:context];
+        return;
+    }
+    [self updatePhoneShadowVisibility];
+}
+
+- (void)updatePhoneShadowVisibility {
+    BOOL focused = NSApp.active && self.window.keyWindow;
+    // Keep the layer transparent too: AppKit may reorder child windows when
+    // their parent is shown, before its focus notifications are delivered.
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    self.phoneShadowLayer.opacity = focused ? 1.0 : 0.0;
+    [CATransaction commit];
+    if (focused && self.window.visible && !self.window.miniaturized) {
+        if (self.phoneShadowWindow.parentWindow != self.window) {
+            [self.window addChildWindow:self.phoneShadowWindow ordered:NSWindowBelow];
+        }
+        [self.phoneShadowWindow orderWindow:NSWindowBelow relativeTo:self.window.windowNumber];
+    } else {
+        [self.phoneShadowWindow orderOut:nil];
+    }
+}
+
+- (void)positionPhoneShadow {
+    if (!self.phoneShadowWindow) return;
+    NSRect phone = self.window.frame;
+    [self.phoneShadowWindow setFrame:NSInsetRect(phone, -DMPhoneShadowInset, -DMPhoneShadowInset)
+                            display:YES];
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    self.phoneShadowLayer.frame = NSMakeRect(DMPhoneShadowInset, DMPhoneShadowInset,
+                                            phone.size.width, phone.size.height);
+    CGFloat radius = DMScreenCornerRadius(phone.size.width);
+    self.phoneShadowLayer.shadowPath = [NSBezierPath bezierPathWithRoundedRect:self.phoneShadowLayer.bounds
+        xRadius:radius yRadius:radius].CGPath;
+    [CATransaction commit];
+}
+
 - (void)positionToolbar {
+    [self positionPhoneShadow];
     for (NSView *view in self.window.contentView.subviews) {
         if ([view.identifier isEqualToString:@"DroidMirrorConnecting"]) {
-            [self.toolbarWindow orderOut:nil];
+            [self hideToolbar];
             return;
         }
     }
@@ -1088,7 +1218,7 @@ static inline CGFloat DMScreenCornerRadius(CGFloat width) {
 - (void)detectPINPrompt {
     for (NSView *view in self.window.contentView.subviews) {
         if ([view.identifier isEqualToString:@"DroidMirrorConnecting"]) {
-            [self.toolbarWindow orderOut:nil];
+            [self hideToolbar];
             return;
         }
     }
@@ -1136,14 +1266,11 @@ void DroidMirrorSessionChrome(NSWindow *window, BOOL active) {
     controller.bluetoothStream = [NSProcessInfo.processInfo.environment[@"DROIDMIRROR_TRANSPORT"] isEqualToString:@"bluetooth-classic"];
     if (active) {
         if (!controller.cameraCutouts.count) {
-            [window addChildWindow:controller.toolbarWindow ordered:NSWindowAbove];
-            [controller positionToolbar];
-            [controller.toolbarWindow orderFront:nil];
+            [controller showToolbar];
         }
     } else {
         [controller.pinPopover close];
-        [window removeChildWindow:controller.toolbarWindow];
-        [controller.toolbarWindow orderOut:nil];
+        [controller hideToolbar];
     }
 }
 

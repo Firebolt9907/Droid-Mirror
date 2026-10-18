@@ -34,18 +34,29 @@ bool dm_classic_wire_feed_ble(DMClassicWire *wire, const uint8_t *bytes, size_t 
             wire->type = wire->header[0]; wire->header_used = 0;
             wire->remaining = (uint32_t)wire->header[1] << 24 | (uint32_t)wire->header[2] << 16
                             | (uint32_t)wire->header[3] << 8 | wire->header[4];
-            if ((wire->video_only && wire->type != 0 && wire->type != 1 && wire->type != 4)
+            if ((wire->video_only && wire->type != 0 && wire->type != 1 && wire->type != 4 && wire->type != 5)
                     || (wire->type == 0 && (!wire->remaining || wire->remaining > 16384))
                     || (wire->type == 1 && wire->remaining != 1)
                     || (wire->type == 2 && (!wire->control || !control || !wire->remaining || wire->remaining > 16384))
                     || (wire->type == 3 && (!wire->ble || !setup || wire->remaining != 32))
                     || (wire->type == 4 && (!wire->video_only || !wire->appearance || !wire->remaining || wire->remaining > 16384))
-                    || wire->type > 4) return false;
+                    || (wire->type == 5 && (!wire->video_only || wire->remaining != 8))
+                    || wire->type > 5) return false;
         }
         size_t take = wire->remaining;
         if (take > length) take = length;
         if (!take) continue;
-        if (wire->type == 0) { if (!video(context, bytes, take)) return false; }
+        if (wire->type == 5) {
+            memcpy(wire->latency_bytes+wire->latency_used, bytes, take);
+            wire->latency_used+=take;
+            if (wire->latency_used==8) {
+                uint64_t timestamp=0;
+                for (size_t i=0;i<8;i++) timestamp=(timestamp<<8)|wire->latency_bytes[i];
+                wire->latency_used=0;
+                if (wire->latency) wire->latency(context,timestamp);
+            }
+        }
+        else if (wire->type == 0) { if (!video(context, bytes, take)) return false; }
         else if (wire->type == 4) { if (!wire->appearance(context, bytes, take)) return false; }
         else if (wire->type == 2) { if (!control(context, bytes, take)) return false; }
         else if (wire->type == 3) { if (!setup(context, bytes, take)) return false; }

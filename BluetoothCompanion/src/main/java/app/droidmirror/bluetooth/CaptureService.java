@@ -298,7 +298,7 @@ public final class CaptureService extends Service {
             sendVideo(wire, header.toByteArray());
             try (DataInputStream input = new DataInputStream(new ParcelFileDescriptor.AutoCloseInputStream(state.inputPipe))) {
                 byte[] codec = new byte[4]; input.readFully(codec); sendVideo(wire, codec);
-                long statsStarted = SystemClock.elapsedRealtime(), frames = 0, bytesSent = 0, sendingMillis = 0;
+                long statsStarted = SystemClock.elapsedRealtime(), frames = 0, bytesSent = 0, sendingMillis = 0, maxCaptureAgeUs = 0;
                 while (!shutdown && !state.stopped && state.endEvent.get() == 0) {
                     byte[] frameHeader = new byte[12]; input.readFully(frameHeader);
                     if ((frameHeader[0] & 0x80) != 0) { sendVideo(wire, frameHeader); continue; }
@@ -311,6 +311,8 @@ public final class CaptureService extends Service {
                     sendingMillis += SystemClock.elapsedRealtime() - sendingStarted;
                     bytesSent += frame.length;
                     if ((frameHeader[0] & 0x40) == 0) {
+                        long ptsUs = java.nio.ByteBuffer.wrap(frameHeader).getLong() & ((1L << 61) - 1);
+                        maxCaptureAgeUs = Math.max(maxCaptureAgeUs, System.nanoTime() / 1000 - ptsUs);
                         wire.videoFrameSent(frame);
                         ++frames;
                         long now = SystemClock.elapsedRealtime(), duration = now - statsStarted;
@@ -318,8 +320,10 @@ public final class CaptureService extends Service {
                             android.util.Log.i("DroidMirrorPerformance", "relay fps=" + (frames * 1000.0 / duration)
                                 + " kbps=" + (bytesSent * 8.0 / duration) + " sendBlockedMs=" + sendingMillis
                                 + " ackWaitMs=" + state.videoWindow.takeWaitMillis() + " inFlight=" + state.videoWindow.inFlightBytes()
-                                + " window=" + state.videoWindow.capacityBytes() + " deliveredKbps=" + state.videoWindow.deliveredBytesPerSecond() * 8 / 1000);
+                                + " window=" + state.videoWindow.capacityBytes() + " deliveredKbps=" + state.videoWindow.deliveredBytesPerSecond() * 8 / 1000
+                                + " maxCaptureAgeMs=" + maxCaptureAgeUs / 1000);
                             statsStarted = now; frames = bytesSent = sendingMillis = 0;
+                            maxCaptureAgeUs = 0;
                         }
                         if (!state.streamStarted.get()) {
                             state.startedElapsed = SystemClock.elapsedRealtime();

@@ -32,7 +32,7 @@ public final class TaskUrlClient implements AutoCloseable {
     public TaskUrlClient(Context context, Consumer<JSONObject> events) {
         this.events = events;
         args = new Shizuku.UserServiceArgs(new ComponentName(context.getPackageName(), TaskUrlBridgeService.class.getName()))
-                .daemon(false).processNameSuffix("task_urls").debuggable(false).version(1);
+                .daemon(false).processNameSuffix("task_urls").debuggable(false).version(3);
         main.post(this::connect);
         work.scheduleWithFixedDelay(this::poll, 0, 2, TimeUnit.SECONDS);
     }
@@ -65,6 +65,26 @@ public final class TaskUrlClient implements AutoCloseable {
             // Refresh even unchanged URLs so the Mac can expire interrupted connections.
             main.post(() -> { if (!closed) events.accept(snapshot); });
         } catch (org.json.JSONException ignored) {}
+    }
+    public void openBrowser(String url, java.util.function.BooleanSupplier authorized, Consumer<Boolean> reply) {
+        if (closed) { reply.accept(false); return; }
+        openBrowserAttempt(url, authorized, reply, 12);
+    }
+    private void openBrowserAttempt(String url, java.util.function.BooleanSupplier authorized, Consumer<Boolean> reply, int remaining) {
+        work.schedule(() -> {
+            if (!closed && remote == null && remaining > 0 && authorized.getAsBoolean() && ShizukuDisplayClient.authorized()) {
+                openBrowserAttempt(url, authorized, reply, remaining - 1);
+                return;
+            }
+            boolean success = false;
+            try {
+                ITaskUrlBridge service = remote;
+                if (!closed && authorized.getAsBoolean() && ShizukuDisplayClient.authorized() && service != null
+                        && TaskUrlResolver.webUrl(url)) success = service.openBrowser(url);
+            } catch (Exception ignored) {}
+            boolean result = success;
+            main.post(() -> { if (!closed && authorized.getAsBoolean()) reply.accept(result); });
+        }, 250, TimeUnit.MILLISECONDS);
     }
     private void unbind() {
         try { Shizuku.unbindUserService(args, connection, false); } catch (RuntimeException ignored) {}

@@ -26,6 +26,9 @@
         </intent>
     </queries>
     <application android:label="DroidMirror" android:theme="@android:style/Theme.Material.Light.NoActionBar" android:allowBackup="false">
+        <provider android:name=".ClipboardFileProvider" android:authorities="${applicationId}.clipboard.files"
+            android:exported="false" android:grantUriPermissions="true" />
+        <receiver android:name=".bridge.MediaControlReceiver" android:exported="false" />
         <activity android:name=".bridge.BridgeSettingsActivity" android:exported="false" />
         <service android:name=".bridge.PhoneNotifications" android:exported="true"
             android:label="DroidMirror notification forwarding"
@@ -36,6 +39,15 @@
             android:authorities="${applicationId}.shizuku" android:enabled="true"
             android:exported="true" android:multiprocess="false"
             android:permission="android.permission.INTERACT_ACROSS_USERS_FULL" />
+        <activity android:name=".ShareLinkActivity" android:exported="true"
+            android:label="DroidMirror" android:excludeFromRecents="true"
+            android:theme="@android:style/Theme.Material.Light.Dialog.Alert">
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
+            </intent-filter>
+        </activity>
         <activity android:name=".CaptureActivity" android:exported="true">
             <intent-filter><action android:name="android.intent.action.MAIN" /><category android:name="android.intent.category.LAUNCHER" /></intent-filter>
         </activity>

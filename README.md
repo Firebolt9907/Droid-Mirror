@@ -88,6 +88,21 @@ recovery covers app death and stale stream leases; physical-device behavior stil
 needs validation. Mouse, keyboard, scrolling and navigation use the Bluetooth control channel through Shizuku. Audio remains available through ADB mode.
 See [setup, behavior and validation limits](Native/CLASSIC-BLUETOOTH.md).
 
+Clicking a forwarded notification brings the DroidMirror window forward. If the
+phone is locked, its open action waits up to 30 seconds for you to unlock it.
+The request is canceled if its notification changes, the authenticated Bluetooth
+connection ends, or you click another notification. Replies and action buttons
+continue to use Bluetooth directly. Run `bash Native/test-notification-open.sh`
+to check the unlock and action queue policies.
+
+In Mac **Settings → Notifications**, turn off individual phone apps to avoid
+duplicate alerts from apps installed on both devices. Apps appear after an eligible
+notification arrives. Choices persist across restarts and apply immediately,
+including while mirroring. Disabling an app clears its mirrored Mac notifications
+without dismissing anything on the phone. Re-enabling allows future notifications;
+it does not replay cleared alerts. No Android update is required. Regression checks:
+`bash Native/test-notification-apps.sh`.
+
 For automatic video upgrades, install the current Mac build and Android 0.37.
 Keep the existing Bluetooth pairing and Shizuku setup. The app first tries Iroh
 using authenticated Bluetooth address hints plus local multicast discovery.
@@ -100,14 +115,28 @@ in the same window, then retries LAN followed by wireless ADB.
 See [transport order and validation](Native/PEER-TRANSPORT.md).
 The background bridge does not enable Wireless debugging automatically.
 
-Optional **Mirror clipboard text over Bluetooth** in **Settings → Clipboard** or the visible DroidMirror menu adds two-way text sync, including between mirror sessions. It uses
+Share an HTTP or HTTPS link through **Share → DroidMirror** on either device to open
+it in the other device’s default browser. This uses the paired Bluetooth connection
+and works between mirror sessions. Both apps need the link-sharing update; the
+phone must be Ready for Mac, and opening links on Android also requires authorized
+Shizuku. Enable DroidMirror in the Mac’s Share menu if it is not listed. File sharing
+through these share targets is not supported. See [link sharing](Native/LINK-SHARING.md).
+
+Optional **Mirror clipboard over Bluetooth** in **Settings → Clipboard** or the visible DroidMirror menu adds two-way text and individual-file sync, including between mirror sessions. Files must be less than 5 MB (5,000,000 bytes). It uses
 the existing encrypted pairing and requires Shizuku; enable it explicitly after
 updating both apps. See [clipboard behavior, limits and validation](Native/CLIPBOARD-SYNC.md).
 
+Optional **Settings → Media playback → Sync phone and Apple Music playback**
+shows phone media in macOS Now Playing and Apple Music on Android, with playback
+controls in both directions. Audio stays on its original device. Requires updated
+apps, paired Bluetooth, Android notification access and Mac Music Automation
+permission. See [media sync behavior and validation](Native/MEDIA-SYNC.md).
+
 When the current phone task exposes a supported web URL, a **phone icon** appears
 in the Mac menu bar. Click it to continue in your default browser. Google Docs
-document intents and direct HTTP/HTTPS view intents are supported; other tasks
-stay silent. The icon clears on unsupported tasks or a stale Bluetooth connection.
+document intents and app-provided assist-content web URLs are supported, including
+Chrome and Tangent Browser. Other tasks stay silent. The icon clears on
+unsupported tasks or a stale Bluetooth connection.
 This uses the paired encrypted background bridge and Shizuku, including between
 mirror sessions, and requires matching updated Mac and Android builds. It does
 not transfer browser login or document cursor/scroll state. See
@@ -124,6 +153,39 @@ The mirrored screen also shows a circular camera hole using Android's reported
 cutout geometry. It follows video scaling and rotation, with no guessed camera
 position on phones that report no cutout. Bluetooth requires companion 0.11 or
 newer. See [camera-cutout geometry and validation](Native/CAMERA-CUTOUT.md).
+
+## Background startup
+
+In Mac **Settings → Background service**, enable **Start background service at login**.
+This registers only the existing notifications/Bluetooth receiver with macOS Service
+Management; the mirroring host and mirror window do not launch. If macOS requests
+approval, use **Open Login Items Settings…** and allow DroidMirror. The switch reads
+the system registration state, including changes made in System Settings. Stop
+mirroring before changing this setting because unregistering a service can terminate
+its running process. Startup occurs after user login, not before login or FileVault
+unlock. No keep-alive restart loop is installed.
+
+On Android, **Enable background bridge** already persists across reboots. The boot
+receiver starts the connected-device foreground service after the first unlock;
+stopping the bridge disables that restart. Bluetooth permissions must remain granted.
+The listener waits for Bluetooth and authorized Shizuku without starting a mirror.
+On non-rooted phones, Shizuku itself normally needs starting again after each reboot;
+DroidMirror does not bypass that requirement. Manufacturer battery/auto-start
+restrictions or force-stopping the app can prevent boot startup. Open DroidMirror
+and enable the bridge again if necessary. Device reboot/login behavior still needs
+physical validation.
+
+## Phone hotspot
+
+When the Mac has no network route, a hotspot icon appears in the menu bar.
+Choose **Turn On Phone Hotspot** to request Internet tethering over the paired
+Bluetooth bridge, then join the phone from the Mac Wi-Fi menu. Requires Android
+11+, matching app builds and authorized Shizuku. The phone keeps its saved hotspot
+name/password; save that network on the Mac once for macOS auto-join.
+The icon also offers optional automatic activation after 15 seconds offline,
+off by default, with one attempt per outage and a five-minute cooldown.
+Phone/carrier restrictions can prevent activation. See
+[hotspot behavior and validation](Native/PHONE-HOTSPOT.md).
 
 ## Experimental Wi-Fi Aware
 

@@ -9,6 +9,8 @@ public final class HevcCapturePolicy {
     // Recover to startup quality only; avoid upward bandwidth probes on Classic.
     public static final int BLUETOOTH_MAX_BIT_RATE = BLUETOOTH_BIT_RATE;
     public static final long BLUETOOTH_MAX_FRAME_AGE_US = 500000;
+    public static final long WIFI_MAX_FRAME_AGE_US = 500000;
+    public static final int MIN_ADAPTIVE_BIT_RATE = 64000;
     public static final String CODEC = "h265";
     public static final int WIRE_CODEC_ID = 0x68323635;
     public static final String WIFI_OPTIONS = "profile:int=1,max-bframes:int=0";

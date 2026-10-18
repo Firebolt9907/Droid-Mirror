@@ -2,6 +2,7 @@
 #import "DeviceCorners.h"
 #import "PhoneAppearance.h"
 #import <CoreImage/CoreImage.h>
+#import <QuartzCore/QuartzCore.h>
 #import <SDL3/SDL.h>
 #import <dlfcn.h>
 #import <unistd.h>
@@ -15,6 +16,11 @@ static NSDictionary *DMState;
 static NSData *DMStateBytes;
 static BOOL DMSessionRunning;
 static BOOL DMStopRequested;
+static NSUInteger DMPresentationGeneration;
+static const CFTimeInterval DMFirstFrameRevealDuration = 1.25;
+// Core Animation stores CATransition under this reserved key even when callers
+// supply another key. Use it for replacement and immediate video cancellation.
+static NSString *const DMStatusTransitionKey = @"transition";
 
 static void DMHostCommand(NSString *name) {
     [[NSDistributedNotificationCenter defaultCenter] postNotificationName:name
@@ -63,11 +69,76 @@ void DroidMirrorInstallSessionMenu(void) {
 }
 
 
+// Animate the status layer only; never transform the live SDL/Metal surface.
+static BOOL DMPhoneMotionAllowed(NSWindow *window) {
+    return window.visible && !window.miniaturized &&
+        !NSWorkspace.sharedWorkspace.accessibilityDisplayShouldReduceMotion;
+}
+
+@interface DMConnectionActivityView : NSView
+@property(nonatomic, strong) CAShapeLayer *ring;
+@property(nonatomic, strong) CALayer *glow;
+- (void)updateMotion;
+@end
+@implementation DMConnectionActivityView
+- (instancetype)initWithFrame:(NSRect)frame {
+    if ((self = [super initWithFrame:frame])) {
+        self.wantsLayer = YES;
+        self.glow = [CALayer layer];
+        self.glow.frame = CGRectMake(4, 4, 48, 48);
+        self.glow.cornerRadius = 24;
+        self.glow.backgroundColor = [NSColor colorWithWhite:1 alpha:0.08].CGColor;
+        [self.layer addSublayer:self.glow];
+        self.ring = [CAShapeLayer layer];
+        self.ring.frame = CGRectMake(0, 0, 56, 56);
+        CGPathRef path = CGPathCreateWithEllipseInRect(CGRectMake(2, 2, 52, 52), NULL);
+        self.ring.path = path; CGPathRelease(path);
+        self.ring.fillColor = nil;
+        self.ring.strokeColor = [NSColor colorWithWhite:1 alpha:0.75].CGColor;
+        self.ring.lineWidth = 1.5;
+        self.ring.lineCap = kCALineCapRound;
+        self.ring.strokeEnd = 0.23;
+        [self.layer addSublayer:self.ring];
+        NSImageView *phone = [NSImageView imageViewWithImage:
+            [NSImage imageWithSystemSymbolName:@"iphone.gen3" accessibilityDescription:nil]];
+        phone.frame = NSMakeRect(17, 14, 22, 28);
+        phone.imageScaling = NSImageScaleProportionallyUpOrDown;
+        phone.contentTintColor = NSColor.whiteColor;
+        [self addSubview:phone];
+        self.accessibilityElement = YES;
+        self.accessibilityRole = NSAccessibilityProgressIndicatorRole;
+        self.accessibilityLabel = @"Connecting to your phone";
+        [NSWorkspace.sharedWorkspace.notificationCenter addObserver:self selector:@selector(updateMotion)
+            name:NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification object:nil];
+    }
+    return self;
+}
+- (void)dealloc { [NSWorkspace.sharedWorkspace.notificationCenter removeObserver:self]; }
+- (void)viewDidMoveToWindow { [super viewDidMoveToWindow]; [self updateMotion]; }
+- (void)updateMotion {
+    [self.ring removeAllAnimations];
+    [self.glow removeAllAnimations];
+    if (!DMPhoneMotionAllowed(self.window)) return;
+    CABasicAnimation *orbit = [CABasicAnimation animationWithKeyPath:@"transform.rotation.z"];
+    // AppKit layers use an upward Y axis, so negative rotation is clockwise.
+    orbit.fromValue = @0; orbit.toValue = @(-2 * M_PI);
+    orbit.duration = 1.65; orbit.repeatCount = HUGE_VALF;
+    [self.ring addAnimation:orbit forKey:@"connectionOrbit"];
+    CABasicAnimation *breath = [CABasicAnimation animationWithKeyPath:@"opacity"];
+    breath.fromValue = @0.35; breath.toValue = @1;
+    breath.duration = 1.2; breath.autoreverses = YES; breath.repeatCount = HUGE_VALF;
+    breath.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
+    [self.glow addAnimation:breath forKey:@"connectionBreath"];
+}
+@end
+
 @interface DMConnectingPhoneView : NSView
 @property(nonatomic, strong) NSImage *wallpaper;
+@property(nonatomic) BOOL revealingVideo;
 - (void)reloadWallpaper;
 @end
 @implementation DMConnectingPhoneView
+- (NSView *)hitTest:(NSPoint)point { return self.revealingVideo ? nil : [super hitTest:point]; }
 - (void)reloadWallpaper {
     self.wallpaper = nil;
     id encoded = DMReadPhoneAppearance()[@"wallpaper"];
@@ -112,9 +183,28 @@ static void DMShowPhoneState(NSString *title, NSString *message, BOOL connecting
     NSWindow *window = DMNativePhone();
     if (!window) return;
     DMSetChrome(NO);
-    [DMLoadingSurface removeFromSuperview];
     NSView *screen = window.contentView;
-    DMConnectingPhoneView *overlay = [[DMConnectingPhoneView alloc] initWithFrame:screen.bounds];
+    // Keep wallpaper geometry stable while status controls settle into view.
+    ++DMPresentationGeneration;
+    BOOL replacingStatus = DMLoadingSurface.superview == screen;
+    DMConnectingPhoneView *overlay = replacingStatus ? (DMConnectingPhoneView *)DMLoadingSurface
+        : [[DMConnectingPhoneView alloc] initWithFrame:screen.bounds];
+    overlay.wantsLayer = YES;
+    [overlay.layer removeAllAnimations];
+    overlay.revealingVideo = NO;
+    [CATransaction begin]; [CATransaction setDisableActions:YES];
+    overlay.layer.opacity = 1;
+    [CATransaction commit];
+    // Capture the old layer content before replacing its controls. A single
+    // keyed transition cannot queue stale content or delayed completion work.
+    if (replacingStatus && DMPhoneMotionAllowed(window)) {
+        CATransition *transition = [CATransition animation];
+        transition.type = kCATransitionFade;
+        transition.duration = 0.24;
+        transition.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
+        [overlay.layer addAnimation:transition forKey:DMStatusTransitionKey];
+    }
+    for (NSView *view in overlay.subviews.copy) [view removeFromSuperview];
     [overlay reloadWallpaper];
     overlay.identifier = @"DroidMirrorConnecting";
     overlay.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
@@ -124,11 +214,10 @@ static void DMShowPhoneState(NSString *title, NSString *message, BOOL connecting
     stack.spacing = 18;
     stack.translatesAutoresizingMaskIntoConstraints = NO;
     if (connecting) {
-        NSProgressIndicator *spinner = [NSProgressIndicator new];
-        spinner.style = NSProgressIndicatorStyleSpinning;
-        [spinner.widthAnchor constraintEqualToConstant:24].active = YES;
-        [spinner.heightAnchor constraintEqualToConstant:24].active = YES;
-        [stack addArrangedSubview:spinner]; [spinner startAnimation:nil];
+        DMConnectionActivityView *activity = [[DMConnectionActivityView alloc] initWithFrame:NSMakeRect(0, 0, 56, 56)];
+        [activity.widthAnchor constraintEqualToConstant:56].active = YES;
+        [activity.heightAnchor constraintEqualToConstant:56].active = YES;
+        [stack addArrangedSubview:activity];
     } else {
         NSImageView *icon = [NSImageView imageViewWithImage:[NSImage imageWithSystemSymbolName:
             [title containsString:@"use"] ? @"iphone.gen3" : @"iphone.gen3.radiowaves.left.and.right"
@@ -171,7 +260,29 @@ static void DMShowPhoneState(NSString *title, NSString *message, BOOL connecting
         [stack.centerYAnchor constraintEqualToAnchor:overlay.centerYAnchor],
         [stack.widthAnchor constraintEqualToAnchor:overlay.widthAnchor constant:-72]
     ]];
-    [screen addSubview:overlay]; DMLoadingSurface = overlay;
+    if (!replacingStatus) {
+        [DMLoadingSurface removeFromSuperview];
+        [screen addSubview:overlay]; DMLoadingSurface = overlay;
+    }
+    [overlay layoutSubtreeIfNeeded];
+    if (DMPhoneMotionAllowed(window)) {
+        if (!replacingStatus) {
+            // Returning from video to an error/status page uses the same gentle
+            // crossfade as connecting, rather than abruptly covering the frame.
+            CABasicAnimation *background = [CABasicAnimation animationWithKeyPath:@"opacity"];
+            background.fromValue = @0; background.toValue = @1; background.duration = 0.24;
+            [overlay.layer addAnimation:background forKey:@"statusBackgroundEntrance"];
+        }
+        stack.wantsLayer = YES;
+        CABasicAnimation *settle = [CABasicAnimation animationWithKeyPath:@"transform.translation.y"];
+        settle.fromValue = @(-10); settle.toValue = @0;
+        settle.duration = 0.36;
+        settle.timingFunction = [CAMediaTimingFunction functionWithControlPoints:0.16 :1 :0.3 :1];
+        [stack.layer addAnimation:settle forKey:@"statusEntrance"];
+        CABasicAnimation *appear = [CABasicAnimation animationWithKeyPath:@"opacity"];
+        appear.fromValue = @0; appear.toValue = @1; appear.duration = 0.24;
+        [stack.layer addAnimation:appear forKey:@"statusOpacity"];
+    }
     window.movableByWindowBackground = YES;
     DMApplyDeviceCorners(screen);
     [window displayIfNeeded];
@@ -211,14 +322,44 @@ void DroidMirrorShowConnecting(SDL_Window *sdlWindow) {
             }];
     }
     [window makeKeyAndOrderFront:nil];
+    for (NSView *view in DMLoadingSurface.subviews.firstObject.subviews)
+        if ([view isKindOfClass:DMConnectionActivityView.class]) [(DMConnectionActivityView *)view updateMotion];
     DMHostCommand(@"app.droidmirror.connectingVisible");
 }
 
 void DMFinishConnectingPhone(void) {
-    NSView *screen = DMLoadingSurface.superview;
-    [DMLoadingSurface removeFromSuperview]; DMLoadingSurface = nil;
+    DMConnectingPhoneView *overlay = (DMConnectingPhoneView *)DMLoadingSurface;
+    if (!overlay || overlay.revealingVideo) return;
+    NSView *screen = overlay.superview;
     screen.window.movableByWindowBackground = NO;
-    DMApplyDeviceCorners(screen); DMSetChrome(YES);
+    DMApplyDeviceCorners(screen);
+    [overlay.layer removeAllAnimations];
+    // First-frame arrival enables interaction immediately. Reveal the running
+    // video underneath a fading wallpaper, without snapshots or buffering frames.
+    overlay.revealingVideo = YES;
+    NSUInteger generation = ++DMPresentationGeneration;
+    if (!DMPhoneMotionAllowed(screen.window)) {
+        [overlay removeFromSuperview]; DMLoadingSurface = nil; DMSetChrome(YES);
+        return;
+    }
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    overlay.layer.opacity = 0;
+    [CATransaction commit];
+    // Let the connection state register before gradually uncovering the picture.
+    // The earlier fast ease-out spent almost its entire duration near transparent.
+    CAKeyframeAnimation *reveal = [CAKeyframeAnimation animationWithKeyPath:@"opacity"];
+    reveal.values = @[@1, @1, @0.82, @0.35, @0];
+    reveal.keyTimes = @[@0, @0.12, @0.38, @0.75, @1];
+    reveal.calculationMode = kCAAnimationLinear;
+    reveal.duration = DMFirstFrameRevealDuration;
+    [overlay.layer addAnimation:reveal forKey:@"firstFrameReveal"];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(DMFirstFrameRevealDuration * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        // A disconnect/retry may have reused this surface during the reveal.
+        if (generation != DMPresentationGeneration || DMLoadingSurface != overlay) return;
+        [overlay.layer removeAllAnimations];
+        [overlay removeFromSuperview]; DMLoadingSurface = nil; DMSetChrome(YES);
+    });
 }
 
 static NSString *DMStopPath(void) {

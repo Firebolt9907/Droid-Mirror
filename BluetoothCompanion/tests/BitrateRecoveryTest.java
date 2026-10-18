@@ -55,6 +55,14 @@ public final class BitrateRecoveryTest {
         require(bluetooth.healthy(51000000) == 80000);
         for (long now = 51100000; now <= 100000000; now += 100000) require(bluetooth.healthy(now) <= 128000);
         require(bluetooth.healthy(100100000) == 128000);
+        // A nominal 12 Mbps profile must adapt below 6 Mbps when a VPN or
+        // congested Wi-Fi path cannot sustain it, then recover gradually.
+        BitrateRecovery wifi = new BitrateRecovery(12000000, 12000000, 10000000,
+                HevcCapturePolicy.MIN_ADAPTIVE_BIT_RATE);
+        for (long now = 0; now < 30000000; now += 1000000) wifi.backlogged(now);
+        require(wifi.stalled() == HevcCapturePolicy.MIN_ADAPTIVE_BIT_RATE);
+        for (long now = 30000000; now < 40000000; now += 100000) require(wifi.healthy(now) == 64000);
+        require(wifi.healthy(40000000) == 80000);
         System.out.println("Bitrate recovery: sustained progress, idle gaps, congestion reset, target ceiling and bandwidth probing passed");
     }
 }

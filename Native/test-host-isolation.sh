@@ -3,6 +3,9 @@ set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 task_build=$(mktemp -d /private/tmp/droidmirror-isolation.XXXXXX)
 trap 'rm -rf "$task_build"' EXIT
+clang -fobjc-arc -fblocks -framework Foundation -framework AppKit \
+  "$root/Native/ReceiverUpdateTests.m" -o "$task_build/receiver-update-tests"
+"$task_build/receiver-update-tests"
 app="$task_build/DroidMirror.app/Contents"
 mkdir -p "$app/MacOS" "$app/Helpers" "$app/Frameworks"
 cp "$root/Resources/Info.plist" "$app/Info.plist"

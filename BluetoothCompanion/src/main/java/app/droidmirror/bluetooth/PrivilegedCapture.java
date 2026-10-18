@@ -63,6 +63,7 @@ final class PrivilegedCapture implements AutoCloseable {
         encoder.setMaxFrameAgeUs(HevcCapturePolicy.BLUETOOTH_MAX_FRAME_AGE_US);
         // Keep recovery within the Classic budget. Wi-Fi uses its explicit profile.
         encoder.setMaxAdaptiveBitRate(HevcCapturePolicy.BLUETOOTH_MAX_BIT_RATE);
+        encoder.setMinAdaptiveBitRate(HevcCapturePolicy.MIN_ADAPTIVE_BIT_RATE);
         controller.start(fatal -> ended.run());
         encoder.start(fatal -> ended.run());
     }
@@ -73,7 +74,7 @@ final class PrivilegedCapture implements AutoCloseable {
             "video_codec_options=" + HevcCapturePolicy.WIFI_OPTIONS);
         // Reuse scrcpy's EOS/reset path. It emits new session metadata and codec
         // configuration on the existing stream without another device header.
-        encoder.requestVideoProfile(options);
+        encoder.requestVideoProfile(options, HevcCapturePolicy.WIFI_MAX_FRAME_AGE_US);
 
     }
     synchronized void restoreBluetoothVideo() {

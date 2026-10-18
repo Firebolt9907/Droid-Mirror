@@ -28,15 +28,24 @@ public final class BluetoothWire {
     private VideoWindow videoWindow;
     private Preview preview;
     private byte[] latestBluetoothFrame;
+    private boolean latencySamples;
     /** A bounded copy of live video. A slow candidate must never block Classic. */
     static final class Preview {
-        private final java.util.concurrent.ArrayBlockingQueue<byte[]> records =
+        static final class Record {
+            final byte[] bytes; final long timestamp;
+            Record(byte[] bytes, long timestamp) { this.bytes=bytes; this.timestamp=timestamp; }
+        }
+        private final java.util.concurrent.ArrayBlockingQueue<Record> records =
             new java.util.concurrent.ArrayBlockingQueue<>(128);
         private volatile boolean failed;
         void offer(byte[] bytes) {
-            if (!failed && !records.offer(bytes)) { failed=true; records.clear(); }
+            offer(new Record(bytes, 0));
         }
-        byte[] poll() throws IOException {
+        void sample(long timestamp) { offer(new Record(null, timestamp)); }
+        private void offer(Record record) {
+            if (!failed && !records.offer(record)) { failed=true; records.clear(); }
+        }
+        Record poll() throws IOException {
             if (failed) throw new IOException("Wireless warm-up could not keep up with Bluetooth");
             try { return records.poll(20, java.util.concurrent.TimeUnit.MILLISECONDS); }
             catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); throw new IOException(interrupted); }
@@ -44,6 +53,7 @@ public final class BluetoothWire {
     }
     synchronized Preview beginPreview() throws IOException {
         if (upgraded || preview != null) throw new IOException("Video handoff already pending");
+        latencySamples=true;
         return preview = new Preview();
     }
     synchronized void endPreview(Preview candidate) { if (preview == candidate) preview=null; }
@@ -98,6 +108,7 @@ public final class BluetoothWire {
         out.writeByte(4); out.writeInt(json.length); out.write(json); out.flush();
     }
     public void video(byte[] bytes) throws IOException {
+        long captured=System.nanoTime();
         for (int offset = 0; offset < bytes.length;) {
             // A handoff commits before the receiver confirms the larger window;
             // fallback can also shrink it while this writer is waiting on ACKs.
@@ -130,6 +141,18 @@ public final class BluetoothWire {
             }
             offset += length;
         }
+        try { latencySample(captured); }
+        catch (IOException failed) { if (!upgraded) throw failed; }
+    }
+    // The trailing marker measures delivery of the whole packet, including
+    // flow-control waits. Both paths use the same phone clock; no clock sync.
+    synchronized void previewLatencySample(long timestamp) throws IOException {
+        if (!upgraded) { classic.writeByte(5); classic.writeInt(8); classic.writeLong(timestamp); classic.flush(); }
+    }
+    private synchronized void latencySample(long captured) throws IOException {
+        if (!latencySamples) return;
+        out.writeByte(5); out.writeInt(8); out.writeLong(captured); out.flush();
+        if (preview!=null) preview.sample(captured);
     }
     private void writeVideo(DataOutputStream target, byte[] bytes, int offset, int length) throws IOException {
         target.writeByte(VIDEO); target.writeInt(length); target.write(bytes,offset,length); target.flush();

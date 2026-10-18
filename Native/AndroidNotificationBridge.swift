@@ -15,6 +15,9 @@ final class AndroidNotificationBridge {
     private var lastStart = Date.distantPast
     private let policy = NotificationDeliveryPolicy()
     private var sessionObserver: NSObjectProtocol?
+    private var configurationObserver: NSObjectProtocol?
+    private let appPreferences = NotificationAppPreferences(defaults: NotificationRuntime.preferences)
+    private var sourcePackages = [String: String]()
     private var sessionPID: pid_t?
     private var received = 0, suppressed = 0, submitted = 0, accepted = 0
     private var authorization = -1
@@ -44,6 +47,11 @@ final class AndroidNotificationBridge {
                         self.center.removeDeliveredNotifications(withIdentifiers: [notification.request.identifier])
                         continue
                     }
+                    self.recordApp(event)
+                    guard self.appPreferences.allows(event) else {
+                        self.center.removeDeliveredNotifications(withIdentifiers: [notification.request.identifier])
+                        continue
+                    }
                     self.conversations.adopt(phone: phone, card: card, source: id, event: event,
                         message: info["cardMessage"] as? [String: Any], replies: info["cardReplies"] as? [[String: Any]] ?? [])
                     let key = phone + ":" + card
@@ -68,6 +76,10 @@ final class AndroidNotificationBridge {
                 self.sessionPID = pid
                 if !active { self.visible = false }
             }
+        configurationObserver = DistributedNotificationCenter.default().addObserver(
+            forName: NotificationAppPreferences.changed, object: nil, queue: .main) { [weak self] _ in
+                self?.applyAppPreferences()
+            }
         let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in self?.flush() }
         self.timer = timer
         RunLoop.main.add(timer, forMode: .common)
@@ -79,9 +91,40 @@ final class AndroidNotificationBridge {
         timer?.invalidate()
         if let observer { DistributedNotificationCenter.default().removeObserver(observer) }
         if let sessionObserver { DistributedNotificationCenter.default().removeObserver(sessionObserver) }
+        if let configurationObserver { DistributedNotificationCenter.default().removeObserver(configurationObserver) }
+        configurationObserver = nil
         observer = nil; actions = NotificationActionQueue(); conversations = NotificationConversationState()
         controller = nil; pendingDeliveries.removeAll()
         restorations.removeAll()
+        sourcePackages.removeAll()
+    }
+    private func recordApp(_ event: [String: Any]) {
+        if appPreferences.record(event) {
+            NotificationRuntime.post(NotificationAppPreferences.catalogChanged.rawValue)
+        }
+        if let id = event["id"] as? String, let package = event["package"] as? String {
+            sourcePackages[id] = package
+        }
+    }
+    private func applyAppPreferences() {
+        NotificationRuntime.preferences.synchronize()
+        let excluded = appPreferences.excluded
+        for (id, package) in sourcePackages where excluded.contains(package) { remove(id) }
+        // Include cards retained by macOS across receiver restarts. Never send
+        // a phone dismissal for a local app preference change.
+        center.getDeliveredNotifications { [weak self] notifications in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                let identifiers = notifications.compactMap { notification -> String? in
+                    let info = notification.request.content.userInfo
+                    guard info["phone"] as? String != nil,
+                          let event = info["cardEvent"] as? [String: Any],
+                          !self.appPreferences.allows(event) else { return nil }
+                    return notification.request.identifier
+                }
+                self.center.removeDeliveredNotifications(withIdentifiers: identifiers)
+            }
+        }
     }
     private func baseIdentifier(_ id: String) -> String { "DroidMirror.android.\(BLETrust.identity ?? "unpaired").\(id)" }
     private func identifier(_ id: String) -> String {
@@ -107,6 +150,12 @@ final class AndroidNotificationBridge {
                 if let id = event["id"] as? String { remove(id) }
                 return
             }
+            recordApp(event)
+            guard appPreferences.allows(event) else {
+                suppressed += 1
+                if let id = event["id"] as? String { remove(id) }
+                return
+            }
             guard let identity = BLETrust.identity, let source = event["id"] as? String else { return }
             let existing = Set(conversations.siblings(source))
             for card in conversations.update(event, phone: identity) {
@@ -122,6 +171,7 @@ final class AndroidNotificationBridge {
         }
     }
     private func deliver(_ event: [String: Any], forceQuiet: Bool = false) {
+            guard appPreferences.allows(event) else { return }
             guard let id = event["id"] as? String, let card = event["card"] as? String, let version = event["version"] as? String,
                   let identity = BLETrust.identity else { return }
             let content = UNMutableNotificationContent()
@@ -129,7 +179,7 @@ final class AndroidNotificationBridge {
             content.subtitle = NotificationConversationContent.subtitle(event)
             content.body = NotificationConversationContent.body(event)
             if event["isMessage"] as? Bool == true { content.threadIdentifier = identity + ":" + id }
-            let storedKeys = ["id", "version", "app", "title", "subtitle", "body", "conversation", "isMessage", "actions"]
+            let storedKeys = ["id", "version", "package", "app", "title", "subtitle", "body", "conversation", "isMessage", "actions"]
             let storedEvent = event.filter { storedKeys.contains($0.key) }
             content.userInfo = ["phone": identity, "id": id, "version": version, "card": card, "cardEvent": storedEvent,
                 "cardReplies": event["cardReplies"] ?? []]
@@ -160,7 +210,8 @@ final class AndroidNotificationBridge {
             let token = UUID()
             pendingDeliveries[card] = token
             NotificationCommunicationContent.prepare(content, event: event, identity: identity) { [weak self] presented in
-                guard let self, self.pendingDeliveries[card] == token, BLETrust.identity == identity else {
+                guard let self, self.pendingDeliveries[card] == token, BLETrust.identity == identity,
+                      self.appPreferences.allows(event) else {
                     if let icon { try? FileManager.default.removeItem(at: icon.directory) }
                     return
                 }
@@ -168,7 +219,11 @@ final class AndroidNotificationBridge {
                 self.submitted += 1
                 self.center.add(UNNotificationRequest(identifier: self.identifier(card), content: presented, trigger: nil)) { [weak self] error in
                     if let error { NSLog("DroidMirror notification delivery failed: %@", error.localizedDescription) }
-                    else { DispatchQueue.main.async { self?.accepted += 1 } }
+                    else { DispatchQueue.main.async {
+                        guard let self else { return }
+                        self.accepted += 1
+                        if !self.appPreferences.allows(event) { self.applyAppPreferences() }
+                    } }
                     if let icon { try? FileManager.default.removeItem(at: icon.directory) }
                 }
             }
@@ -187,6 +242,7 @@ final class AndroidNotificationBridge {
         }
     }
     private func remove(_ id: String) {
+        sourcePackages.removeValue(forKey: id)
         let cards = conversations.remove(id)
         for card in cards {
             restorations.removeValue(forKey: card)
@@ -201,6 +257,7 @@ final class AndroidNotificationBridge {
     }
     func respond(_ response: UNNotificationResponse) {
         let info = response.notification.request.content.userInfo
+        if let event = info["cardEvent"] as? [String: Any], !appPreferences.allows(event) { return }
         guard let identity = info["phone"] as? String, identity == BLETrust.identity,
               let id = info["id"] as? String, let card = info["card"] as? String,
               let originalVersion = info["version"] as? String else { return }
@@ -269,6 +326,17 @@ final class AndroidNotificationBridge {
                 : "Couldn’t connect to your phone. The notification action was not sent.")
         }
         guard let identity = BLETrust.identity else { return }
+        // An explicit click focuses immediately, even if a recent reconnect
+        // throttles startup or a visible heartbeat arrives before the next flush.
+        if actions.needsMirror(phone: identity), focusPolicy.requestOnce() {
+            lastStart = Date()
+            if NotificationRuntime.background { NotificationRuntime.requestMirror() }
+            else if let function = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "DroidMirrorRequestMirror") {
+                unsafeBitCast(function, to: (@convention(c) () -> Void).self)()
+            }
+            DistributedNotificationCenter.default().postNotificationName(Notification.Name("app.droidmirror.focusMirror"),
+                object: sessionPID.map { String($0) }, userInfo: nil, deliverImmediately: true)
+        }
         for pending in actions.due(phone: identity, mirrorVisible: visible) {
             if controller?.send(pending.command) == true, let request = pending.command["request"] as? String {
                 // Never resend an unacknowledged reply: it could send twice.
@@ -278,16 +346,8 @@ final class AndroidNotificationBridge {
         if !visible && actions.needsMirror(phone: identity) {
             if Date().timeIntervalSince(lastStart) >= 2 {
                 lastStart = Date()
-                let focus = focusPolicy.requestOnce()
                 // Host owns launch/cleanup; never start an unmanaged second client.
-                if NotificationRuntime.background { NotificationRuntime.requestMirror(activate: focus) }
-                else if focus, let function = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "DroidMirrorRequestMirror") {
-                    unsafeBitCast(function, to: (@convention(c) () -> Void).self)()
-                }
-                if focus {
-                    DistributedNotificationCenter.default().postNotificationName(Notification.Name("app.droidmirror.focusMirror"),
-                        object: sessionPID.map { String($0) }, userInfo: nil, deliverImmediately: true)
-                }
+                if NotificationRuntime.background { NotificationRuntime.requestMirror(activate: false) }
             }
             return
         }

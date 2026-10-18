@@ -2,6 +2,7 @@ import AppKit
 import SwiftUI
 
 struct ContentView: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @EnvironmentObject private var model: MirrorModel
     @State private var showWireless = false
     @State private var showSettings = false
@@ -45,8 +46,13 @@ struct ContentView: View {
             }
 
             Button { model.isMirroring ? model.stop() : model.start() } label: {
-                Label(model.isMirroring ? "Stop" : "Mirror", systemImage: model.isMirroring ? "stop.fill" : "play.fill")
-                    .fontWeight(.semibold)
+                HStack(spacing: 6) {
+                    if model.isStarting { ProgressView().controlSize(.mini) }
+                    Label(model.isStarting ? "Connecting" : (model.isMirroring ? "Stop" : "Mirror"),
+                          systemImage: model.isMirroring ? "stop.fill" : "play.fill")
+                        .contentTransition(.symbolEffect(.replace))
+                        .fontWeight(.semibold)
+                }
             }
             .buttonStyle(.borderedProminent)
             .tint(model.isMirroring ? .red : .accentColor)
@@ -66,6 +72,8 @@ struct ContentView: View {
         .padding(18)
         .background(WindowStyler())
         .fixedSize()
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.25), value: model.isStarting)
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.25), value: model.isMirroring)
 
         .sheet(isPresented: $showWireless) { WirelessView().environmentObject(model) }
         .onChange(of: model.isDeviceLocked) { _, locked in
@@ -78,6 +86,8 @@ struct ContentView: View {
             Circle().fill(.black.opacity(0.18)).frame(width: 34, height: 34)
             Image(systemName: model.selectedDevice?.isBluetooth == true ? "antenna.radiowaves.left.and.right" : (model.selectedDevice?.isWireless == true ? "wifi" : "smartphone"))
                 .font(.system(size: 15, weight: .semibold))
+                .contentTransition(.symbolEffect(.replace))
+                .symbolEffect(.pulse, options: .repeating, isActive: model.isStarting && !reduceMotion)
                 .foregroundStyle(model.selectedDevice?.isOnline == true ? Color.accentColor : Color.secondary)
         }
         .overlay(alignment: .bottomTrailing) {
@@ -111,7 +121,7 @@ struct ContentView: View {
             VStack(alignment: .leading, spacing: 1) {
                 Text(model.selectedDevice?.displayName ?? "No device")
                     .font(.system(size: 13, weight: .semibold)).lineLimit(1)
-                Text(model.isMirroring ? "Mirroring" : (model.selectedDevice?.isOnline == true ? (model.selectedDevice?.isBluetooth == true ? "Bluetooth paired" : "Ready") : "Not connected"))
+                Text(model.isStarting ? "Connecting…" : (model.isMirroring ? "Mirroring" : (model.selectedDevice?.isOnline == true ? (model.selectedDevice?.isBluetooth == true ? "Bluetooth paired" : "Ready") : "Not connected")))
                     .font(.caption2).foregroundStyle(.secondary)
             }
             .frame(width: 118, alignment: .leading)

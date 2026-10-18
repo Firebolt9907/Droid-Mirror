@@ -5,9 +5,13 @@ import android.app.RemoteInput
 import android.app.ActivityOptions
 import android.app.PendingIntent
 import android.app.NotificationManager
+import android.app.KeyguardManager
 import android.content.Intent
 import android.os.Bundle
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
+import android.os.SystemClock
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
 import org.json.JSONArray
@@ -25,6 +29,57 @@ class PhoneNotifications : NotificationListenerService() {
     private data class Entry(val notification: StatusBarNotification, val version: String)
     private val entries = LinkedHashMap<String, Entry>()
     private val icons = LinkedHashMap<String, String>()
+    private val openHandler = Handler(Looper.getMainLooper())
+    private var pendingOpen: Runnable? = null
+    private var pendingOpenResult: ((Boolean) -> Unit)? = null
+
+    private fun cancelOpen() {
+        pendingOpen?.let { openHandler.removeCallbacks(it) }
+        pendingOpen = null
+        val result = pendingOpenResult
+        pendingOpenResult = null
+        result?.invoke(false)
+    }
+
+    /** Only an authenticated explicit open may wait for the user to unlock. */
+    fun openAfterUnlock(command: JSONObject, authorized: () -> Boolean, result: (Boolean) -> Unit) {
+        val gate = NotificationOpenGate(SystemClock.elapsedRealtime())
+        openHandler.post {
+            // A newer click replaces the old destination instead of opening several apps.
+            cancelOpen()
+            pendingOpenResult = result
+            val task = object : Runnable {
+                override fun run() {
+                    // Keep the BLE lock outside the listener lock (BLE also calls snapshot/dismiss).
+                    val trusted = authorized()
+                    val outcome = synchronized(this@PhoneNotifications) {
+                        runCatching {
+                            val entry = entries[command.getString("id")]
+                            val current = live === this@PhoneNotifications && entry != null &&
+                                entry.version == command.getString("version") &&
+                                entry.notification.notification.contentIntent != null &&
+                                activeNotifications.any { it.key == entry.notification.key && it.postTime == entry.notification.postTime }
+                            val locked = getSystemService(KeyguardManager::class.java).isKeyguardLocked
+                            when (gate.poll(SystemClock.elapsedRealtime(), locked, trusted, current)) {
+                                NotificationOpenGate.Decision.WAIT -> null
+                                NotificationOpenGate.Decision.OPEN -> perform(command)
+                                else -> false
+                            }
+                        }.getOrDefault(false)
+                    }
+                    if (outcome == null) openHandler.postDelayed(this, 200)
+                    else {
+                        pendingOpen = null
+                        val callback = pendingOpenResult
+                        pendingOpenResult = null
+                        callback?.invoke(outcome)
+                    }
+                }
+            }
+            pendingOpen = task
+            task.run()
+        }
+    }
     private fun encodeImage(drawable: android.graphics.drawable.Drawable, photo: Boolean, maximumBytes: Int, content: Boolean = false): String? {
         if (maximumBytes < 256) return null
         val originalBounds = android.graphics.Rect(drawable.bounds)
@@ -109,8 +164,8 @@ class PhoneNotifications : NotificationListenerService() {
         live = this
         activeNotifications?.filter(::eligible)?.takeLast(128)?.forEach { remember(it) }
     }
-    override fun onListenerDisconnected() { live = null; synchronized(this) { entries.clear() } }
-    override fun onDestroy() { live = null; super.onDestroy() }
+    override fun onListenerDisconnected() { live = null; cancelOpen(); synchronized(this) { entries.clear() } }
+    override fun onDestroy() { live = null; cancelOpen(); super.onDestroy() }
     @Synchronized private fun remember(sbn: StatusBarNotification): Entry {
         val entry = Entry(sbn, UUID.randomUUID().toString())
         entries[id(sbn.key)] = entry

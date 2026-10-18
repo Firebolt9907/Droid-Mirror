@@ -26,7 +26,17 @@ ADB. Only online wireless ADB devices are tried; USB transports are excluded.
 Both paths must authenticate with the selected phone's BLE pairing key, so an
 unrelated connected ADB device cannot take over. Unavailable/untrusted candidates
 leave Bluetooth streaming. Discovery repeats after ten seconds when no upgrade
-succeeds. A successful video path remains active until it drops or the session ends.
+succeeds. Iroh must also pass a latency comparison with Bluetooth before handoff. Both
+paths carry phone monotonic packet timestamps; comparing arrival-minus-send
+medians cancels the clock offset and includes packet queueing and delivery time.
+At least three samples per path are required. A seven-sample median and 10 ms
+hysteresis filter jitter. While Iroh is active, delivery that remains slower than
+the measured Bluetooth baseline for two seconds triggers authenticated Bluetooth
+recovery. The baseline is refreshed during Bluetooth streaming and each preview;
+it is an estimate of Bluetooth performance while Iroh is active. Rejected or
+slow Iroh paths have a 60-second retry cooldown. Wireless ADB remains an optional
+fallback under the existing discovery policy. These are packet delivery measures,
+not screen-to-screen latency measurements.
 
 ## Pairing, handoff and recovery
 
@@ -39,7 +49,7 @@ discovery records or logs. Updating the pairing changes endpoint identities.
 Android waits for the QUIC stream and `DMPEER01` preface before opening its local
 handoff socket. This prevents discovery/stream setup from consuming the local
 application's two-second proof deadline. The Mac helper allows the LAN dial to
-finish before waiting for the DMWIFI04 challenge. DMWIFI04 authenticates the
+finish before waiting for the DMWIFI05 challenge. DMWIFI05 authenticates the
 requested quality profile and exact byte cutoff again on either path.
 
 Before committing a cutoff, Android mirrors video chunks and frame boundaries
@@ -51,7 +61,10 @@ be partial) over at least 250 ms, and confirms readiness. Only then does Android
 stop the preview and perform the existing byte-exact cutoff handshake. Quality
 increases after the receiver drains the Classic cutoff. A blocked candidate,
 queue overflow, missing confirmation or 10-second warm-up deadline leaves
-Bluetooth video active. Both apps must be updated for this warm-up protocol.
+Bluetooth video active. Both apps must be updated for this warm-up protocol. DMWIFI05 adds timestamp
+preview records (length -2 followed by a big-endian 64-bit nanosecond timestamp)
+and video envelope type 5 (the same 8-byte timestamp). Telemetry starts only after
+the new authenticated handshake. Older companion handshakes leave Bluetooth active.
 
 The same HEVC capture, decoder, scrcpy process and window are retained across
 handoffs. BLE input remains connected. On loss, the authenticated BLE recovery

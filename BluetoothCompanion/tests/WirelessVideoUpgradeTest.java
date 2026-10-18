@@ -13,8 +13,13 @@ public final class WirelessVideoUpgradeTest {
         socket.setSoTimeout(2000);
         return socket;
     }
+    static int previewLength(DataInputStream input) throws IOException {
+        int length;
+        while ((length=input.readInt())==-2) check(input.readLong()>0);
+        return length;
+    }
     static byte[] nonce(DataInputStream input) throws IOException {
-        check(Arrays.equals(input.readNBytes(8),"DMWIFI04".getBytes(java.nio.charset.StandardCharsets.US_ASCII)));
+        check(Arrays.equals(input.readNBytes(8),"DMWIFI05".getBytes(java.nio.charset.StandardCharsets.US_ASCII)));
         byte[] nonce=input.readNBytes(32); check(nonce.length==32); return nonce;
     }
     static byte[] authenticate(Socket socket, byte[] key, byte[] profile, BluetoothWire wire) throws Exception {
@@ -28,14 +33,14 @@ public final class WirelessVideoUpgradeTest {
         int frames=0;
         for (int i=0;i<3;i++) {
             wire.video(new byte[]{11,12,13}); wire.videoFrameSent();
-            check(input.readInt()==3);
+            check(previewLength(input)==3);
             check(Arrays.equals(input.readNBytes(3),new byte[]{11,12,13}));
-            check(input.readInt()==0); frames++;
+            check(previewLength(input)==0); frames++;
             check(!wire.isWireless());
         }
         check(frames==3);
         output.writeByte(1); output.flush();
-        check(input.readInt()==-1);
+        check(previewLength(input)==-1);
         byte[] response=input.readNBytes(48); check(response.length==48);
         check(java.nio.ByteBuffer.wrap(response).getLong()>=3);
         byte[] authenticated=java.nio.ByteBuffer.allocate(20).put(profile).put(response,0,8).array();
@@ -70,7 +75,11 @@ public final class WirelessVideoUpgradeTest {
                 wire.video(new byte[]{4,5,6});
                 DataInputStream received=new DataInputStream(good.getInputStream());
                 int type=received.readUnsignedByte(), length=received.readInt();
-                if (type==1) { check(length==1 && received.readByte()==6); type=received.readUnsignedByte(); length=received.readInt(); }
+                while (type==1 || type==5) {
+                    if (type==1) check(length==1 && received.readByte()==6);
+                    else check(length==8 && received.readLong()>0);
+                    type=received.readUnsignedByte(); length=received.readInt();
+                }
                 check(type==0 && length==3);
                 check(Arrays.equals(received.readNBytes(3),new byte[]{4,5,6}));
             }
@@ -154,7 +163,7 @@ public final class WirelessVideoUpgradeTest {
                 }).get(1,TimeUnit.SECONDS);
             } finally { sender.shutdownNow(); }
             check(!wire.isWireless());
-            check(classic.size()==8+301*8);
+            check(classic.size()==8+301*(8+13));
         }
         check(android.net.LocalSocket.blockedWrite==null);
     }
@@ -173,18 +182,18 @@ public final class WirelessVideoUpgradeTest {
             check(Arrays.equals(input.readNBytes(32),WirelessUpgradeAuth.proof(key,"preview server",nonce,profile)));
             // No new video is produced after candidate authentication.
             for(int i=0;i<3;i++) {
-                check(input.readInt()==frame.length);
+                check(previewLength(input)==frame.length);
                 check(Arrays.equals(input.readNBytes(frame.length),frame));
-                check(input.readInt()==0);
-                check(!wire.isWireless() && classic.size()==17);
+                check(previewLength(input)==0);
+                check(!wire.isWireless() && classic.size()>=17);
             }
             output.writeByte(1); output.flush();
-            check(input.readInt()==-1);
+            check(previewLength(input)==-1);
             byte[] response=input.readNBytes(48); check(response.length==48);
             check(java.nio.ByteBuffer.wrap(response).getLong()==4);
             output.writeByte(1); output.flush();
             check(quality.await(2,TimeUnit.SECONDS));
-            check(wire.isWireless() && classic.size()==17);
+            check(wire.isWireless() && classic.size()>=17);
         }
     }
 }

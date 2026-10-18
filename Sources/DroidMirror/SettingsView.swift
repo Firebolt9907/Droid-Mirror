@@ -2,6 +2,7 @@ import SwiftUI
 
 @MainActor
 private final class ClipboardConnectionStatus: NSObject, ObservableObject {
+    @Published var mediaText = "Waiting for the background receiver…"
     @Published var text = "Waiting for the background receiver…"
     override init() {
         super.init()
@@ -9,6 +10,7 @@ private final class ClipboardConnectionStatus: NSObject, ObservableObject {
             name: Notification.Name("app.droidmirror.receiverStatus"), object: nil)
     }
     @objc private func receive(_ event: Notification) {
+        if let status = event.userInfo?["media"] as? String { mediaText = status }
         if let status = event.userInfo?["clipboard"] as? String { text = status }
     }
     deinit { DistributedNotificationCenter.default().removeObserver(self) }
@@ -17,10 +19,32 @@ private final class ClipboardConnectionStatus: NSObject, ObservableObject {
 struct SettingsView: View {
     @EnvironmentObject private var model: MirrorModel
     @AppStorage("DroidMirror.clipboard.enabled") private var clipboardMirroring = false
+    @AppStorage("DroidMirror.hotspot.automatic") private var automaticHotspot = false
+    @AppStorage("DroidMirror.media.enabled") private var mediaSync = false
     @StateObject private var clipboardStatus = ClipboardConnectionStatus()
+    @StateObject private var backgroundLogin = BackgroundLoginService()
 
     var body: some View {
         Form {
+            Section("Background service") {
+                Toggle("Start background service at login", isOn: Binding(
+                    get: { backgroundLogin.enabled }, set: { backgroundLogin.setEnabled($0) }))
+                    .disabled(model.isMirroring || model.isStarting)
+                Text("Keeps phone notifications, link sharing and enabled sync features available after you log in. Does not open the mirror or start a mirroring session.")
+                    .font(.caption).foregroundStyle(.secondary)
+                if model.isMirroring || model.isStarting {
+                    Text("Stop mirroring before changing background startup.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                if backgroundLogin.needsApproval {
+                    Text("Allow DroidMirror under Login Items & Extensions in System Settings to finish enabling background startup.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Button("Open Login Items Settings…") { backgroundLogin.openLoginSettings() }
+                }
+                if !backgroundLogin.message.isEmpty {
+                    Text(backgroundLogin.message).font(.caption).foregroundStyle(.red)
+                }
+            }
             Section("Connection") {
                 Button("Set up a phone…") { OnboardingWindowController.shared.show(model: model) }
                 Text("Follow the guided setup for Bluetooth, phone permissions and your first mirror.")
@@ -58,8 +82,20 @@ struct SettingsView: View {
                 Text("Bluetooth starts at 320p, up to 15 fps, and a 128 kbps HEVC ceiling, then upgrades video over Iroh to the picture settings below. Video tries direct LAN or Tailscale IPs first, then an already-paired wireless ADB connection, then stays on Bluetooth. Relays and public Iroh discovery are disabled. Wireless ADB fallback requires Wireless debugging and one-time ADB pairing. Mouse, keyboard and navigation stay on Bluetooth. Audio requires a direct ADB session. Authorize Shizuku and enable the background bridge once in the Android companion.")
                     .font(.caption).foregroundStyle(.secondary)
             }
+            Section("Phone hotspot") {
+                Toggle("Automatically turn on phone hotspot when Mac is offline", isOn: $automaticHotspot)
+                    .onChange(of: automaticHotspot) { _, _ in
+                        UserDefaults.standard.synchronize()
+                        DistributedNotificationCenter.default().postNotificationName(
+                            Notification.Name("app.droidmirror.hotspotConfiguration"), object: nil,
+                            userInfo: nil, deliverImmediately: true)
+                    }
+                Text("When offline, use the hotspot icon in the menu bar to turn on your phone’s hotspot over Bluetooth. Automatic mode waits 15 seconds and tries once per outage. Uses mobile data. Join the hotspot in the Wi-Fi menu; save it once for macOS auto-join. Requires Android 11+, the background bridge and authorized Shizuku.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            NotificationAppsView()
             Section("Clipboard") {
-                Toggle("Mirror clipboard text over Bluetooth", isOn: $clipboardMirroring)
+                Toggle("Mirror clipboard over Bluetooth", isOn: $clipboardMirroring)
                     .onChange(of: clipboardMirroring) { _, _ in
                         UserDefaults.standard.synchronize()
                         DistributedNotificationCenter.default().postNotificationName(
@@ -68,7 +104,20 @@ struct SettingsView: View {
                     }
                 Text(clipboardMirroring ? clipboardStatus.text : "Clipboard mirroring off")
                     .font(.caption).foregroundStyle(.secondary)
-                Text("Sync newly copied text in both directions, including between mirror sessions. Requires Bluetooth pairing, the Android background bridge and Shizuku. Text is limited to 4 KiB; marked sensitive clips are skipped.")
+                Text("Sync newly copied text and individual files in both directions, including between mirror sessions. Requires Bluetooth pairing, the Android background bridge and Shizuku. Files must be less than 5 MB; text is limited to 4 KiB. Marked sensitive clips are skipped.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Section("Media playback") {
+                Toggle("Sync phone and Apple Music playback", isOn: $mediaSync)
+                    .onChange(of: mediaSync) { _, _ in
+                        UserDefaults.standard.synchronize()
+                        DistributedNotificationCenter.default().postNotificationName(
+                            Notification.Name("app.droidmirror.mediaConfiguration"), object: nil,
+                            userInfo: nil, deliverImmediately: true)
+                    }
+                Text(mediaSync ? clipboardStatus.mediaText : "Media syncing off")
+                    .font(.caption).foregroundStyle(.secondary)
+                Text("Show phone media in macOS Now Playing and Apple Music on your phone. Syncs track details and playback controls over paired Bluetooth; audio stays on its original device. Allow notification access on Android and Music Automation permission on Mac. Local playback takes priority on each device.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section("iPhone-like behavior") {
@@ -116,6 +165,9 @@ struct SettingsView: View {
             }
             .disabled(model.preferences.transport != .adb)
         }.formStyle(.grouped).padding(.vertical, 12)
+            .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+                backgroundLogin.refresh()
+            }
 
     }
 }

@@ -15,5 +15,6 @@
   <key>NSLocalNetworkUsageDescription</key><string>DroidMirror finds your paired Android phone on the local network for direct encrypted video.</string>
   <key>DroidMirrorSupportsLaunchCheck</key><true/>
   <key>LSUIElement</key><true/>
+  <key>NSAppleEventsUsageDescription</key><string>Sync Apple Music playback and controls with your paired Android phone.</string>
   <key>NSPrincipalClass</key><string>NSApplication</string>
 </dict></plist>

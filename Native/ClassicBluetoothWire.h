@@ -8,6 +8,9 @@ typedef struct {
     size_t magic_used, header_used;
     uint32_t remaining;
     uint8_t type;
+    uint8_t latency_bytes[8];
+    size_t latency_used;
+    void (*latency)(void *, uint64_t);
     bool (*appearance)(void *, const uint8_t *, size_t);
     bool decided, legacy, control, ble, video_only, require_video_only;
 } DMClassicWire;

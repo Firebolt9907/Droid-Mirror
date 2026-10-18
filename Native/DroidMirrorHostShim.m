@@ -5,6 +5,7 @@
 #import <dlfcn.h>
 #import <mach-o/dyld.h>
 #import <limits.h>
+#import "ReceiverUpdate.h"
 
 static void (*DMOriginalSetExecutableURL)(NSTask *, SEL, NSURL *);
 static void (*DMOriginalReplyToTerminate)(NSApplication *, SEL, BOOL);
@@ -167,18 +168,7 @@ static void DMInstallBundledScrcpyResolver(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
         NSURL *receiver = [NSBundle.mainBundle.bundleURL URLByAppendingPathComponent:
             @"Contents/Helpers/DroidMirror Notifications.app"];
-        if ([NSRunningApplication runningApplicationsWithBundleIdentifier:@"app.droidmirror.notifications"].count == 0) {
-            NSWorkspaceOpenConfiguration *configuration = [NSWorkspaceOpenConfiguration configuration];
-            configuration.activates = NO;
-            NSMutableDictionary *environment = [NSProcessInfo.processInfo.environment mutableCopy];
-            [environment removeObjectForKey:@"DYLD_INSERT_LIBRARIES"];
-            [environment removeObjectForKey:@"DROIDMIRROR_HOST_PID"];
-            configuration.environment = environment;
-            [[NSWorkspace sharedWorkspace] openApplicationAtURL:receiver configuration:configuration
-                completionHandler:^(NSRunningApplication *app, NSError *error) {
-                    if (error) NSLog(@"DroidMirror receiver launch failed: %@", error.localizedDescription);
-                }];
-        }
+        DMEnsureReceiver(receiver, DMMirrorTask.running);
         NSString *blePath = [NSBundle.mainBundle.bundlePath stringByAppendingPathComponent:
             @"Contents/Frameworks/libDroidMirrorBLE.dylib"];
         void *bleLibrary = dlopen(blePath.fileSystemRepresentation, RTLD_NOW | RTLD_LOCAL);

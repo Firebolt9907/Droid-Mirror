@@ -31,13 +31,15 @@
 @property(nonatomic) NSUInteger discoveries;
 @property(nonatomic) NSUInteger characteristicDiscoveries;
 @property(nonatomic) NSUInteger reads;
+@property(nonatomic, strong) NSData *lastWrite;
+@property(nonatomic) NSUInteger writes;
 @end
 @implementation DMStartupPeripheral
 - (void)discoverServices:(NSArray *)services { ++_discoveries; }
 - (void)discoverCharacteristics:(NSArray *)characteristics forService:(id)service { ++_characteristicDiscoveries; }
 - (void)readValueForCharacteristic:(id)characteristic { ++_reads; }
 - (NSUInteger)maximumWriteValueLengthForType:(CBCharacteristicWriteType)type { return 512; }
-- (void)writeValue:(NSData *)value forCharacteristic:(id)characteristic type:(CBCharacteristicWriteType)type {}
+- (void)writeValue:(NSData *)value forCharacteristic:(id)characteristic type:(CBCharacteristicWriteType)type { self.lastWrite=value; ++self.writes; }
 @end
 
 @interface DMStartupManager : NSObject
@@ -103,6 +105,7 @@
 @interface DMRecoveryTransport : DMBleInputTransport
 @property(nonatomic, strong) NSString *failure;
 @property(nonatomic) NSUInteger readyCount;
+@property(nonatomic) BOOL drainEnabled;
 @property(nonatomic, strong) NSData *delivered;
 - (DMBleInputKeys)testKeys:(BOOL)returning;
 - (NSData *)testReturnPacket;
@@ -114,7 +117,7 @@
 - (void)reportFailure:(NSString *)reason { self.failure=reason; }
 - (void)reportReady { ++self.readyCount; }
 - (void)deliver:(NSData *)bytes { self.delivered=bytes; }
-- (void)drain {} // Test controls ATT completions explicitly.
+- (void)drain { if (self.drainEnabled) [super drain]; } // Test controls ATT completions explicitly.
 - (DMBleInputKeys)testKeys:(BOOL)returning {
     uint8_t session[32]; DMBleInputKeys keys;
     dm_ble_session_key(self.pairingKey.bytes,self.sessionNonce.bytes,session);
@@ -203,9 +206,17 @@ static void TestActiveServiceRecovery(void) {
         [ble peripheral:(CBPeripheral *)peer didUpdateValueForCharacteristic:resume error:nil];
         assert(ble.retryInput==!accepted && ble.sequence==17);
         if (!accepted) assert(ble.inFlightPacket.length==10); else assert(!ble.inFlightPacket);
+        NSData *originalPacket=ble.inFlightPacket;
+        NSUInteger writes=peer.writes; ble.drainEnabled=YES;
         clock.value=[ble testClock];
         [ble peripheral:(CBPeripheral *)peer didUpdateValueForCharacteristic:clock error:nil];
-        assert(ble.ready && !ble.failure);
+        assert(ble.ready && !ble.failure && ble.sequence==17);
+        if (!accepted) {
+            assert(peer.writes==writes+1 && [peer.lastWrite isEqual:originalPacket] && ble.writePending);
+            [ble peripheral:(CBPeripheral *)peer didWriteValueForCharacteristic:ble.input error:nil];
+            assert(!ble.inFlightPacket && !ble.writePending && ble.sequence==17);
+        } else assert(peer.writes==writes); // Already-accepted input is never resent.
+        ble.drainEnabled=NO;
     }
     // A valid MAC cannot authorize an input sequence outside the outstanding packet.
     ble.recovering=YES; ble.ready=NO; ble.proofVerified=YES;
@@ -373,7 +384,7 @@ static void TestVideoAckCadence(void) {
 }
 
 static void TestDroppedADB(void) {
-    for (int silent=0; silent<2; ++silent) {
+    for (int silent=0; silent<3; ++silent) {
     int video[2], output[2]; assert(!socketpair(AF_UNIX,SOCK_STREAM,0,video));
     assert(!socketpair(AF_UNIX,SOCK_STREAM,0,output));
     DMStartupBridge *bridge=[DMStartupBridge new];
@@ -381,7 +392,14 @@ static void TestDroppedADB(void) {
     bridge.commands=[NSMutableData data]; bridge.pending=[NSMutableData data];
     bridge.wifiSocket=video[1]; bridge.client=output[1]; bridge.wifiActive=YES;
     bridge.wifiNonce=[NSMutableData dataWithLength:32]; bridge.videoReceived=123;
-    bridge.wifiLastData=NSDate.timeIntervalSinceReferenceDate-(silent ? 5 : 0);
+    bridge.wifiLastData=NSDate.timeIntervalSinceReferenceDate-(silent==1 ? 5 : 0);
+    if (silent==2) {
+        bridge.wifiIsPeer=YES;
+        uint64_t now=(uint64_t)(NSProcessInfo.processInfo.systemUptime*1e9);
+        for (int i=0;i<7;i++) { [bridge recordLatency:now wireless:NO]; [bridge recordLatency:now-200000000 wireless:YES]; }
+        assert(bridge.latencyBadSince>0);
+        bridge.latencyBadSince-=3;
+    }
     if (!silent) close(video[0]);
     [bridge pollWiFi];
     assert(bridge.wifiSocket==-1 && !bridge.wifiActive && bridge.wifiRecovering);
@@ -429,7 +447,7 @@ static void TestPeerAddressFragments(void) {
     puts("BLE peer addresses: fragmented Tailscale hints, deduplication, reset, invalid family and decoder isolation passed");
 }
 
-static void TestColdPeerConnection(void) {
+static void TestColdPeerConnection(BOOL slow) {
     int listener=socket(AF_INET,SOCK_STREAM,0); assert(listener>=0);
     struct sockaddr_in address={0}; address.sin_family=AF_INET;
     address.sin_addr.s_addr=htonl(INADDR_LOOPBACK);
@@ -444,8 +462,8 @@ static void TestColdPeerConnection(void) {
         int peer=accept(listener,NULL,NULL); assert(peer>=0);
         int yes=1; setsockopt(peer,SOL_SOCKET,SO_NOSIGPIPE,&yes,sizeof(yes));
         // Model direct discovery longer than the former two-second budget.
-        [NSThread sleepForTimeInterval:3];
-        uint8_t hello[40]={0}; memcpy(hello,"DMWIFI04",8);
+        [NSThread sleepForTimeInterval:slow ? 0 : 3];
+        uint8_t hello[40]={0}; memcpy(hello,"DMWIFI05",8);
         assert(send(peer,hello,sizeof(hello),0)==sizeof(hello));
         uint8_t request[44]; assert(DMReadExact(peer,request,sizeof(request)));
         NSData *proof=DMUpgradeProof(bridge.pairingKey,"client",hello+8,request,12);
@@ -455,10 +473,20 @@ static void TestColdPeerConnection(void) {
         // Deliver three preview frames over time before accepting the cutoff.
         for (int i=0;i<3;++i) {
             [NSThread sleepForTimeInterval:0.12];
+            uint64_t stamp=CFSwapInt64HostToBig((uint64_t)(NSProcessInfo.processInfo.systemUptime*1e9));
+            dispatch_sync(dispatch_get_main_queue(), ^{ [bridge recordLatency:CFSwapInt64BigToHost(stamp) wireless:NO]; });
+            if (slow) [NSThread sleepForTimeInterval:0.08];
+            const uint32_t marker=htonl((uint32_t)-2);
+            assert(send(peer,&marker,4,0)==4 && send(peer,&stamp,8,0)==8);
             const uint8_t frame[]={0,0,0,1,42,0,0,0,0};
             assert(send(peer,frame,sizeof(frame),0)==sizeof(frame));
         }
-        uint8_t ready; assert(DMReadExact(peer,&ready,1) && ready==1);
+        uint8_t ready;
+        if (slow) {
+            assert(!DMReadExact(peer,&ready,1));
+            close(peer); close(listener); dispatch_semaphore_signal(completed); return;
+        }
+        assert(DMReadExact(peer,&ready,1) && ready==1);
         const uint32_t end=UINT32_MAX;
         assert(send(peer,&end,4,0)==4);
         uint8_t response[48]={0};
@@ -472,7 +500,12 @@ static void TestColdPeerConnection(void) {
     [bridge probeWiFi:bridge.peerPort];
     NSDate *deadline=[NSDate dateWithTimeIntervalSinceNow:6];
     do { [[NSRunLoop mainRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.02]]; }
-    while (bridge.wifiSocket<0 && deadline.timeIntervalSinceNow>0);
+    while (bridge.probingWiFi && deadline.timeIntervalSinceNow>0);
+    if (slow) {
+        assert(bridge.wifiSocket==-1 && !bridge.wifiActive && bridge.latencyRetryAfter>NSProcessInfo.processInfo.systemUptime);
+        assert(!dispatch_semaphore_wait(completed,dispatch_time(DISPATCH_TIME_NOW,NSEC_PER_SEC)));
+        puts("Slow Iroh preview: rejects continuously delivered frames before cutoff and cools down retries"); return;
+    }
     assert(bridge.wifiSocket>=0 && bridge.wifiCutoff==0 && bridge.wifiNonce.length==32);
     close(bridge.wifiSocket);
     assert(!dispatch_semaphore_wait(completed,dispatch_time(DISPATCH_TIME_NOW,NSEC_PER_SEC)));
@@ -504,7 +537,8 @@ int main(void) {
         TestNativeClassicStreams();
         TestVideoAckCadence();
         TestDroppedADB();
-        TestColdPeerConnection();
+        TestColdPeerConnection(NO);
+        TestColdPeerConnection(YES);
         TestPeerAddressFragments();
         DMStartupDevice *device=[DMStartupDevice new];
         DMStartupBridge *bridge=[DMStartupBridge new];
