@@ -12,6 +12,7 @@
 /BluetoothCompanion/.kotlin/
 /BluetoothCompanion/build/
 /BluetoothCompanion/local.properties
+*.hprof
 
 # Rust build output
 /PeerTransport/target/
