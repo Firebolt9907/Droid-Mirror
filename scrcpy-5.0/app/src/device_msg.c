@@ -16,6 +16,12 @@ sc_device_msg_deserialize(const uint8_t *buf, size_t len,
 
     msg->type = buf[0];
     switch (msg->type) {
+        case DEVICE_MSG_TYPE_SECURE_WINDOW_STATE:
+            if (len < 6) return 0;
+            if (buf[1] > 2) return -1;
+            msg->secure_window_state.state = buf[1];
+            msg->secure_window_state.generation = sc_read32be(buf + 2);
+            return 6;
         case DEVICE_MSG_TYPE_CAMERA_CUTOUT: {
             if (len < 6) return 0;
             unsigned count = buf[5];

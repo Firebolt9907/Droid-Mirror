@@ -86,13 +86,24 @@ struct sc_screen {
     // fullscreen (meaningful only when resize_pending is true)
     struct sc_size windowed_content_size;
 
+    struct {
+        bool active;
+        Uint64 start, next_tick, frame_interval;
+        double from, to, angle;
+        struct sc_size to_window;
+        SDL_FPoint surface; // fixed size: only its angle changes during the turn
+        SDL_FPoint center; // fixed window center throughout an app orientation change
+        SDL_FRect rect; // unrotated video in window coordinates, for input
+    } rotation;
+
     // client orientation
     enum sc_orientation orientation;
     // rectangle of the content (excluding black borders)
     struct SDL_FRect rect;
     bool window_shown;
-    bool secure_black_frame;
     bool reported_visible;
+    bool secure_black_frame;
+    bool secure_request_pending;
     Uint64 secure_check_at;
 
     // only accessed from the thread calling sc_frame_sink_ops functions
@@ -202,6 +213,12 @@ sc_screen_set_orientation(struct sc_screen *screen,
 // set the display pause state
 void
 sc_screen_set_paused(struct sc_screen *screen, bool paused);
+
+// Apply stream geometry changes (including app-requested portrait/landscape turns).
+void sc_screen_set_frame_size(struct sc_screen *screen, struct sc_size size, bool can_resize);
+
+// Advance presentation even when playback is paused or the phone is idle.
+void sc_screen_tick(struct sc_screen *screen);
 
 // react to SDL events
 void

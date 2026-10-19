@@ -33,7 +33,7 @@ class BlePeripheral(
     private val onTaskSubscription: (Boolean, Long) -> Unit = { _, _ -> },
     private val onOpenLink: (String, () -> Boolean, (Boolean) -> Unit) -> Unit = { _, _, reply -> reply(false) },
     private val onShareLinkResult: (String, Boolean) -> Unit = { _, _ -> },
-    private val onHotspotStart: (() -> Boolean, (String) -> Unit) -> Unit = { _, reply -> reply("unsupported") }
+    private val onHotspotToggle: (Boolean, () -> Boolean, (JSONObject) -> Unit) -> Unit = { _, _, reply -> reply(JSONObject().put("status", "unsupported")) }
 ) {
     companion object {
         val SERVICE_UUID: UUID = UUID.fromString("7e57b000-9a6b-4c5d-8e7f-102030405060")
@@ -396,22 +396,21 @@ class BlePeripheral(
                                 session.finish(objectValue)
                                 android.util.Log.i("DroidMirrorNotifications", "BLE notification session authenticated")
                                 enqueueSecure(device, session, JSONObject().put("type", "ready").put("sessionHealth", 1).put("clipboard", 1).put("clipboardFiles", 1).put("taskUrls", 1).put("linkSharing", 1).put("media", 1)
-                                    .put("hotspot", if (Build.VERSION.SDK_INT >= 30) 1 else 0))
+                                    .put("hotspot", if (Build.VERSION.SDK_INT >= 30) 2 else 0))
                             }
                             else -> {
                                 val command = session.open(objectValue)
                                 when (command.optString("type")) {
-                                    "hotspotStart" -> {
+                                    "hotspotStart", "hotspotStop" -> {
                                         val request = command.optString("request")
                                         require(request.matches(Regex("[A-Za-z0-9-]{1,64}")))
                                         val epoch = hotspotEpoch
-                                        onHotspotStart({ synchronized(this@BlePeripheral) {
+                                        onHotspotToggle(command.optString("type") == "hotspotStart", { synchronized(this@BlePeripheral) {
                                             hotspotEpoch == epoch && sessions[device] === session && session.authenticated
-                                        } }) { status -> synchronized(this@BlePeripheral) {
+                                        } }) { result -> synchronized(this@BlePeripheral) {
                                             // A reply can only return to the original authenticated session.
                                             if (hotspotEpoch == epoch && sessions[device] === session && session.authenticated) {
-                                                runCatching { enqueueSecure(device, session, JSONObject()
-                                                    .put("type", "hotspotResult").put("request", request).put("status", status)) }
+                                                runCatching { enqueueSecure(device, session, result.put("type", "hotspotResult").put("request", request)) }
                                                     .onFailure { revokeSession(device) }
                                             }
                                         } }

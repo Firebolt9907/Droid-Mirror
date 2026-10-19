@@ -1,5 +1,6 @@
 #include "camera_cutout.h"
 #include "events.h"
+#include "rotation.h"
 
 #include <math.h>
 #include <string.h>
@@ -8,9 +9,11 @@
 #endif
 
 static struct sc_camera_cutout current;
+static bool native_presence_reported;
 
 void
 sc_camera_cutout_set(const struct sc_camera_cutout *cutout) {
+    native_presence_reported = false;
     if (cutout) current = *cutout;
     else memset(&current, 0, sizeof(current));
     // Geometry arrives independently of video over the control channel. Wake
@@ -52,8 +55,8 @@ sc_camera_cutout_circle(const struct sc_cutout_rect *rect,
 // Normalized renderer coordinates keep native hit testing correct on Retina,
 // resized/letterboxed video, and every display orientation.
 void
-sc_camera_cutout_update_window(SDL_Renderer *renderer, const SDL_FRect *content,
-                              struct sc_size frame, enum sc_orientation orientation) {
+sc_camera_cutout_update_window_rotated(SDL_Renderer *renderer, const SDL_FRect *content,
+                              struct sc_size frame, enum sc_orientation orientation, double angle) {
 #ifdef __APPLE__
     void (*update)(SDL_Window *, const float *, unsigned) =
         (void (*)(SDL_Window *, const float *, unsigned))
@@ -68,6 +71,8 @@ sc_camera_cutout_update_window(SDL_Renderer *renderer, const SDL_FRect *content,
             SDL_FPoint center;
             float radius;
             if (!sc_camera_cutout_circle(&current.rects[i], &current, content, orientation, &center, &radius)) continue;
+            center = sc_rotation_point(center,
+                (SDL_FPoint){content->x + content->w/2, content->y + content->h/2}, angle);
             circles[4*count] = center.x / width;
             circles[4*count+1] = center.y / height;
             circles[4*count+2] = radius / width;
@@ -75,13 +80,21 @@ sc_camera_cutout_update_window(SDL_Renderer *renderer, const SDL_FRect *content,
             ++count;
         }
     }
-    update(SDL_GetRenderWindow(renderer), circles, count);
+    SDL_Window *window = SDL_GetRenderWindow(renderer);
+    update(window, circles, count);
+    if (!native_presence_reported && sc_camera_cutout_matches_frame(frame)) {
+        void (*presence)(SDL_Window *, bool) = dlsym(RTLD_DEFAULT, "DroidMirrorSetCameraCutoutPresence");
+        if (presence) {
+            presence(window, current.count > 0);
+            native_presence_reported = true;
+        }
+    }
 #endif
 }
 
 void
-sc_camera_cutout_render(SDL_Renderer *renderer, const SDL_FRect *content,
-                       struct sc_size frame, enum sc_orientation orientation) {
+sc_camera_cutout_render_rotated(SDL_Renderer *renderer, const SDL_FRect *content,
+                       struct sc_size frame, enum sc_orientation orientation, double extra_angle) {
     // A geometry message from a previous orientation must never mark the wrong place.
     if (current.width != frame.width || current.height != frame.height || !current.count) return;
     SDL_BlendMode old_blend;
@@ -92,6 +105,12 @@ sc_camera_cutout_render(SDL_Renderer *renderer, const SDL_FRect *content,
     SDL_GetRenderClipRect(renderer, &old_clip);
     SDL_Rect clip = {(int) floorf(content->x), (int) floorf(content->y),
                      (int) ceilf(content->w), (int) ceilf(content->h)};
+    if (extra_angle != 0) {
+        // The rotated circle may lie outside the unrotated content rectangle.
+        int width, height;
+        if (!SDL_GetCurrentRenderOutputSize(renderer, &width, &height)) return;
+        clip = (SDL_Rect){0, 0, width, height};
+    }
     if (had_clip) SDL_GetRectIntersection(&clip, &old_clip, &clip);
     SDL_SetRenderClipRect(renderer, &clip);
     enum { N = 96 };
@@ -99,6 +118,8 @@ sc_camera_cutout_render(SDL_Renderer *renderer, const SDL_FRect *content,
         SDL_FPoint center;
         float radius;
         if (!sc_camera_cutout_circle(&current.rects[c], &current, content, orientation, &center, &radius)) continue;
+        center = sc_rotation_point(center,
+            (SDL_FPoint){content->x + content->w/2, content->y + content->h/2}, extra_angle);
         SDL_Vertex vertices[1 + 2 * N];
         int indices[9 * N];
         vertices[0] = (SDL_Vertex){.position = center, .color = {0, 0, 0, 1}};
@@ -116,4 +137,16 @@ sc_camera_cutout_render(SDL_Renderer *renderer, const SDL_FRect *content,
     }
     SDL_SetRenderClipRect(renderer, had_clip ? &old_clip : NULL);
     SDL_SetRenderDrawBlendMode(renderer, old_blend);
+}
+
+void
+sc_camera_cutout_update_window(SDL_Renderer *renderer, const SDL_FRect *content,
+    struct sc_size frame, enum sc_orientation orientation) {
+    sc_camera_cutout_update_window_rotated(renderer, content, frame, orientation, 0);
+}
+
+void
+sc_camera_cutout_render(SDL_Renderer *renderer, const SDL_FRect *content,
+    struct sc_size frame, enum sc_orientation orientation) {
+    sc_camera_cutout_render_rotated(renderer, content, frame, orientation, 0);
 }

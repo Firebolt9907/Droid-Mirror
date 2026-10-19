@@ -23,7 +23,7 @@ int main(int argc, char **argv) {
         [view cacheDisplayInRect:view.bounds toBitmapImageRep:bitmap];
         NSData *png = [bitmap representationUsingType:NSBitmapImageFileTypePNG properties:@{}];
         assert([png writeToFile:[NSString stringWithUTF8String:argv[2]] atomically:YES]);
-        // Exercise the same controller attachment and frame-transition hook used
+        // Exercise the same controller attachment and secure-window state hook used
         // by scrcpy, without connecting a phone or reading any keyboard input.
         Class controllerClass = NSClassFromString(@"DMWindowController");
         id controller = [controllerClass new];
@@ -50,6 +50,7 @@ int main(int argc, char **argv) {
         setSecureScreen(1);
         drainMainQueue(0.1);
         assert(overlay.hidden); // Debounce short transitions.
+        setSecureScreen(1); // A repeated metadata refresh must not restart the debounce.
         drainMainQueue(0.4);
         assert(!overlay.hidden);
         assert([overlay hitTest:NSMakePoint(180, 390)] == nil);
@@ -59,7 +60,22 @@ int main(int argc, char **argv) {
         setSecureScreen(1);
         setSecureScreen(0);
         drainMainQueue(0.5);
-        assert(overlay.hidden); // Cancel a delayed show if video has recovered.
+        assert(overlay.hidden); // Cancel a delayed show when the window is no longer secure.
+        setSecureScreen(1);
+        drainMainQueue(0.5);
+        assert(!overlay.hidden);
+        drainMainQueue(3.1);
+        assert(overlay.hidden); // Missing metadata must not leave a stale warning.
+        void (*stopSession)(void) = dlsym(library, "DroidMirrorSessionDidStop");
+        assert(stopSession);
+        setSecureScreen(1);
+        drainMainQueue(0.05);
+        stopSession();
+        drainMainQueue(0.5);
+        assert(overlay.hidden); // Session cleanup cancels a pending show.
+        setSecureScreen(1); // Even already queued delivery must not reopen a stopped session.
+        drainMainQueue(0.5);
+        assert(overlay.hidden);
         [window orderOut:nil];
         NSLog(@"Device-corner controller resize, secure overlay rendering, attachment, debounce, recovery and input passthrough passed");
     }

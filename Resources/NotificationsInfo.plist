@@ -12,6 +12,8 @@
 <key>LSUIElement</key><true/>
 <key>LSMinimumSystemVersion</key><string>14.0</string>
 <key>NSBluetoothAlwaysUsageDescription</key><string>Securely receives your paired Android phone's notifications whether screen mirroring is open or closed.</string>
+<key>NSLocationUsageDescription</key><string>Read the connected Wi-Fi network to turn off your phone hotspot when you switch to another network.</string>
+<key>NSLocationWhenInUseUsageDescription</key><string>Read the connected Wi-Fi network to turn off your phone hotspot when you switch to another network.</string>
 <key>NSUserActivityTypes</key><array><string>INSendMessageIntent</string></array>
 <key>NSAppleEventsUsageDescription</key><string>Sync Apple Music playback and controls with your paired Android phone.</string>
 <key>CFBundleURLTypes</key><array><dict><key>CFBundleURLName</key><string>DroidMirror Link Sharing</string><key>CFBundleURLSchemes</key><array><string>droidmirror-share</string></array></dict></array>

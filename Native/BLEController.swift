@@ -509,7 +509,7 @@ final class BLEController: NSObject, ObservableObject {
                 supportsClipboardFiles = plain["clipboardFiles"] as? Int == 1
                 supportsMedia = plain["media"] as? Int == 1
                 supportsTaskURLs = plain["taskUrls"] as? Int == 1
-                supportsHotspot = plain["hotspot"] as? Int == 1
+                supportsHotspot = (plain["hotspot"] as? Int ?? 0) >= 2
                 supportsLinkSharing = plain["linkSharing"] as? Int == 1
                 status = "Authenticated phone connected"
                 if wantsADB || !supportsSessionHealth { requestEndpoint() }

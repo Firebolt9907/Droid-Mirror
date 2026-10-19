@@ -3,6 +3,7 @@ package com.genymobile.scrcpy.control;
 public final class DeviceMessage {
 
     public static final int TYPE_CAMERA_CUTOUT = 3;
+    public static final int TYPE_SECURE_WINDOW_STATE = 4;
     public static final int TYPE_CLIPBOARD = 0;
     public static final int TYPE_ACK_CLIPBOARD = 1;
     public static final int TYPE_UHID_OUTPUT = 2;
@@ -42,6 +43,14 @@ public final class DeviceMessage {
         DeviceMessage event = new DeviceMessage();
         event.type = TYPE_CAMERA_CUTOUT;
         event.data = data;
+        return event;
+    }
+
+    public static DeviceMessage createSecureWindowState(int state, int generation) {
+        DeviceMessage event = new DeviceMessage();
+        event.type = TYPE_SECURE_WINDOW_STATE;
+        event.sequence = generation;
+        event.id = state;
         return event;
     }
 

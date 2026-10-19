@@ -27,7 +27,9 @@ def stop_mac_for_update(env):
     # Do not launch the app if it is already closed, or force-kill a stuck session.
     run(['/usr/bin/osascript', '-e', '''
 if application id "app.droidmirror.mac" is running then
-    tell application id "app.droidmirror.mac" to quit
+    try
+        tell application id "app.droidmirror.mac" to quit
+    end try
     repeat 120 times
         if application id "app.droidmirror.mac" is not running then return
         delay 0.25
@@ -142,6 +144,8 @@ def main():
 
     print('Building macOS release…', flush=True)
     env['DROIDMIRROR_BUILD_CONFIGURATION'] = 'release'
+    env['DROIDMIRROR_SKIP_ANDROID_INSTALL'] = '1'
+    env['DROIDMIRROR_SKIP_MAC_INSTALL'] = '1'  # The release workflow installs after both builds pass.
     run(['/bin/zsh', ROOT / 'build-app.sh'], env=env)
     app = outputs / 'DroidMirror.app'
     print(f'Release artifacts: {app}\n{apk}', flush=True)

@@ -9,6 +9,17 @@ are consumed on the Mac; touches elsewhere continue to Android. Disconnect with
 Cmd+Q or the phone's live activity. Phones without a cutout keep the toolbar. No computer vision or model-specific
 camera position is used. Phones without reported cutouts receive no overlay.
 
+Hole-punch/cutout presence is cached separately from its current coordinates.
+The per-device PhoneAppearance JSON stores `hasCameraCutout` as `yes` or `no`;
+a missing key is unknown. A frame-matching response can establish absence, and
+observing a cutout upgrades the device to present. Once present, an empty
+fullscreen/landscape response or temporarily mismatched metadata does not undo
+that device fact. Geometry and hit targets still clear when stale. This keeps
+the toolbar hidden while rotation waits for new coordinates and when rotation
+completion restores session chrome. A newly connected device reloads its own
+cache before showing the toolbar. Reads occur on device changes, and writes on
+presence changes, rather than on every rendered frame.
+
 Android's logical `DisplayInfo.displayCutout` supplies rotation-aware bounds via
 `DisplayCutout.getBoundingRects()`. On Android 12+, the per-cutout intersection
 with `getCutoutPath()` supplies tighter bounds when available: safe-area rectangles
@@ -61,3 +72,9 @@ Validation:
 Build the Mac with `./build-app.sh`; build the companion with JDK 21 and Android SDK
 36 via `JAVA_HOME=$(/usr/libexec/java_home -v 21) ANDROID_HOME=~/Library/Android/sdk
 ./BluetoothCompanion/gradlew -p BluetoothCompanion assembleDebug`.
+
+`sh Native/test-toolbar-motion.sh` also exercises persistent positive/negative
+cutout state, a valid empty landscape response after a positive detection,
+rotation-end toolbar suppression, reconnect before geometry arrives, and
+per-device isolation. The renderer tests distinguish stale/unknown geometry from
+confirmed absence and verify metadata presence is not republished every frame.

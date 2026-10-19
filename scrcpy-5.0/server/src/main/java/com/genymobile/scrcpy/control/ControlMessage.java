@@ -8,6 +8,7 @@ import com.genymobile.scrcpy.model.Position;
 public final class ControlMessage {
 
     public static final int TYPE_GET_CAMERA_CUTOUT = 25;
+    public static final int TYPE_SECURE_WINDOW_CANDIDATE = 26;
     public static final int TYPE_INJECT_KEYCODE = 0;
     public static final int TYPE_INJECT_TEXT = 1;
     public static final int TYPE_INJECT_TOUCH_EVENT = 2;
@@ -139,6 +140,14 @@ public final class ControlMessage {
         ControlMessage msg = new ControlMessage();
         msg.type = TYPE_SET_DISPLAY_POWER;
         msg.on = on;
+        return msg;
+    }
+
+    public static ControlMessage createSecureWindowCandidate(int generation, boolean black) {
+        ControlMessage msg = new ControlMessage();
+        msg.type = TYPE_SECURE_WINDOW_CANDIDATE;
+        msg.sequence = generation;
+        msg.on = black;
         return msg;
     }
 

@@ -97,6 +97,7 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
     private final ControlChannel controlChannel;
     private final CleanUp cleanUp;
     private final DeviceMessageSender sender;
+    private SecureWindowMonitor secureWindowMonitor;
     private final boolean clipboardAutosync;
     private final boolean powerOn;
     private final boolean keepActive;
@@ -319,6 +320,7 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
             } finally {
                 stopWheelScroll();
                 releaseInjectedKeys();
+                if (secureWindowMonitor != null) secureWindowMonitor.stop();
                 Ln.d("Controller stopped");
                 if (idleUhidKeyboard != null) {
                     idleUhidKeyboard.destroy();
@@ -330,14 +332,22 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
                 listener.onTerminated(true);
             }
         }, "control-recv");
-        thread.start();
         if (sender != null) {
             sender.start();
+            if (!camera) {
+                secureWindowMonitor = new SecureWindowMonitor(() -> {
+                    DisplayData data = displayData.get();
+                    return displayId != Device.DISPLAY_ID_NONE ? displayId : data != null ? data.virtualDisplayId : -1;
+                }, (state, generation) -> sender.send(DeviceMessage.createSecureWindowState(state, generation)));
+                secureWindowMonitor.start();
+            }
         }
+        thread.start();
     }
 
     @Override
     public void stop() {
+        if (secureWindowMonitor != null) secureWindowMonitor.stop();
         synchronized (this) {
             stopWheelScroll();
             if (idleUhidKeyboard != null) {
@@ -389,6 +399,9 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
 
         // Events for all sources (display or camera)
         switch (type) {
+            case ControlMessage.TYPE_SECURE_WINDOW_CANDIDATE:
+                if (secureWindowMonitor != null) secureWindowMonitor.setCandidate(msg.getOn(), (int) msg.getSequence());
+                return true;
             case ControlMessage.TYPE_GET_CAMERA_CUTOUT:
                 cameraCutoutRequested = true;
                 sendCameraCutout();

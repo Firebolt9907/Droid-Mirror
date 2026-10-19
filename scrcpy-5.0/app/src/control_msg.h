@@ -51,6 +51,7 @@ enum sc_control_msg_type {
     SC_CONTROL_MSG_TYPE_RESIZE_DISPLAY,
     SC_CONTROL_MSG_TYPE_SCAN_FILE,
     SC_CONTROL_MSG_TYPE_GET_CAMERA_CUTOUT = 25,
+    SC_CONTROL_MSG_TYPE_SECURE_WINDOW_CANDIDATE = 26,
     SC_CONTROL_MSG_TYPE_WHEEL_SCROLL = 24, // 23 is the timestamped Bluetooth touch extension.
 };
 
@@ -63,6 +64,10 @@ enum sc_copy_key {
 struct sc_control_msg {
     enum sc_control_msg_type type;
     union {
+        struct {
+            bool black;
+            uint32_t generation;
+        } secure_window_candidate;
         struct {
             enum android_keyevent_action action;
             enum android_keycode keycode;

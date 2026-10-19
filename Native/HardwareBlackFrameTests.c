@@ -23,5 +23,5 @@ int main(void) {
     CVPixelBufferUnlockBaseAddress(buffer, 0);
     assert(!sc_screen_is_secure_black_frame(&frame));
     CVPixelBufferRelease(buffer);
-    puts("PASS: actual secure-screen detector reads VideoToolbox pixel buffers and preserves navigation-pill exceptions");
+    puts("PASS: black-screen candidate detector reads VideoToolbox pixel buffers and preserves navigation-pill exceptions");
 }

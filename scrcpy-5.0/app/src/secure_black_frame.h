@@ -6,7 +6,7 @@
 #include <libavutil/frame.h>
 #include <libavutil/pixfmt.h>
 
-// Detect a black page, allowing only a narrow, centered bottom navigation pill.
+// Detect a candidate black page (not proof of secure content), allowing only a narrow, centered bottom navigation pill.
 // Accept planar YUV420 or the NV12 planes used by VideoToolbox.
 static inline bool
 sc_frame_is_fully_black(const AVFrame *frame) {

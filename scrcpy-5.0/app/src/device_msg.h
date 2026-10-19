@@ -17,11 +17,16 @@ enum sc_device_msg_type {
     DEVICE_MSG_TYPE_ACK_CLIPBOARD,
     DEVICE_MSG_TYPE_UHID_OUTPUT,
     DEVICE_MSG_TYPE_CAMERA_CUTOUT,
+    DEVICE_MSG_TYPE_SECURE_WINDOW_STATE,
 };
 
 struct sc_device_msg {
     enum sc_device_msg_type type;
     union {
+        struct {
+            uint8_t state;
+            uint32_t generation;
+        } secure_window_state;
         struct sc_camera_cutout camera_cutout;
         struct {
             char *text; // owned, to be freed by free()

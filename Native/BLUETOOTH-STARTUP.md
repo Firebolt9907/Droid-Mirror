@@ -27,7 +27,7 @@ Build and run the startup regression tests on macOS:
 
 ```sh
 clang -fobjc-arc -fblocks -mmacosx-version-min=14.0 \
-  -framework Foundation -framework IOBluetooth -framework CoreBluetooth -framework Security \
+  -framework Foundation -framework AVFoundation -framework IOBluetooth -framework CoreBluetooth -framework Security \
   Native/ClassicBluetoothStartupTests.m Native/BleInputQueue.m \
   Native/BleInputCrypto.c Native/ClassicBluetoothWire.c \
   -o /tmp/droidmirror-bluetooth-startup-tests

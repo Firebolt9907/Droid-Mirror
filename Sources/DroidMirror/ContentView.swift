@@ -142,7 +142,7 @@ struct ContentView: View {
                 ForEach(MirrorTransport.allCases) { Text($0.label).tag($0) }
             }.disabled(model.isMirroring || model.isStarting)
             if model.preferences.transport == .bluetoothClassic {
-                Text("Starts over Bluetooth with HEVC at 480p, up to 16 fps and 256 kbps, then upgrades to your Wi-Fi picture settings when paired wireless ADB is available. Authorize Shizuku and enable Mac connections once on Android. Mouse, keyboard and navigation stay on BLE.")
+                Text("Connects Bluetooth and direct LAN video in parallel. A ready LAN path can carry video from the start; otherwise video starts over Bluetooth and upgrades when a faster path is ready. Authorize Shizuku and enable Mac connections once on Android. Mouse, keyboard and navigation stay on BLE.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             if model.preferences.transport == .wifiAware {

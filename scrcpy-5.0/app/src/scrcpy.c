@@ -25,6 +25,7 @@
 #include "mouse_sdk.h"
 #include "recorder.h"
 #include "screen.h"
+#include "rotation.h"
 #include "sdl_hints.h"
 #include "server.h"
 #include "uhid/gamepad_uhid.h"
@@ -124,14 +125,26 @@ sdl_configure_ctrl_c_windows(void) {
 static enum scrcpy_exit_code
 event_loop(struct scrcpy *s, bool has_screen) {
     SDL_Event event;
+#ifdef __APPLE__
+    Uint64 presentation_poll_at = 0;
+#endif
     for (;;) {
 #ifdef __APPLE__
-        void (*pump)(void) = dlsym(RTLD_DEFAULT, "DroidMirrorPumpPresentation");
-        if (getenv("DROIDMIRROR_SESSION_COMMANDS") && pump) pump();
+        // Status/stop polling performs file I/O. Keep its existing 50 ms
+        // responsiveness without doing it on every animation or video frame.
+        Uint64 now = SDL_GetTicks();
+        if (getenv("DROIDMIRROR_SESSION_COMMANDS") && now >= presentation_poll_at) {
+            void (*pump)(void) = dlsym(RTLD_DEFAULT, "DroidMirrorPumpPresentation");
+            if (pump) pump();
+            presentation_poll_at = now + 50;
+        }
 #endif
         bool hosted = getenv("DROIDMIRROR_SESSION_COMMANDS") != NULL;
-        if (!(hosted ? SDL_WaitEventTimeout(&event, 50) : SDL_WaitEvent(&event))) {
-            if (hosted) continue;
+        if (has_screen && s->screen.rotation.active) sc_screen_tick(&s->screen);
+        bool rotating = has_screen && s->screen.rotation.active;
+        int wait_ms = rotating ? sc_rotation_wait_ms(SDL_GetTicks(), s->screen.rotation.next_tick) : 50;
+        if (!((hosted || rotating) ? SDL_WaitEventTimeout(&event, wait_ms) : SDL_WaitEvent(&event))) {
+            if (hosted || rotating) continue;
             break;
         }
         switch (event.type) {

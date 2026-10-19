@@ -23,6 +23,10 @@ public class DeviceMessageWriter {
         int type = msg.getType();
         dos.writeByte(type);
         switch (type) {
+            case DeviceMessage.TYPE_SECURE_WINDOW_STATE:
+                dos.writeByte(msg.getId());
+                dos.writeInt((int) msg.getSequence());
+                break;
             case DeviceMessage.TYPE_CAMERA_CUTOUT:
                 dos.write(msg.getData());
                 break;

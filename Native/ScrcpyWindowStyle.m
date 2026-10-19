@@ -5,6 +5,12 @@
 #import <SDL3/SDL.h>
 #import <objc/runtime.h>
 #include "../scrcpy-5.0/app/src/video_filter.h"
+#include "../scrcpy-5.0/app/src/rotation.h"
+#import "PhoneAppearance.h"
+
+bool DroidMirrorReduceMotion(void) {
+    return NSWorkspace.sharedWorkspace.accessibilityDisplayShouldReduceMotion;
+}
 
 static const CGFloat DMToolbarHeight = 58.0;
 static const CGFloat DMToolbarCornerRadius = 24.0;
@@ -47,6 +53,17 @@ static inline CGFloat DMScreenCornerRadius(CGFloat width) {
 @property(nonatomic, strong) NSPanel *toolbarWindow;
 @property(nonatomic, strong) NSView *toolbarContainer;
 @property(nonatomic, strong) CALayer *toolbarShadowLayer;
+@property(nonatomic, strong) NSPanel *audioWindow;
+@property(nonatomic, strong) NSButton *audioButton;
+@property(nonatomic, strong) NSTextField *audioLabel;
+@property(nonatomic, strong) NSStackView *audioContent;
+@property(nonatomic, strong) id audioStateObserver;
+@property(nonatomic) BOOL sessionActive;
+@property(nonatomic) BOOL audioVisible;
+@property(nonatomic) NSInteger audioHelperPID;
+@property(nonatomic) BOOL audioRequested;
+@property(nonatomic) BOOL audioPlaying;
+@property(nonatomic) BOOL audioFailed;
 @property(nonatomic, strong) NSButton *pinButtonControl;
 @property(nonatomic, strong) NSButton *sharpenButtonControl;
 @property(nonatomic, strong) NSButton *spatialButtonControl;
@@ -86,6 +103,9 @@ static inline CGFloat DMScreenCornerRadius(CGFloat width) {
 @property(nonatomic) NSInteger androidHeight;
 @property(nonatomic) BOOL bluetoothStream;
 @property(nonatomic, copy) NSArray<NSValue *> *cameraCutouts;
+@property(nonatomic, copy) NSString *cutoutDeviceCachePath;
+@property(nonatomic) BOOL cameraCutoutPresenceKnown;
+@property(nonatomic) BOOL deviceHasCameraCutout;
 @property(nonatomic, strong) id cutoutMouseMonitor;
 @property(nonatomic, strong) id phoneGestureMonitor;
 @property(nonatomic, strong) id gestureFocusObserver;
@@ -99,6 +119,8 @@ static inline CGFloat DMScreenCornerRadius(CGFloat width) {
 - (NSEvent *)handlePhoneGestureEvent:(NSEvent *)event;
 - (void)endPhoneGestures;
 - (void)updateCameraCutouts:(NSArray<NSValue *> *)cutouts;
+- (void)refreshCameraCutoutPresence;
+- (void)setCameraCutoutPresence:(BOOL)present;
 - (NSEvent *)handleCutoutMouseEvent:(NSEvent *)event;
 - (instancetype)initWithWindow:(NSWindow *)window;
 - (void)showToolbar;
@@ -128,6 +150,8 @@ static inline CGFloat DMScreenCornerRadius(CGFloat width) {
     _screenView.layer.cornerCurve = kCACornerCurveContinuous;
     _screenView.layer.masksToBounds = YES;
     [self buildToolbar];
+    _sessionActive=YES;
+    [self buildAudioButton];
     // Keep the phone chrome borderless while allowing the window into the Dock.
     window.styleMask = NSWindowStyleMaskBorderless | NSWindowStyleMaskResizable | NSWindowStyleMaskMiniaturizable;
     window.collectionBehavior = NSWindowCollectionBehaviorPrimary | NSWindowCollectionBehaviorManaged |
@@ -160,6 +184,8 @@ static inline CGFloat DMScreenCornerRadius(CGFloat width) {
 }
 
 - (void)dealloc {
+    if (_audioStateObserver) [NSDistributedNotificationCenter.defaultCenter removeObserver:_audioStateObserver];
+    [_window removeChildWindow:_audioWindow]; [_audioWindow orderOut:nil];
     if (_resizeObserver) [[NSNotificationCenter defaultCenter] removeObserver:_resizeObserver];
     if (_moveObserver) [[NSNotificationCenter defaultCenter] removeObserver:_moveObserver];
     if (_toolbarWindow) [_window removeChildWindow:_toolbarWindow];
@@ -187,18 +213,39 @@ static inline CGFloat DMScreenCornerRadius(CGFloat width) {
     [_adbShell terminate];
 }
 
-- (void)updateCameraCutouts:(NSArray<NSValue *> *)cutouts {
-    BOOL wasHidden = self.cameraCutouts.count > 0;
-    self.cameraCutouts = cutouts;
-    BOOL hidden = cutouts.count > 0;
-    if (hidden == wasHidden) return;
-    if (hidden) {
+- (void)refreshCameraCutoutPresence {
+    const char *configured = getenv("DROIDMIRROR_APPEARANCE_CACHE");
+    NSString *path = configured ? [NSString stringWithUTF8String:configured] : @"";
+    if ([path isEqualToString:self.cutoutDeviceCachePath]) return;
+    self.cutoutDeviceCachePath = path;
+    self.cameraCutouts = @[]; // Never reuse another device's hit targets.
+    NSString *cached = DMReadPhoneAppearance()[@"hasCameraCutout"];
+    self.cameraCutoutPresenceKnown = [cached isEqual:@"yes"] || [cached isEqual:@"no"];
+    self.deviceHasCameraCutout = [cached isEqual:@"yes"];
+}
+
+- (void)setCameraCutoutPresence:(BOOL)present {
+    [self refreshCameraCutoutPresence];
+    // A valid empty fullscreen/landscape response can omit a physical cutout.
+    // Once observed, its presence is a device property, not a frame property.
+    if (self.cameraCutoutPresenceKnown && (self.deviceHasCameraCutout || !present)) return;
+    self.cameraCutoutPresenceKnown = YES;
+    self.deviceHasCameraCutout = present;
+    DMCachePhoneAppearance(@{@"hasCameraCutout": present ? @"yes" : @"no"});
+    if (present) {
         [self.pinPopover close];
         [self.settingsPopover close];
         [self hideToolbar];
-    } else {
-        [self showToolbar];
-    }
+    } else [self showToolbar];
+}
+
+- (void)updateCameraCutouts:(NSArray<NSValue *> *)cutouts {
+    BOOL wasHidden = self.deviceHasCameraCutout || self.cameraCutouts.count > 0;
+    [self refreshCameraCutoutPresence];
+    self.cameraCutouts = cutouts;
+    if (cutouts.count) [self setCameraCutoutPresence:YES];
+    else if (wasHidden && !self.deviceHasCameraCutout) [self showToolbar];
+    // Empty/stale geometry clears hit targets, not known hardware presence.
 }
 
 - (void)hideToolbar {
@@ -208,7 +255,9 @@ static inline CGFloat DMScreenCornerRadius(CGFloat width) {
 }
 
 - (void)showToolbar {
-    if (self.cameraCutouts.count) { [self hideToolbar]; return; }
+    [self refreshCameraCutoutPresence];
+    if (self.sdlWindow && SDL_GetBooleanProperty(SDL_GetWindowProperties(self.sdlWindow), SC_ROTATION_PRESENTATION_PROP, false)) { [self hideToolbar]; return; }
+    if (self.deviceHasCameraCutout) { [self hideToolbar]; return; }
     for (NSView *view in self.window.contentView.subviews) {
         if ([view.identifier isEqualToString:@"DroidMirrorConnecting"]) {
             [self hideToolbar]; return;
@@ -869,7 +918,93 @@ static inline CGFloat DMScreenCornerRadius(CGFloat width) {
     [CATransaction commit];
 }
 
+- (void)buildAudioButton {
+    _audioWindow=[[NSPanel alloc] initWithContentRect:NSMakeRect(0,0,238,36)
+        styleMask:NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel backing:NSBackingStoreBuffered defer:NO];
+    _audioWindow.opaque=NO; _audioWindow.backgroundColor=NSColor.clearColor;
+    _audioWindow.hasShadow=YES; _audioWindow.hidesOnDeactivate=YES;
+    _audioWindow.collectionBehavior=NSWindowCollectionBehaviorAuxiliary | NSWindowCollectionBehaviorFullScreenAuxiliary;
+    NSVisualEffectView *background=[[NSVisualEffectView alloc] initWithFrame:NSMakeRect(0,0,238,36)];
+    background.material=NSVisualEffectMaterialHUDWindow; background.state=NSVisualEffectStateActive;
+    background.wantsLayer=YES; background.layer.cornerRadius=18; background.layer.masksToBounds=YES;
+    _audioWindow.contentView=background;
+    NSImageView *icon=[NSImageView imageViewWithImage:[NSImage imageWithSystemSymbolName:@"speaker.wave.2" accessibilityDescription:nil]];
+    icon.contentTintColor=NSColor.labelColor;
+    icon.translatesAutoresizingMaskIntoConstraints=NO;
+    [icon.widthAnchor constraintEqualToConstant:14].active=YES;
+    [icon.heightAnchor constraintEqualToConstant:14].active=YES;
+    _audioLabel=[NSTextField labelWithString:@"Play phone audio over Wi-Fi"];
+    _audioLabel.font=[NSFont systemFontOfSize:12 weight:NSFontWeightMedium];
+    _audioLabel.textColor=NSColor.labelColor;
+    _audioContent=[NSStackView stackViewWithViews:@[icon,_audioLabel]];
+    _audioContent.orientation=NSUserInterfaceLayoutOrientationHorizontal;
+    _audioContent.alignment=NSLayoutAttributeCenterY; _audioContent.spacing=8;
+    _audioContent.translatesAutoresizingMaskIntoConstraints=NO;
+    [background addSubview:_audioContent];
+    [NSLayoutConstraint activateConstraints:@[
+        [_audioContent.centerXAnchor constraintEqualToAnchor:background.centerXAnchor],
+        [_audioContent.centerYAnchor constraintEqualToAnchor:background.centerYAnchor],
+        [_audioContent.leadingAnchor constraintGreaterThanOrEqualToAnchor:background.leadingAnchor constant:16],
+        [_audioContent.trailingAnchor constraintLessThanOrEqualToAnchor:background.trailingAnchor constant:-16]
+    ]];
+    _audioButton=[NSButton buttonWithTitle:_audioLabel.stringValue target:self action:@selector(togglePhoneAudio:)];
+    _audioButton.frame=background.bounds; _audioButton.autoresizingMask=NSViewWidthSizable | NSViewHeightSizable;
+    _audioButton.transparent=YES; _audioButton.bordered=NO;
+    _audioButton.toolTip=@"Listen on this Mac over Wi-Fi. Phone speakers are silenced while streaming.";
+    [background addSubview:_audioButton];
+    NSString *hostPID=NSProcessInfo.processInfo.environment[@"DROIDMIRROR_HOST_PID"];
+    if (!hostPID.length) return;
+    __weak typeof(self) weakSelf=self;
+    _audioStateObserver=[NSDistributedNotificationCenter.defaultCenter addObserverForName:@"app.droidmirror.audioState"
+        object:hostPID queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note) {
+            DMWindowController *controller=weakSelf;
+            if (!controller || !controller.sessionActive || !controller.bluetoothStream) return;
+            [controller applyAudioState:note.userInfo];
+        }];
+}
+- (void)applyAudioState:(NSDictionary *)state {
+    if (!_sessionActive || !_bluetoothStream) return;
+    self.audioHelperPID=[state[@"helper"] integerValue];
+    self.audioRequested=[state[@"requested"] boolValue];
+    self.audioPlaying=[state[@"playing"] boolValue];
+    self.audioFailed=[state[@"failed"] boolValue];
+    self.audioVisible=[state[@"available"] boolValue] || self.audioRequested;
+    self.audioButton.title=self.audioRequested
+        ? (self.audioPlaying ? @"Stop phone audio" : @"Cancel audio connection…")
+        : (self.audioFailed ? @"Retry phone audio over Wi-Fi" : @"Play phone audio over Wi-Fi");
+    self.audioLabel.stringValue=self.audioButton.title;
+    [self.audioButton setAccessibilityLabel:self.audioButton.title];
+    [self positionAudioButton];
+}
+- (void)togglePhoneAudio:(id)sender {
+    if (!_sessionActive || !_audioVisible || _audioHelperPID <= 0) return;
+    [NSDistributedNotificationCenter.defaultCenter postNotificationName:@"app.droidmirror.audioAction"
+        object:[NSString stringWithFormat:@"%ld",(long)_audioHelperPID] userInfo:nil deliverImmediately:YES];
+}
+- (void)positionAudioButton {
+    BOOL connecting=NO;
+    for (NSView *view in self.window.contentView.subviews)
+        if ([view.identifier isEqualToString:@"DroidMirrorConnecting"]) connecting=YES;
+    BOOL rotating=self.sdlWindow && SDL_GetBooleanProperty(SDL_GetWindowProperties(self.sdlWindow),SC_ROTATION_PRESENTATION_PROP,false);
+    if (!_sessionActive || !_audioVisible || !self.window.visible || self.window.miniaturized || connecting || rotating || !NSApp.active) {
+        [self.window removeChildWindow:_audioWindow]; [_audioWindow orderOut:nil]; return;
+    }
+    NSRect phone=self.window.frame;
+    CGFloat width=ceil(self.audioLabel.intrinsicContentSize.width)+14+8+32;
+    CGFloat y=MAX(NSMinY(phone)-46,NSMinY(self.window.screen.visibleFrame)+8);
+    [_audioWindow setFrame:NSMakeRect(NSMidX(phone)-width/2,y,width,36) display:YES];
+    [_audioWindow.contentView layoutSubtreeIfNeeded];
+    if (!_audioWindow.visible) {
+        [self.window addChildWindow:_audioWindow ordered:NSWindowAbove]; [_audioWindow orderFront:nil];
+    }
+}
 - (void)positionToolbar {
+    [self positionAudioButton];
+    if (self.sdlWindow && SDL_GetBooleanProperty(SDL_GetWindowProperties(self.sdlWindow), SC_ROTATION_PRESENTATION_PROP, false)) {
+        [self hideToolbar];
+        [self.phoneShadowWindow orderOut:nil];
+        return;
+    }
     [self positionPhoneShadow];
     for (NSView *view in self.window.contentView.subviews) {
         if ([view.identifier isEqualToString:@"DroidMirrorConnecting"]) {
@@ -1230,7 +1365,8 @@ static inline CGFloat DMScreenCornerRadius(CGFloat width) {
             return;
         }
     }
-    if (self.bluetoothStream || self.cameraCutouts.count) return;
+    [self refreshCameraCutoutPresence];
+    if (self.bluetoothStream || self.deviceHasCameraCutout) return;
     if (self.pinPopover.shown) return;
     NSString *adb = NSProcessInfo.processInfo.environment[@"ADB"] ?: @"/opt/homebrew/bin/adb";
     NSString *serial = NSProcessInfo.processInfo.environment[@"DROIDMIRROR_SERIAL"];
@@ -1249,7 +1385,7 @@ static inline CGFloat DMScreenCornerRadius(CGFloat width) {
         NSArray *markers = @[@"keyguard_pin_view", @"pinentry", @"pin_entry", @"pin_pad", @"credential_pin", @"enter your pin"];
         BOOL found = NO;
         for (NSString *marker in markers) if ([text containsString:marker]) { found = YES; break; }
-        if (found) dispatch_async(dispatch_get_main_queue(), ^{ if (!weakSelf.cameraCutouts.count && !weakSelf.pinPopover.shown) [weakSelf showPIN:weakSelf.pinButtonControl]; });
+        if (found) dispatch_async(dispatch_get_main_queue(), ^{ if (!weakSelf.deviceHasCameraCutout && !weakSelf.pinPopover.shown) [weakSelf showPIN:weakSelf.pinButtonControl]; });
     });
 }
 @end
@@ -1272,6 +1408,11 @@ void DroidMirrorSessionChrome(NSWindow *window, BOOL active) {
     DMWindowController *controller = objc_getAssociatedObject(window, DMControllerKey);
     if (!controller) return;
     controller.bluetoothStream = [NSProcessInfo.processInfo.environment[@"DROIDMIRROR_TRANSPORT"] isEqualToString:@"bluetooth-classic"];
+    controller.sessionActive=active;
+    if (!active) {
+        controller.audioVisible=NO; controller.audioRequested=NO; controller.audioHelperPID=0;
+    }
+    [controller positionAudioButton];
     if (active) {
         if (!controller.cameraCutouts.count) {
             [controller showToolbar];
@@ -1280,6 +1421,26 @@ void DroidMirrorSessionChrome(NSWindow *window, BOOL active) {
         [controller.pinPopover close];
         [controller hideToolbar];
     }
+}
+
+void DroidMirrorRotationChrome(SDL_Window *sdlWindow, bool rotating) {
+    NSWindow *window = (__bridge NSWindow *)SDL_GetPointerProperty(SDL_GetWindowProperties(sdlWindow),
+        SDL_PROP_WINDOW_COCOA_WINDOW_POINTER, NULL);
+    DMWindowController *controller = objc_getAssociatedObject(window, DMControllerKey);
+    if (!controller) return;
+    [controller positionAudioButton];
+    if (rotating) { [controller hideToolbar]; [controller.phoneShadowWindow orderOut:nil]; }
+    else { [controller positionToolbar]; [controller showToolbar]; }
+}
+
+// Only valid, frame-matching device metadata may establish absence. Temporary
+// missing geometry is deliberately not forwarded as "no cutout".
+void DroidMirrorSetCameraCutoutPresence(SDL_Window *sdlWindow, bool present) {
+    if (!sdlWindow) return;
+    NSWindow *window = (__bridge NSWindow *)SDL_GetPointerProperty(SDL_GetWindowProperties(sdlWindow),
+        SDL_PROP_WINDOW_COCOA_WINDOW_POINTER, NULL);
+    DMWindowController *controller = objc_getAssociatedObject(window, DMControllerKey);
+    [controller setCameraCutoutPresence:present];
 }
 
 // Called on the SDL/AppKit main thread after the rendered geometry is known.

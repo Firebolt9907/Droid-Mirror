@@ -1,46 +1,71 @@
-# Black secure-page placeholder
+# Secure-window placeholder
 
-The patched scrcpy client checks decoded planar YUV video frames. When every
-page pixel is black (within a small codec tolerance) for 350 ms, the native styling
-library displays a lock symbol and:
+Black video is a fast candidate signal. It never shows the secure-page overlay by
+itself: a WindowManager check must confirm a visible secure window first. YouTube's
+ordinary black transition frames therefore do not show a secure-page message.
 
-> Secure screen
->
-> Android prevents this screen from being mirrored.
-> You can still type using your keyboard.
+The shared Android scrcpy Controller starts a SecureWindowMonitor for screen capture.
+It sleeps until the renderer detects a black-frame candidate. Then it runs
+`/system/bin/dumpsys -t 1 window windows` as shell, inside the Shizuku user
+service for Bluetooth/peer sessions and inside the shell server for direct ADB.
+It requires no persistent desktop ADB connection for Shizuku sessions.
 
-It removes the overlay immediately when nonblack video returns. The delay also
-works when a static secure page produces a single frame, without waiting for a
-second frame. Camera streams are excluded. A small neutral navigation pill is
-allowed only in the centered bottom 3% of portrait video, with at most 0.5% of
-the frame nonblack. The overlay is transparent so the pill stays visible.
+The monitor parses each window separately, matches the captured display, and checks
+`fl=SECURE` (or FLAG_SECURE / numeric bit 0x2000), `mHasSurface=true`,
+`isOnScreen=true` and `isVisible=true`. Fully obscured windows are excluded.
+Hidden secure windows and secure windows on other displays do not trigger the UI.
 
-The placeholder is a subview of the existing stream view, in scrcpy's process;
-there is no separate window. It refuses first-responder status and its hit test
-returns nil. Existing keyboard/HID, pointer, toolbar, and PIN-popover handling
-remain unchanged. It does not collect keys or display typed PIN digits.
+The renderer checks black-frame candidates at most five times per second, supporting
+software YUV420/NV12 and VideoToolbox IOSurfaces without full-frame downloads. It sends
+control message 26 with a boolean and a four-byte generation when candidate state changes.
+The worker wakes immediately for a black candidate and refreshes every 500 ms only
+while that candidate remains active, including static screens with no new video frames.
+Normal video immediately hides the warning, invalidates pending replies and sends a
+cancel command that stops polling and kills an in-flight query. No commands run during
+normal video. A cancelled query's late result cannot apply to a later black episode.
 
-The black-screen transition now triggers the existing PIN-specific Android UI
-check immediately rather than waiting for the next 1.5-second polling tick.
-Repeated timer/frame triggers are coalesced, and checks are skipped on visible
-regular lock screens. Black alone does not open the keypad; the existing PIN
-resource/text markers must still be found. Android's UI dump time remains a
-source of latency, so this is not a guarantee of instant PIN detection.
+Each query has
+Android's one-second dump timeout, a 1.5-second process-kill deadline, and a 2 MiB
+output bound. It never holds the display-recovery watchdog or the controller input
+thread. Stopping the controller interrupts the monitor and kills its current query.
+No dump files or app/window titles are persisted or sent to the Mac.
 
-Limitation: the video stream does not explicitly identify secure windows. This
-is a black-frame heuristic, so a genuinely all-black page can also trigger it.
-Partially restricted views with visible status bars or other page content will
-not trigger the check. This is a placeholder, not a screen-capture bypass.
+Results are CLEAR=0, SECURE=1, UNKNOWN=2. Failed, timed-out or unsupported queries
+produce UNKNOWN. Device message type 4 carries a state byte and a four-byte candidate generation
+through the existing control channel; Bluetooth/peer sessions retain their BLE authentication and sequence
+checks. Repeated samples recover from sender queue drops and late UI attachment.
+The C receiver dispatches results to the main thread; only SECURE shows the existing
+input-transparent overlay after a 350 ms debounce. CLEAR and UNKNOWN hide it.
+The overlay also expires after three seconds without a secure-state refresh, and
+session stop invalidates pending shows. Only matching responses for the current
+black-screen generation can show the overlay.
+Pixel detection alone never shows a warning.
 
-Tests:
+The PIN-specific keyboard prompt check is still gated by secure state and must
+independently confirm that Android is actually showing its PIN prompt.
+
+Limitations: the candidate gate requires a fully black page (allowing the Android
+navigation pill). Partially obscured/protected regions do not trigger a query.
+The confirmation detects window FLAG_SECURE, not all possible capture restrictions.
+Independently secured SurfaceViews, DRM buffers, device policy and sensitive-content
+protection can block capture without exposing this flag. WindowManager visibility
+and obscuration approximate actual composited visibility. Dump format differences
+may produce UNKNOWN; that suppresses the message rather than guessing from black video.
+
+Update both endpoints together. Stop an active mirror gracefully before APK/service
+replacement. The Shizuku service version is bumped so a new session loads this code.
+
+Validation:
 
 ```sh
-xcrun clang -I/opt/homebrew/include Native/SecureBlackFrameTests.c -o /private/tmp/droidmirror-secure-frame-tests
-/private/tmp/droidmirror-secure-frame-tests
-xcrun clang -fobjc-arc -framework AppKit Native/SecureOverlayProbe.m -o /private/tmp/droidmirror-secure-overlay-probe
-/private/tmp/droidmirror-secure-overlay-probe "$PWD/outputs/DroidMirror.app/Contents/Frameworks/libDroidMirrorStyle.dylib" "$PWD/outputs/secure-page-preview.png"
+sh Native/test-secure-window.sh
+# Optionally validate the parser against connected-device metadata:
+adb shell dumpsys window windows > /tmp/droidmirror-window-dump.txt
+sh Native/test-secure-window.sh /tmp/droidmirror-window-dump.txt
 ```
 
-Build the client with `meson compile -C scrcpy-4.1/build`, copy
-`scrcpy-4.1/build/app/scrcpy` into `Contents/Helpers/scrcpy`, rebuild the native
-style library from `KeyboardPassthroughShim.m`, and sign the application bundle.
+`Native/SecureOverlayProbe.m` checks overlay attachment, debounce, repeated refresh,
+recovery, stale-state expiry, session cleanup and input passthrough against the built
+native style library. Black-frame candidate tests and monitor scheduling tests check that normal video causes
+no shell queries, static black pages refresh, and cancelled/late results cannot reopen
+a warning. Wire tests cover request/reply fragmentation and BLE command packing.

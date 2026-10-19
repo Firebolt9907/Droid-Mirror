@@ -1,4 +1,5 @@
 #include "camera_cutout.h"
+#include "rotation.h"
 #include "device_msg.h"
 #include "control_msg.h"
 #include "events.h"
@@ -9,6 +10,13 @@
 
 #ifdef __APPLE__
 static unsigned native_count;
+static unsigned native_presence_updates;
+static bool native_present;
+void DroidMirrorSetCameraCutoutPresence(SDL_Window *window, bool present) {
+    (void) window;
+    ++native_presence_updates;
+    native_present = present;
+}
 static float native_circles[16];
 void DroidMirrorSetCameraCutouts(SDL_Window *window, const float *circles, unsigned count) {
     (void) window;
@@ -54,6 +62,7 @@ int main(void) {
 #ifdef __APPLE__
     sc_camera_cutout_update_window(renderer,&content,(struct sc_size){1080,2400},SC_ORIENTATION_0);
     assert(native_count == 1);
+    assert(native_presence_updates == 1 && native_present);
     near(native_circles[0],289.75f/580); near(native_circles[1],43.0f/1220);
     near(native_circles[2],18.25f/580); near(native_circles[3],18.25f/1220);
     sc_camera_cutout_update_window(renderer,&landscape,(struct sc_size){1080,2400},SC_ORIENTATION_90);
@@ -61,6 +70,7 @@ int main(void) {
     near(native_circles[0],1177.0f/580); near(native_circles[1],289.75f/1220);
     sc_camera_cutout_update_window(renderer,&content,(struct sc_size){2400,1080},SC_ORIENTATION_0);
     assert(native_count == 0);
+    assert(native_presence_updates == 1 && native_present); // stale geometry is not absence
     sc_camera_cutout_update_window(renderer,&content,(struct sc_size){0,0},SC_ORIENTATION_0);
     assert(native_count == 0);
 #endif
@@ -70,6 +80,27 @@ int main(void) {
     assert(red(surface,273,27)==255); // bounding rectangle corner stays visible
     assert(red(surface,290,20)==255); // no padded status-bar masking
     assert(red(surface,10,43)==255); // letterbox untouched
+    // The mask and native hit target follow the same intermediate rotation as video.
+    for (int angle = 0; angle < 360; angle += 15) {
+        SDL_FRect moving = sc_rotation_rect(580, 1220, 1080, 2400, angle);
+        SDL_FPoint expected;
+        float moving_radius;
+        assert(sc_camera_cutout_circle(&data.rects[0], &data, &moving,
+            SC_ORIENTATION_0, &expected, &moving_radius));
+        expected = sc_rotation_point(expected,
+            (SDL_FPoint){290, 610}, angle);
+        SDL_SetRenderDrawColor(renderer,255,255,255,255);
+        SDL_RenderClear(renderer);
+        sc_camera_cutout_render_rotated(renderer,&moving,(struct sc_size){1080,2400},SC_ORIENTATION_0,angle);
+        SDL_RenderPresent(renderer);
+        assert(red(surface,lroundf(expected.x),lroundf(expected.y))==0);
+#ifdef __APPLE__
+        sc_camera_cutout_update_window_rotated(renderer,&moving,(struct sc_size){1080,2400},SC_ORIENTATION_0,angle);
+        assert(native_count == 1);
+        near(native_circles[0],expected.x/580);
+        near(native_circles[1],expected.y/1220);
+#endif
+    }
     assert(SDL_SaveBMP(surface,"/tmp/droidmirror-camera-preview.bmp"));
     SDL_SetRenderDrawColor(renderer,255,255,255,255); SDL_RenderClear(renderer);
     sc_camera_cutout_render(renderer,&content,(struct sc_size){2400,1080},SC_ORIENTATION_0);
@@ -97,12 +128,20 @@ int main(void) {
     struct sc_camera_cutout absent={.width=576,.height=1280,.count=0};
     sc_camera_cutout_set(&absent);
     assert(sc_camera_cutout_matches_frame((struct sc_size){576,1280}));
+#ifdef __APPLE__
+    unsigned before = native_presence_updates;
+    sc_camera_cutout_update_window(renderer,&content,(struct sc_size){576,1280},SC_ORIENTATION_0);
+    assert(native_presence_updates == before+1 && !native_present); // confirmed absence
+    sc_camera_cutout_update_window(renderer,&content,(struct sc_size){576,1280},SC_ORIENTATION_0);
+    assert(native_presence_updates == before+1); // not re-reported on each rendered frame
+#endif
     sc_camera_cutout_set(NULL);
     assert(!sc_camera_cutout_matches_frame((struct sc_size){576,1280}));
     SDL_SetRenderDrawColor(renderer,255,255,255,255); SDL_RenderClear(renderer);
 #ifdef __APPLE__
     sc_camera_cutout_update_window(renderer,&content,(struct sc_size){1080,2400},SC_ORIENTATION_0);
     assert(native_count == 0);
+    assert(native_presence_updates == before+1); // reset/unknown does not establish absence
 #endif
     sc_camera_cutout_render(renderer,&content,(struct sc_size){1080,2400},SC_ORIENTATION_0);
     SDL_RenderPresent(renderer);

@@ -199,6 +199,10 @@ sc_control_msg_serialize(const struct sc_control_msg *msg, uint8_t *buf) {
                                       SC_CONTROL_MSG_SCAN_FILE_PATH_MAX_LENGTH);
             return 1 + len;
         };
+        case SC_CONTROL_MSG_TYPE_SECURE_WINDOW_CANDIDATE:
+            buf[1] = msg->secure_window_candidate.black;
+            sc_write32be(buf + 2, msg->secure_window_candidate.generation);
+            return 6;
         case SC_CONTROL_MSG_TYPE_GET_CAMERA_CUTOUT:
         case SC_CONTROL_MSG_TYPE_EXPAND_NOTIFICATION_PANEL:
         case SC_CONTROL_MSG_TYPE_EXPAND_SETTINGS_PANEL:
@@ -295,6 +299,10 @@ sc_control_msg_log(const struct sc_control_msg *msg) {
         case SC_CONTROL_MSG_TYPE_RESIZE_DISPLAY:
             LOG_CMSG("resize display %" PRIu16 "x%" PRIu16,
                      msg->resize_display.width, msg->resize_display.height);
+            break;
+        case SC_CONTROL_MSG_TYPE_SECURE_WINDOW_CANDIDATE:
+            LOG_CMSG("secure window candidate %s generation=%" PRIu32,
+                     msg->secure_window_candidate.black ? "black" : "clear", msg->secure_window_candidate.generation);
             break;
         case SC_CONTROL_MSG_TYPE_GET_CAMERA_CUTOUT:
             LOG_CMSG("get camera cutout");

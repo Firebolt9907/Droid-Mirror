@@ -53,13 +53,15 @@ final class ShizukuDisplayClient implements AutoCloseable {
         return new Shizuku.UserServiceArgs(new ComponentName(context.getPackageName(), DisplayGuardService.class.getName()))
             // Bump when the embedded capture code changes: Shizuku daemons can
             // survive APK replacement and otherwise keep running the old code.
-            .daemon(true).processNameSuffix("display_guard").debuggable(false).version(45);
+            .daemon(true).processNameSuffix("display_guard").debuggable(false).version(49);
     }
     private final ServiceConnection connection = new ServiceConnection() {
         @Override public void onServiceConnected(ComponentName name, IBinder binder) {
             guard = IDisplayGuard.Stub.asInterface(binder);
             ready.complete(guard);
-            if (closed) unbind();
+            // Shizuku is iterating its connection listeners during this callback.
+            // Remove ours after dispatch to avoid mutating that collection.
+            if (closed) main.post(ShizukuDisplayClient.this::unbind);
         }
         @Override public void onServiceDisconnected(ComponentName name) {
             guard = null;
@@ -107,6 +109,14 @@ final class ShizukuDisplayClient implements AutoCloseable {
             if (closed || remote==null || !remote.restoreBluetoothVideo(owner))
                 throw new java.io.IOException("Bluetooth video profile restore unavailable");
         } catch (RemoteException error) { throw new java.io.IOException(error); }
+    }
+    boolean startAudio(ParcelFileDescriptor output) throws RemoteException {
+        IDisplayGuard remote = guard;
+        return !closed && remote != null && remote.startAudio(owner, output);
+    }
+    void stopAudio() {
+        try { IDisplayGuard remote = guard; if (remote != null) remote.stopAudio(owner); }
+        catch (RemoteException ignored) {}
     }
     void frameSent() {
         if (lastVideo == 0) android.util.Log.i("DroidMirrorLease", "First video frame transmitted");
@@ -189,7 +199,7 @@ final class ShizukuDisplayClient implements AutoCloseable {
         ServiceConnection connection = new ServiceConnection() {
             @Override public void onServiceConnected(ComponentName name, IBinder binder) {
                 if (work.isShutdown()) {
-                    try { Shizuku.unbindUserService(args, this, false); } catch (RuntimeException ignored) {}
+                    main.post(() -> { try { Shizuku.unbindUserService(args, this, false); } catch (RuntimeException ignored) {} });
                     return;
                 }
                 work.execute(() -> {

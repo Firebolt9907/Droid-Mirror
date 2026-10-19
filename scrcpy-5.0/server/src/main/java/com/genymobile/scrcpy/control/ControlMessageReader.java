@@ -49,6 +49,11 @@ public class ControlMessageReader {
                 return parseSetClipboard();
             case ControlMessage.TYPE_SET_DISPLAY_POWER:
                 return parseSetDisplayPower();
+            case ControlMessage.TYPE_SECURE_WINDOW_CANDIDATE: {
+                int black = dis.readUnsignedByte();
+                if (black > 1) throw new ControlProtocolException("Invalid secure-window candidate");
+                return ControlMessage.createSecureWindowCandidate(dis.readInt(), black != 0);
+            }
             case ControlMessage.TYPE_GET_CAMERA_CUTOUT:
             case ControlMessage.TYPE_EXPAND_NOTIFICATION_PANEL:
             case ControlMessage.TYPE_EXPAND_SETTINGS_PANEL:

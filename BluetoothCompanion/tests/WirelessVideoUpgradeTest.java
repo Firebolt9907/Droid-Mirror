@@ -19,7 +19,8 @@ public final class WirelessVideoUpgradeTest {
         return length;
     }
     static byte[] nonce(DataInputStream input) throws IOException {
-        check(Arrays.equals(input.readNBytes(8),"DMWIFI05".getBytes(java.nio.charset.StandardCharsets.US_ASCII)));
+        String magic=new String(input.readNBytes(8),java.nio.charset.StandardCharsets.US_ASCII);
+        check(magic.equals("DMWIFI05") || magic.equals("DMWIFI06"));
         byte[] nonce=input.readNBytes(32); check(nonce.length==32); return nonce;
     }
     static byte[] authenticate(Socket socket, byte[] key, byte[] profile, BluetoothWire wire) throws Exception {
@@ -48,7 +49,56 @@ public final class WirelessVideoUpgradeTest {
         check(Arrays.equals(Arrays.copyOfRange(response,40,48),BluetoothWire.MAGIC));
         return nonce;
     }
+    static void initialPathWins() throws Exception {
+        byte[] key=new byte[32];
+        byte[] profile=new WirelessVideoProfile(1920,60,12000000).bytes();
+        ByteArrayOutputStream classic=new ByteArrayOutputStream();
+        BluetoothWire wire=new BluetoothWire(classic);
+        CountDownLatch quality=new CountDownLatch(1), restored=new CountDownLatch(1);
+        try (WirelessVideoUpgrade endpoint=new WirelessVideoUpgrade(wire,key,p -> {
+            if (p!=null) quality.countDown(); else restored.countDown();
+        },true); Socket socket=connect()) {
+            DataInputStream input=new DataInputStream(socket.getInputStream());
+            check(Arrays.equals(input.readNBytes(8),"DMWIFI06".getBytes(java.nio.charset.StandardCharsets.US_ASCII)));
+            byte[] nonce=input.readNBytes(32);
+            OutputStream output=socket.getOutputStream();
+            output.write(profile); output.write(WirelessUpgradeAuth.proof(key,"client",nonce,profile)); output.flush();
+            check(Arrays.equals(input.readNBytes(32),WirelessUpgradeAuth.proof(key,"preview server",nonce,profile)));
+            check(input.readInt()==-3);
+            byte[] response=input.readNBytes(48); check(response.length==48);
+            check(java.nio.ByteBuffer.wrap(response).getLong()==0);
+            byte[] authenticated=java.nio.ByteBuffer.allocate(20).put(profile).putLong(0).array();
+            check(Arrays.equals(Arrays.copyOfRange(response,8,40),WirelessUpgradeAuth.proof(key,"initial server",nonce,authenticated)));
+            check(Arrays.equals(Arrays.copyOfRange(response,40,48),BluetoothWire.MAGIC));
+            output.write(1); output.flush();
+            check(!quality.await(50,TimeUnit.MILLISECONDS)); // BLE/capture are still starting.
+            endpoint.captureReady(); check(quality.await(2,TimeUnit.SECONDS));
+            wire.video(new byte[]{1,2,3});
+            int type=input.readUnsignedByte();
+            while (type==BluetoothWire.EVENT) { check(input.readInt()==1); input.readByte(); type=input.readUnsignedByte(); }
+            check(type==0 && input.readInt()==3 && Arrays.equals(input.readNBytes(3),new byte[]{1,2,3}));
+            check(classic.size()==8); // No video packet ever travelled over Classic.
+            endpoint.fallback(nonce,2); check(restored.await(2,TimeUnit.SECONDS));
+            long until=System.nanoTime()+2_000_000_000L;
+            while(wire.isWireless() && System.nanoTime()<until) Thread.sleep(5);
+            check(!wire.isWireless() && classic.size()>8);
+        }
+        System.out.println("LAN startup wins: zero cutoff, distinct proof, first packet on LAN, capture readiness and authenticated replay passed");
+    }
+    static void bluetoothWinsStartup() throws Exception {
+        byte[] key=new byte[32];
+        byte[] profile=new WirelessVideoProfile(1920,60,12000000).bytes();
+        BluetoothWire wire=new BluetoothWire(new ByteArrayOutputStream());
+        wire.video(new byte[]{1,2,3});
+        try (WirelessVideoUpgrade endpoint=new WirelessVideoUpgrade(wire,key,p -> {},true); Socket socket=connect()) {
+            authenticate(socket,key,profile,wire);
+            endpoint.captureReady(); socket.getOutputStream().write(1); socket.getOutputStream().flush();
+        }
+        System.out.println("Bluetooth startup wins: delayed LAN uses live preview and exact cutoff");
+    }
     public static void main(String[] args) throws Exception {
+        initialPathWins();
+        bluetoothWinsStartup();
         blockedWarmupKeepsBluetooth();
         staticScreenCanUpgrade();
         byte[] key=new byte[32]; Arrays.fill(key,(byte)42);

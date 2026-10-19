@@ -189,6 +189,14 @@ public final class BluetoothWire {
         out.writeByte(EVENT); out.writeInt(1); out.writeByte(ALIVE); out.flush();
     }
     public boolean isWireless() { return upgraded; }
+    // Negotiated only after authenticated Wi-Fi handoff. Never use Classic/replay
+    // or count audio bytes in the video acknowledgement sequence.
+    public synchronized void audioRecord(int type, byte[] bytes) throws IOException {
+        if (!upgraded) throw new IOException("Audio requires Wi-Fi");
+        if ((type != 6 && type != 7) || (type == 6 ? bytes.length != 1 : bytes.length < 12 || bytes.length > 4104 || bytes.length % 4 != 0))
+            throw new IOException("Invalid audio record");
+        out.writeByte(type); out.writeInt(bytes.length); out.write(bytes); out.flush();
+    }
     // Commit only between complete envelope records. The decoder sees the same byte stream.
     public synchronized boolean upgrade(OutputStream stream, byte[] key, byte[] nonce, byte[] profile) throws IOException {
         if (upgraded) return false;
@@ -199,6 +207,20 @@ public final class BluetoothWire {
         next.write(WirelessUpgradeAuth.proof(key, "server", nonce, authenticated));
         next.write(MAGIC); next.flush();
         upgradeCutoff=videoBytes; out = next; upgraded = true;
+        return true;
+    }
+    // Race the first video write under the same lock. A slow LAN handshake
+    // never delays Bluetooth; once any video was sent, use preview/cutoff.
+    synchronized boolean upgradeInitial(OutputStream stream, byte[] key, byte[] nonce, byte[] profile) throws IOException {
+        if (videoBytes != 0 || upgraded || preview != null) return false;
+        DataOutputStream next = new DataOutputStream(stream);
+        next.writeInt(-3);
+        byte[] offset = new byte[8];
+        next.write(offset);
+        byte[] authenticated = java.nio.ByteBuffer.allocate(profile.length + 8).put(profile).put(offset).array();
+        next.write(WirelessUpgradeAuth.proof(key, "initial server", nonce, authenticated));
+        next.write(MAGIC); next.flush();
+        upgradeCutoff = 0; out = next; upgraded = true;
         return true;
     }
     public void enableWirelessThroughput() {

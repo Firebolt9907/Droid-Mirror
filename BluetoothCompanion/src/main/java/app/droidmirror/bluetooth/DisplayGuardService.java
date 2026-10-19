@@ -21,15 +21,22 @@ public final class DisplayGuardService extends IDisplayGuard.Stub {
     private IStreamEvents observer;
     private final java.util.LinkedHashMap<Object, Boolean> audits = new java.util.LinkedHashMap<>();
     private PrivilegedCapture capture;
+    private PrivilegedAudioCapture audio;
     private Object captureGeneration;
     private long captureStarted;
     private String captureError = "";
     private long lastActivity;
+    private long lastAudioRecovery;
     private String computerName;
 
     public DisplayGuardService() {
         watchdog.scheduleWithFixedDelay(() -> {
             synchronized (this) {
+                long now = SystemClock.elapsedRealtime();
+                if (audio != null && now - lastAudioRecovery >= 1000) {
+                    lastAudioRecovery = now;
+                    audio.retryRelease();
+                }
                 boolean interactive = true;
                 try { interactive = logical.interactive(); } catch (Exception ignored) {}
                 session.tick(interactive); lease.tick();
@@ -110,7 +117,24 @@ public final class DisplayGuardService extends IDisplayGuard.Stub {
         if (panelOff && !lease.heartbeat(token)) return false;
         return session.heartbeat(token);
     }
-    private void closeCapture() { keyboard.destroy(); if (capture != null) { capture.close(); capture = null; } }
+    @Override public synchronized boolean startAudio(IBinder token, ParcelFileDescriptor output) {
+        if (audio != null && audio.isReleased()) audio = null;
+        if (token == null || owner != token || !session.owns(token) || capture == null || audio != null
+                || android.os.Build.VERSION.SDK_INT < 31) {
+            if (output != null) try { output.close(); } catch (java.io.IOException ignored) {}
+            return false;
+        }
+        try { audio = new PrivilegedAudioCapture(output); return true; }
+        catch (Exception error) {
+            if (output != null) try { output.close(); } catch (java.io.IOException ignored) {}
+            android.util.Log.w("DroidMirrorAudio", "Audio capture unavailable", error); return false;
+        }
+    }
+    @Override public synchronized void stopAudio(IBinder token) {
+        if (token == null || owner != token) return;
+        if (audio != null) audio.close(); // Retain until release/volume restoration completes.
+    }
+    private void closeCapture() { stopAudio(owner); keyboard.destroy(); if (capture != null) { capture.close(); capture = null; } }
     @Override public synchronized boolean upgradeVideo(IBinder token, int maxSize, int fps, int bitRate) {
         if (token == null || owner != token || !session.owns(token) || capture == null) return false;
         try {

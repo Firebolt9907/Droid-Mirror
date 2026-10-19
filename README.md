@@ -1,119 +1,112 @@
 # DroidMirror
 
-Mirror and control your Android phone from your Mac with a native macOS app powered by scrcpy. Install DroidMirror on both devices, then use the setup guide to connect them.
-
-For architecture, transport details, build options and validation notes, see the [technical README](README-TECHNICAL.md).
+Mirror and control your Android phone from your Mac. Install DroidMirror on both devices, complete the one-time setup, then start mirroring from your Mac.
 
 ## What you need
 
-- An Apple silicon Mac running macOS 14 or later. The current build scripts target Apple silicon.
-- An Android phone running Android 8 or later. The default Android build targets ARM64 phones.
-- Bluetooth enabled on both devices.
-- [Shizuku](https://shizuku.rikka.app/guide/setup/) running on the phone for Bluetooth mirroring. Follow the setup guide linked inside the Android app; Shizuku may need starting again after a reboot.
-- A USB cable for the build-and-install steps below. Once Bluetooth setup is complete, you can disconnect it.
+- **Mac:** an Apple silicon Mac (M1 or newer) running macOS 14 Sonoma or later. The current builds target Apple silicon.
+- **Phone:** an ARM64 Android phone running Android 8 or later. Android 11 or later makes Shizuku setup easier because it supports wireless debugging.
+- **Bluetooth:** enabled on both devices, with the phone near your Mac.
+- **Shizuku:** a free Android app that gives DroidMirror the access it needs to mirror and control your phone. You'll set it up below.
 
-## Install from source
+You don't need to build the app or install developer tools to use the release downloads. On Android 11 or later, Shizuku can usually be started without a USB cable; older Android versions may require a computer and USB setup.
 
-Run these steps on the Mac where you want to use DroidMirror.
+## 1. Download DroidMirror
 
-### 1. Prepare the build tools
+Open **[GitHub Releases](https://github.com/Firebolt9907/Droid-Mirror/releases)** and choose the latest release. Expand **Assets** if the downloads aren't visible.
 
-Install Xcode command-line tools, Homebrew, Python 3, JDK 21 and Rust 1.91 or later. Install the native dependencies:
+Download both apps **from the same release**:
 
-```sh
-xcode-select --install
-brew install meson ninja pkg-config sdl3 ffmpeg libusb
-rustup target add aarch64-linux-android
-```
+- On your **Mac**, download the Mac app package.
+- On your **phone**, download the Android file ending in **`.apk`**. You can open the releases link directly in your phone's browser.
 
-<<<<<<< HEAD
-`build-app.sh` quits the running Mac app before rebuilding. With an authorized Android phone connected, it also builds and installs the debug companion and automatically resumes its previously enabled bridge. Android builds require JDK 21 and the Android SDK (`ANDROID_HOME`, defaulting to `~/Library/Android/sdk`). Set `ANDROID_SERIAL` when multiple devices are connected, or `DROIDMIRROR_SKIP_ANDROID_INSTALL=1` for a Mac-only build. First-time setup and Shizuku authorization still happen in the Android app.
+The **Source code (zip)** and **Source code (tar.gz)** links are for developers; choose the app downloads instead. If a release doesn't include both apps, use a release that does.
 
-For ADB mode, on Android enable **Developer options → USB debugging**. Connect once by USB and approve the computer. For wireless use, open the app's **Wireless connection** sheet and follow the pairing instructions.
-=======
-Using Android Studio's SDK Manager, install Android SDK Platform 36, Build-Tools 36, Platform-Tools and NDK 28 or later. The scripts look for the SDK at `~/Library/Android/sdk`; set `ANDROID_HOME` if yours is elsewhere. They use JDK 21 by default; set `JAVA_HOME` to choose another installed JDK.
->>>>>>> c02160ea21eafda3c4ed266d80133223d2f9b0b3
+## 2. Install the Mac app
 
-Clone the repository and enter it:
+1. Open the downloaded Mac package. If it's a ZIP, double-click it to extract it. If it's a disk image (`.dmg`), double-click it to open it.
+2. Drag **DroidMirror** into your **Applications** folder.
+3. Open **Applications → DroidMirror**.
+4. Allow Bluetooth access when macOS asks.
 
-```sh
-git clone https://github.com/Firebolt9907/Droid-Mirror.git
-cd Droid-Mirror
-```
+If macOS blocks the app because it can't verify the developer, check that you downloaded it from this repository's releases. You may need to allow it in **System Settings → Privacy & Security**, then open it again.
 
-Configure signing before building:
+The setup guide opens automatically on first launch. You can reopen it from **DroidMirror → Set Up Phone…** or **Settings → Set up a phone…**.
 
-- **Mac:** use `security find-identity -v -p codesigning` to find your signing certificate, then set `export DROIDMIRROR_SIGNING_IDENTITY="YOUR_CERTIFICATE_NAME_OR_HASH"`. The script's default certificate belongs to the original development environment. Keep the same signing identity across updates to preserve Keychain access.
-- **Android:** the release installer uses an existing `~/.android/debug.keystore` by default. For a fresh development setup, run `(cd BluetoothCompanion && ./gradlew assembleDebug)` to build the debug app and create the standard debug keystore. Alternatively, configure your own key using the [technical README's signing options](README-TECHNICAL.md#build-and-run). Updates must use the same key as the installed phone app.
+## 3. Install the Android app
 
-### 2. Connect your phone
+1. Open the downloaded **`.apk`** on your phone, either from your browser's downloads or the **Downloads** folder in your file manager.
+2. If Android asks, allow that browser or file manager to **install unknown apps**. This permission lets it install the APK you downloaded outside the Play Store.
+3. Tap **Install**, then open **DroidMirror**.
+4. Allow **Nearby devices** and any Bluetooth permission requested by the setup guide.
 
-On Android, enable **Developer options → USB debugging**. Connect the phone by USB, unlock it and approve the computer's debugging request. Confirm that it is authorized:
+You can turn off the browser or file manager's permission to install unknown apps after installation.
 
-```sh
-~/Library/Android/sdk/platform-tools/adb devices
-```
+## 4. Connect your phone and Mac
 
-Use your SDK's path if it differs. The phone should appear with status `device`, rather than `unauthorized`.
+Keep DroidMirror open on both devices and follow their setup guides.
 
-### 3. Build and install both apps
+### Connect Bluetooth
 
-From the repository root, run:
+1. Open Bluetooth settings on both devices: **System Settings → Bluetooth** on Mac and **Settings → Bluetooth** on Android (the name may vary by phone).
+2. Pair the phone and Mac. Confirm the matching system pairing code if asked.
+3. Return to DroidMirror on each device. Select your **phone on the Mac** and your **Mac on the phone**.
 
-```sh
-./build-release.sh
-```
+### Set up Shizuku on your phone
 
-This builds both apps, installs the Android APK on the connected phone and installs the Mac app at `/Applications/DroidMirror.app`. The Android release build uses the signing key configured above; by default, that is the local debug key.
+1. In DroidMirror on Android, open **Prepare your phone** and tap **Get Shizuku / setup guide**. You can also use the [official Shizuku setup guide](https://shizuku.rikka.app/guide/setup/).
+2. Install Shizuku and follow its instructions to start it. On Android 11 or later, use its wireless debugging method if available. The guide explains how to enable Developer options and Wireless debugging.
+3. Once Shizuku says it is running, return to DroidMirror and authorize it to use Shizuku when prompted.
 
-Before installing, the script quits the running Mac app to end active mirror sessions gracefully. After installing both apps, it automatically requests Android background bridge startup using your saved setup. If setup or permissions are missing, it reports that the bridge needs attention; open DroidMirror on Android and enable the background bridge once. Reopen the Mac app after the update.
+Shizuku normally needs to be started again after restarting a non-rooted phone.
 
-If more than one phone is connected, choose one with `./build-release.sh --device SERIAL`, using its serial from `adb devices`. If `/Applications` is not writable, create `~/Applications` and run:
+### Pair the two DroidMirror apps
 
-```sh
-mkdir -p "$HOME/Applications"
-./build-release.sh --mac-destination "$HOME/Applications/DroidMirror.app"
-```
+1. In DroidMirror on your phone, tap **Show pairing code**.
+2. Enter and save that code in the Mac's DroidMirror setup guide. This is a separate, private DroidMirror code—not the system Bluetooth pairing code. Keep it private.
+3. On the phone, tap **Enable background bridge**. This keeps the phone ready for connections from your Mac.
 
-Open DroidMirror from Finder on the Mac and from the app launcher on Android.
+### Start your first mirror
 
-### Already have matching builds?
+1. Lock your phone using its power button. DroidMirror won't start a mirror while the phone is awake and unlocked.
+2. On the Mac, press **Mirror my phone**.
+3. Wait for your phone's screen to appear, then use your Mac's mouse and keyboard to control it.
 
-If you already have a built checkout, you can install its artifacts without rebuilding:
+Leave the connection mode at **Automatic (Bluetooth → Wi-Fi)**. Mirroring starts over Bluetooth and can switch video to a faster direct network connection when available. Keeping both devices on the same Wi-Fi network can help. Tailscale isn't required.
 
-```sh
-python3 tools/app-bundle.py install outputs/DroidMirror.app /Applications/DroidMirror.app
-~/Library/Android/sdk/platform-tools/adb install -r outputs/DroidMirror-Bluetooth-release.apk
-```
+## Everyday use
 
-The Mac installer verifies the bundle and replaces it atomically. Keep the matching Mac and Android builds together. To produce these artifacts without installing them, use `./build-release.sh --build-only`.
+Keep Bluetooth enabled and the Android background bridge running. Lock your phone, open DroidMirror on the Mac, and start mirroring. You don't need to enter the pairing code each time.
 
-## Connect the apps for the first time
+After restarting your phone, unlock it once and start Shizuku again if needed. If DroidMirror isn't ready, open it on the phone and enable the background bridge again.
 
-The Mac opens its setup guide automatically. Reopen it anytime from **DroidMirror → Set Up Phone…** or **Settings → Set up a phone…**. Follow the corresponding guide on Android:
+Notification forwarding and other extras are optional. You can finish the first mirror before setting them up.
 
-1. **Connect Bluetooth.** Allow Android's Nearby devices permission and the Mac's Bluetooth permission. Pair the phone and Mac in system Bluetooth settings, then select the matching device in each app.
-2. **Prepare your phone.** Install and start Shizuku using the guide linked in DroidMirror, then authorize DroidMirror to use it.
-3. **Pair DroidMirror.** Tap **Show pairing code** on the phone and save that code in the Mac guide. This private code is separate from the system Bluetooth pairing code. On Android, choose **Enable background bridge**.
-4. **Start mirroring.** Lock the phone, then press **Mirror my phone** on the Mac. Setup finishes when the first mirror starts successfully. You can now disconnect the USB cable.
+### Phone audio over Wi-Fi
 
-Leave the connection mode at **Automatic (Bluetooth → Wi-Fi)** to start over Bluetooth and let video upgrade to a direct network connection when available. Tailscale is optional. Notification forwarding and wireless ADB are optional too; neither is required to complete Bluetooth setup.
+In Automatic mode, once video connects over Wi-Fi, playing media on a phone running Android 12 or later shows **Play phone audio over Wi-Fi** below the mirror when the phone is not using Bluetooth audio. Click it to listen on your Mac; click **Stop phone audio** to return sound to the phone. The stream stops when media pauses, Bluetooth audio connects, or Wi-Fi disconnects. Some apps restrict audio capture.
 
-For USB/ADB mirroring instead, keep USB debugging enabled, connect and authorize the phone, and select ADB mode in DroidMirror. Shizuku and Bluetooth readiness are not required for ADB mode. Wireless ADB pairing is available through the Mac app's **Wireless connection** sheet on Android 11 or later.
+The phone speakers are silenced while forwarding. The original media volume and mute state are restored when forwarding or the mirror session ends. Other volume categories are unchanged.
+
+Audio uses a continuous playback buffer with a small Wi-Fi jitter reserve to avoid stuttering. Wi-Fi does not guarantee exact lip sync. The USB / wireless ADB mode retains its existing audio behavior.
 
 ## Updating
 
-End any active mirror session before installing either app. Replacing the Android app or restarting its Bluetooth service during mirroring can disconnect the session.
+1. **End your mirror session and quit DroidMirror on the Mac before updating either app.** Updating the phone app during mirroring can disconnect the session.
+2. Download both apps from the same new [GitHub release](https://github.com/Firebolt9907/Droid-Mirror/releases).
+3. Replace DroidMirror in your Mac's Applications folder with the new app.
+4. Open the new Android APK and choose **Update**. Keep the existing app installed so its settings and pairing can be retained.
+5. Reopen both apps. Check that Shizuku is running and the Android background bridge is enabled, then start a new mirror session.
 
-Install matching builds on both devices using the steps above, then reopen both apps. Keep the same signing keys and use Android's update installation (`adb install -r`) to retain app data and pairing. If Android reports a signature mismatch, use the original signing key; the installer does not uninstall the app to bypass it.
+If Android says the update conflicts with the installed app, the apps may use different signing keys. Use an update from the same source as your installed version. Uninstalling the phone app removes its saved setup and requires pairing again.
 
-## If setup gets stuck
+## If something doesn't work
 
-- **Phone is in use:** lock the phone, then start mirroring again.
-- **Bluetooth mirroring is unavailable:** check Bluetooth permissions and the selected devices, confirm Shizuku is running and authorized, and enable the Android background bridge.
-- **After a phone reboot:** unlock the phone once and restart Shizuku if needed. If the bridge has not resumed, open DroidMirror and enable it again.
-- **A session ended during an update:** finish updating both apps, reopen them and start a new mirror session.
-- **ADB says `unauthorized`:** unlock the phone and approve the debugging prompt.
-- **The build cannot find a signing certificate or keystore:** complete the signing configuration above. See [build and signing details](README-TECHNICAL.md#build-and-run) for custom keys and paths.
+- **“Phone is in use”:** lock the phone, then try mirroring again.
+- **The phone or Mac doesn't appear:** check that Bluetooth is on, the devices are nearby and paired in system settings, and Bluetooth/Nearby devices permissions are allowed. Check the device selected in each DroidMirror app.
+- **Bluetooth mirroring isn't ready:** open Shizuku and confirm it's running, check that DroidMirror is authorized, then open DroidMirror on the phone and enable the background bridge.
+- **It stopped working after a phone restart:** unlock the phone once, restart Shizuku, and check the background bridge.
+- **A session ended while updating:** finish updating both apps, reopen them, and start a new session.
+- **Video is slow:** check that both devices are on the same Wi-Fi network and leave the connection mode on Automatic. Bluetooth-only video uses lower quality.
 
-See the [technical README](README-TECHNICAL.md) for optional features, detailed behavior and developer documentation.
+For source builds, connection details, and advanced features, see the [technical README](README-TECHNICAL.md).

@@ -7,10 +7,13 @@ or an IP network. Notification-listener permission is not required for clipboard
 Settings reports whether clipboard mirroring is ready, waiting for Bluetooth/Shizuku,
 or paused because the phone is locked.
 
-Newly copied, nonempty plain text and individual files are mirrored in both directions.
-Copy one regular file at a time; folders, file selections, rich formatting, raw image
-pasteboard data and clipboard history are not transferred. An image copied as a file
-is supported. Each file must be **strictly less than 5 MB (5,000,000 bytes)**; a file
+Newly copied, nonempty plain text, images and individual files are mirrored in both directions.
+Mac images copied as PNG or TIFF pasteboard data (including screenshots) are sent as
+PNG files. Received bitmap images offer native PNG/TIFF pasteboard data as well as
+the original file URL, so Mac apps can paste pixels or a file from the same item.
+Copy one regular file at a time; folders, file selections, rich formatting and
+clipboard history are not transferred. Each file or encoded image must be
+**strictly less than 5 MB (5,000,000 bytes)**; a file
 of exactly 5,000,000 bytes is rejected. Empty files are supported. Android source
 files must be readable `content://` clipboard URIs with a known size; destination
 apps must support pasting content URIs. Files are not automatically opened.
@@ -60,7 +63,9 @@ Large transfers over Bluetooth can take time; there is no network upload or fall
   access to the macOS pasteboard service), opt-in, new copies, echo suppression,
   local conflicts, privacy markers, limits, reconnects, old-peer compatibility;
   file send/receive, empty files, exact 5 MB rejection, 4,999,999-byte acceptance,
-  invalid names/offsets and cancellation. The JVM harness exercises the production
+  invalid names/offsets and cancellation; PNG/TIFF image sending, image-over-text
+  priority, native image/file receiving, image size/privacy checks and no image echo.
+  The JVM harness exercises the production
   Android file-transfer state machine with a fake bridge and temporary cache.
 - `bash Native/test-integrated-ble.sh`: actual Swift/Kotlin authentication,
   tamper/replay rejection and encrypted clipboard envelope bounds, including

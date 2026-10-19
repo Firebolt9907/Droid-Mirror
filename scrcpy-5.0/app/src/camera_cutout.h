@@ -20,6 +20,11 @@ void sc_camera_cutout_render(SDL_Renderer *renderer, const SDL_FRect *content,
                             struct sc_size frame, enum sc_orientation orientation);
 void sc_camera_cutout_update_window(SDL_Renderer *renderer, const SDL_FRect *content,
                                    struct sc_size frame, enum sc_orientation orientation);
+// Additional angle rotates both the cutout and native hit area with the live video.
+void sc_camera_cutout_render_rotated(SDL_Renderer *renderer, const SDL_FRect *content,
+    struct sc_size frame, enum sc_orientation orientation, double angle);
+void sc_camera_cutout_update_window_rotated(SDL_Renderer *renderer, const SDL_FRect *content,
+    struct sc_size frame, enum sc_orientation orientation, double angle);
 // Exposed for geometry tests. Returns an inscribed circle in renderer pixels.
 bool sc_camera_cutout_circle(const struct sc_cutout_rect *rect,
                             const struct sc_camera_cutout *cutout, const SDL_FRect *content,

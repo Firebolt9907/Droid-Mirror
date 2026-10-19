@@ -40,6 +40,11 @@ int main(void) {
         assert(!controller.toolbarWindow.visible && !controller.toolbarWindow.parentWindow);
         assert(![controller.toolbarContainer.layer animationForKey:DMToolbarRevealKey]);
         [controller updateCameraCutouts:@[]];
+        assert(!controller.toolbarWindow.visible && controller.deviceHasCameraCutout);
+        // A different device can still use the floating toolbar.
+        NSString *otherDevice = [NSTemporaryDirectory() stringByAppendingPathComponent:NSUUID.UUID.UUIDString];
+        setenv("DROIDMIRROR_APPEARANCE_CACHE", otherDevice.UTF8String, 1);
+        [controller showToolbar];
         assert(controller.toolbarWindow.visible && controller.toolbarWindow.parentWindow == window);
         NSView *status = [[NSView alloc] initWithFrame:window.contentView.bounds];
         status.identifier = @"DroidMirrorConnecting";
@@ -56,6 +61,7 @@ int main(void) {
         assert(NSEqualRects(frame, window.frame) && NSApp.keyWindow == keyWindow);
         DroidMirrorSessionChrome(window, NO);
         method_setImplementation(getter, original);
+        unsetenv("DROIDMIRROR_APPEARANCE_CACHE");
         objc_setAssociatedObject(window, DMControllerKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         [window orderOut:nil];
         puts("PASS: toolbar reveal interruption, reconnect, cutout/status hiding, immediate controls, Reduce Motion, stable frame and focus");

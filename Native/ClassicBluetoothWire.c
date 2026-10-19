@@ -34,19 +34,29 @@ bool dm_classic_wire_feed_ble(DMClassicWire *wire, const uint8_t *bytes, size_t 
             wire->type = wire->header[0]; wire->header_used = 0;
             wire->remaining = (uint32_t)wire->header[1] << 24 | (uint32_t)wire->header[2] << 16
                             | (uint32_t)wire->header[3] << 8 | wire->header[4];
-            if ((wire->video_only && wire->type != 0 && wire->type != 1 && wire->type != 4 && wire->type != 5)
+            if ((wire->video_only && wire->type != 0 && wire->type != 1 && wire->type != 4 && wire->type != 5 && wire->type != 6 && wire->type != 7)
                     || (wire->type == 0 && (!wire->remaining || wire->remaining > 16384))
                     || (wire->type == 1 && wire->remaining != 1)
                     || (wire->type == 2 && (!wire->control || !control || !wire->remaining || wire->remaining > 16384))
                     || (wire->type == 3 && (!wire->ble || !setup || wire->remaining != 32))
                     || (wire->type == 4 && (!wire->video_only || !wire->appearance || !wire->remaining || wire->remaining > 16384))
                     || (wire->type == 5 && (!wire->video_only || wire->remaining != 8))
-                    || wire->type > 5) return false;
+                    || (wire->type == 6 && (!wire->video_only || !wire->audio || wire->remaining != 1))
+                    || (wire->type == 7 && (!wire->video_only || !wire->audio || wire->remaining < 12 || wire->remaining > 4104 || wire->remaining % 4))
+                    || wire->type > 7) return false;
         }
         size_t take = wire->remaining;
         if (take > length) take = length;
         if (!take) continue;
-        if (wire->type == 5) {
+        if (wire->type == 6 || wire->type == 7) {
+            memcpy(wire->audio_bytes + wire->audio_used, bytes, take);
+            wire->audio_used += take;
+            if (take == wire->remaining) {
+                if (!wire->audio(context, wire->type, wire->audio_bytes, wire->audio_used)) return false;
+                wire->audio_used = 0;
+            }
+        }
+        else if (wire->type == 5) {
             memcpy(wire->latency_bytes+wire->latency_used, bytes, take);
             wire->latency_used+=take;
             if (wire->latency_used==8) {

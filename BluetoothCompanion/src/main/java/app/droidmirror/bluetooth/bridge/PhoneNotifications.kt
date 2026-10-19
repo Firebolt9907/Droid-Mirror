@@ -233,7 +233,7 @@ class PhoneNotifications : NotificationListenerService() {
         }
         // AES-GCM + Base64 + the encrypted JSON envelope must fit the 8192-byte
         // fragment limit. Leave room for sequence numbers and snapshot metadata.
-        val maximumPayloadBytes = 5800
+        val maximumPayloadBytes = 5200
         appIcon(sbn.packageName)?.let { icon ->
             result.put("appIcon", icon)
             if (result.toString().toByteArray(Charsets.UTF_8).size > maximumPayloadBytes) result.remove("appIcon")
@@ -251,6 +251,11 @@ class PhoneNotifications : NotificationListenerService() {
                 result.put("contentImage", image)
                 if (result.toString().toByteArray(Charsets.UTF_8).size > maximumPayloadBytes) result.remove("contentImage")
             }
+        }
+        if (result.toString().toByteArray(Charsets.UTF_8).size > 5400) {
+            result.remove("contentImage")
+            result.remove("contactImage")
+            result.remove("appIcon")
         }
         return result
     }
@@ -277,7 +282,15 @@ class PhoneNotifications : NotificationListenerService() {
             !eligible(it)
         }.take(16).map { JSONObject().put("type", "removed").put("id", id(it.key)) }
         return history + entries.values.sortedBy { it.notification.postTime }.takeLast(16)
-            .map { payload(it).put("snapshot", true) }
+            .map {
+                val p = payload(it).put("snapshot", true)
+                if (p.toString().toByteArray(Charsets.UTF_8).size > 5600) {
+                    p.remove("contentImage")
+                    p.remove("contactImage")
+                    p.remove("appIcon")
+                }
+                p
+            }
     }
     @Synchronized fun dismiss(command: JSONObject): Boolean = runCatching {
         val key = command.getString("id")

@@ -120,6 +120,9 @@ final class ClipboardSync {
         if pasteboard.types?.contains(.fileURL) == true {
             sendFile(); return
         }
+        if pasteboard.types?.contains(.png) == true || pasteboard.types?.contains(.tiff) == true {
+            sendImage(); return
+        }
         guard let text = pasteboard.string(forType: .string), ClipboardTextPolicy.allowed(text) else { return }
         if controller?.send(["type": "clipboardSet", "text": text]) != true { status = "Clipboard connection interrupted" }
     }
@@ -149,11 +152,26 @@ final class ClipboardSync {
                 data.append(chunk)
             }
             guard data.count == size, ClipboardFilePolicy.allowed(data.count) else { status = "Clipboard file changed or exceeds the size limit"; return }
-            let transfer = Transfer(id: UUID().uuidString, name: url.lastPathComponent, size: size, data: data)
-            outgoing = transfer
-            if controller?.send(["type": "clipboardFileBegin", "id": transfer.id, "name": transfer.name, "size": size]) != true { resetFiles(); return }
-            status = "Sending clipboard file…"
+            sendFileData(data, name: url.lastPathComponent)
         } catch { status = "Clipboard file could not be read" }
+    }
+    private func sendImage() {
+        guard controller?.supportsClipboardFiles == true else { status = "Image clipboard needs an updated Android app"; return }
+        // Screenshots and Copy Image usually contain bitmap data, without a file URL.
+        let data: Data?
+        if let png = pasteboard.data(forType: .png) { data = png }
+        else if let tiff = pasteboard.data(forType: .tiff), let bitmap = NSBitmapImageRep(data: tiff) {
+            data = bitmap.representation(using: .png, properties: [:])
+        } else { data = nil }
+        guard let data, !data.isEmpty else { status = "Clipboard image could not be read"; return }
+        guard ClipboardFilePolicy.allowed(data.count) else { status = "Clipboard images must be less than 5 MB"; return }
+        sendFileData(data, name: "Clipboard Image.png")
+    }
+    private func sendFileData(_ data: Data, name: String) {
+        let transfer = Transfer(id: UUID().uuidString, name: name, size: data.count, data: data)
+        outgoing = transfer
+        if controller?.send(["type": "clipboardFileBegin", "id": transfer.id, "name": transfer.name, "size": transfer.size]) != true { resetFiles(); return }
+        status = "Sending clipboard file…"
     }
     private func receiveFile(_ event: [String: Any]) {
         guard let id = event["id"] as? String, UUID(uuidString: id) != nil else { return }
@@ -209,9 +227,18 @@ final class ClipboardSync {
             try manager.createDirectory(at: target, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
             let file = target.appendingPathComponent(transfer.name)
             try transfer.data.write(to: file, options: .atomic)
+            let item = NSPasteboardItem()
+            item.setString(file.absoluteString, forType: .fileURL)
+            // Publish both representations on one item, so image editors can paste pixels
+            // while Finder can still paste the original file.
+            if let bitmap = NSBitmapImageRep(data: transfer.data),
+               let png = bitmap.representation(using: .png, properties: [:]) {
+                item.setData(png, forType: .png)
+                if let tiff = bitmap.tiffRepresentation { item.setData(tiff, forType: .tiff) }
+            }
             guard pasteboard.changeCount == changeCount else { throw CocoaError(.userCancelled) }
             pasteboard.clearContents()
-            guard pasteboard.writeObjects([file as NSURL]) else { throw CocoaError(.fileWriteUnknown) }
+            guard pasteboard.writeObjects([item]) else { throw CocoaError(.fileWriteUnknown) }
             changeCount = pasteboard.changeCount
             controller?.send(["type": "clipboardFileAck", "id": transfer.id, "offset": transfer.size])
             incoming = nil; status = "Clipboard mirroring ready"

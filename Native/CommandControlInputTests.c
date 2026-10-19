@@ -49,6 +49,11 @@ int main(void) {
     assert(report.data[0] == SC_HID_MOD_LEFT_CONTROL);
     event.type = SDL_EVENT_KEY_UP;
     sc_input_manager_process_key(&im, &event);
+    event.type = SDL_EVENT_KEY_DOWN; event.key = SDLK_BACKSPACE; event.scancode = SDL_SCANCODE_BACKSPACE; event.mod = SDL_KMOD_LGUI;
+    sc_input_manager_process_key(&im, &event);
+    // After line deletion with Command held, Control is restored.
+    assert(last_key.scancode == SC_SCANCODE_LCTRL && last_key.action == SC_ACTION_DOWN && last_key.mods_state == SC_MOD_LCTRL);
+    assert(report.data[0] == SC_HID_MOD_LEFT_CONTROL);
     event.key = SDLK_LGUI; event.scancode = SDL_SCANCODE_LGUI; event.mod = 0;
     sc_input_manager_process_key(&im, &event);
     assert(report.data[0] == 0 && last_key.scancode == SC_SCANCODE_LCTRL);

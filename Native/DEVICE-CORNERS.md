@@ -53,9 +53,10 @@ xcrun clang -fobjc-arc -dynamiclib -arch arm64 -mmacosx-version-min=14.0 -framew
 Tests cover 180/360/720/1080-point widths, normalized ratios, both coordinate
 orientations, mask/shadow agreement and resizing through the real controller.
 
-`CornerResize.m` adds local mouse hit areas on the diagonal portion of each visible
-superellipse curve, using distance to the same sampled curve rather than distance
-to a circle. It does not introduce overlays/windows or global event taps. Corner
+`CornerResize.m` adds a 28×28-point local mouse target at each corner, plus a
+16-point band around the diagonal portion of each visible superellipse curve.
+Targets stay usable at small window sizes and with square or unknown geometry.
+The rounded band uses distance to the same sampled curve rather than a circle. It does not introduce overlays/windows or global event taps. Corner
 drags preserve the starting aspect ratio and opposite-corner anchor, respect window
 size limits, and consume their down/drag/up events instead of tapping Android.
 Ordinary side resizing and screen interactions are left to the existing handlers.

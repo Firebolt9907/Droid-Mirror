@@ -4,6 +4,12 @@
 #import <math.h>
 
 int main(void) {
+    // Exercise both unknown/square geometry and the actual rounded phone profile.
+    for (NSString *dump in @[
+        @"DisplayDeviceInfo{phone, 1080 x 2400, position=TopLeft, radius=0, position=BottomLeft, radius=0, type INTERNAL}",
+        @"DisplayDeviceInfo{phone, 1080 x 2400, position=TopLeft, radius=104, position=BottomLeft, radius=102, type INTERNAL}"
+    ]) {
+    assert(DMUpdateDeviceGeometryFromDisplayDump(dump));
     for (NSNumber *value in @[@180, @360, @720]) {
         CGFloat width = value.doubleValue, height = width * 2400.0 / 1080.0;
         NSSize size = NSMakeSize(width, height);
@@ -14,6 +20,24 @@ int main(void) {
             CGFloat inset = DMSuperellipseCornerPoint(radius, .5).x;
             NSPoint point = NSMakePoint(left ? inset : width - inset, bottom ? inset : height - inset);
             assert(DMCornerAtPoint(point, size) == corner);
+            // The full corner target includes edges and points well inside the
+            // previous six-point arc band, in all four orientations.
+            for (NSValue *offset in @[[NSValue valueWithPoint:NSMakePoint(0, 0)],
+                                     [NSValue valueWithPoint:NSMakePoint(2, 24)],
+                                     [NSValue valueWithPoint:NSMakePoint(24, 2)],
+                                     [NSValue valueWithPoint:NSMakePoint(28, 28)]]) {
+                NSPoint p = offset.pointValue;
+                assert(DMCornerAtPoint(NSMakePoint(left ? p.x : width - p.x,
+                                                   bottom ? p.y : height - p.y), size) == corner);
+            }
+            if (radius > 30) {
+                // A point twelve points inward from the visible arc was outside
+                // the old handle, but should now be easy to grab.
+                CGPoint arc = DMSuperellipseCornerPoint(radius, .1);
+                NSPoint p = NSMakePoint(arc.x + 12, arc.y);
+                assert(DMCornerAtPoint(NSMakePoint(left ? p.x : width - p.x,
+                                                   bottom ? p.y : height - p.y), size) == corner);
+            }
             NSRect start = NSMakeRect(100, 100, width, height);
             NSPoint delta = NSMakePoint(left ? -width / 2 : width / 2, bottom ? -height / 2 : height / 2);
             NSRect result = DMCornerResizeFrame(start, delta, corner, NSMakeSize(80, 160), NSMakeSize(5000, 5000));
@@ -26,8 +50,12 @@ int main(void) {
         }
         assert(DMCornerAtPoint(NSMakePoint(width / 2, height / 2), size) == DMResizeCornerNone);
         assert(DMCornerAtPoint(NSMakePoint(1, height / 2), size) == DMResizeCornerNone);
-        assert(DMCornerAtPoint(NSMakePoint(0, 0), size) == DMResizeCornerNone);
+        assert(DMCornerAtPoint(NSMakePoint(width / 2, 1), size) == DMResizeCornerNone);
+        assert(DMCornerAtPoint(NSMakePoint(60, 60), size) == DMResizeCornerNone);
+        assert(DMCornerAtPoint(NSMakePoint(-1, 5), size) == DMResizeCornerNone);
+        assert(DMCornerAtPoint(NSMakePoint(width + 1, height - 5), size) == DMResizeCornerNone);
     }
-    NSLog(@"PASS: four rounded-arc hit areas, size invariance, fixed aspect ratio, opposite-corner anchors, minimum size and untouched sides/interior");
+    }
+    NSLog(@"PASS: generous corner targets, rounded and square phones, size invariance, fixed aspect ratio, opposite-corner anchors, minimum size and untouched sides/interior");
     return 0;
 }

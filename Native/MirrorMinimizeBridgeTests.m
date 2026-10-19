@@ -1,4 +1,4 @@
-// clang -fobjc-arc -fblocks -framework Foundation -framework IOBluetooth \
+// clang -fobjc-arc -fblocks -framework Foundation -framework AVFoundation -framework IOBluetooth \
 //   -framework CoreBluetooth -framework Security Native/MirrorMinimizeBridgeTests.m \
 //   Native/BleInputTransport.m Native/BleInputQueue.m Native/BleInputCrypto.c \
 //   Native/ClassicBluetoothWire.c -o /tmp/droidmirror-minimize-bridge-tests

@@ -143,33 +143,46 @@ CGPoint DMSuperellipseCornerPoint(CGFloat extent, CGFloat progress) {
                        extent * (1 - pow(sin(angle), power)));
 }
 
+// Keep the visible silhouette rigid while SDL renders into a fixed canvas.
+static void *DMRotationGeometryKey = &DMRotationGeometryKey;
+@interface DMRotationGeometry : NSObject
+@property(nonatomic) NSRect rect;
+@property(nonatomic) double angle;
+@end
+@implementation DMRotationGeometry
+@end
+
+static CGPathRef DMCreateViewScreenPath(NSView *screen, BOOL flipped) {
+    DMRotationGeometry *rotation = objc_getAssociatedObject(screen, DMRotationGeometryKey);
+    if (!rotation) return DMCreatePixelScreenPath(screen.bounds.size, flipped);
+    NSSize size = screen.bounds.size;
+    NSRect rect = NSMakeRect(rotation.rect.origin.x * size.width,
+        rotation.rect.origin.y * size.height, rotation.rect.size.width * size.width,
+        rotation.rect.size.height * size.height);
+    if (!flipped) rect.origin.y = size.height - NSMaxY(rect);
+    CGPathRef local = DMCreatePixelScreenPath(rect.size, flipped);
+    CGAffineTransform transform = CGAffineTransformMakeTranslation(NSMidX(rect), NSMidY(rect));
+    transform = CGAffineTransformRotate(transform, (flipped ? 1 : -1) * rotation.angle * M_PI / 180);
+    transform = CGAffineTransformTranslate(transform, -rect.size.width/2, -rect.size.height/2);
+    CGPathRef path = CGPathCreateCopyByTransformingPath(local, &transform);
+    CGPathRelease(local);
+    return path;
+}
+
 // A separate, click-through child gives the blur room outside SDL's clipped
 // surface without changing video coordinates or the window's resize hit areas.
 static const CGFloat DMPhoneShadowInset = 120;
 static void *DMPhoneShadowKey = &DMPhoneShadowKey;
 
-@interface DMPhoneShadowView : NSView
-@property(nonatomic) NSRect phoneRect;
-@end
-@implementation DMPhoneShadowView
-- (BOOL)isOpaque { return NO; }
-- (void)drawRect:(NSRect)dirtyRect {
-    CGContextRef context = NSGraphicsContext.currentContext.CGContext;
-    NSRect phone = self.phoneRect;
+static void DMDrawPhoneShadow(CGContextRef context, NSRect phone, NSRect bounds) {
     CGPathRef path = DMCreatePixelScreenPath(phone.size, NO);
     CGContextSaveGState(context);
-    // The panel reuses its backing store as the phone moves and resizes.
-    // Erase the previous silhouette before painting the new shadow.
-    CGContextClearRect(context, NSRectToCGRect(dirtyRect));
     CGContextTranslateCTM(context, phone.origin.x, phone.origin.y);
-    // Draw only the blur outside the phone. A solid shadow caster can show as
-    // a second black phone while AppKit moves/resizes the two windows.
-    CGContextAddRect(context, CGRectOffset(NSRectToCGRect(self.bounds),
-        -phone.origin.x, -phone.origin.y));
+    // Paint only outside the phone, so the cached image has no solid caster.
+    CGContextAddRect(context, CGRectOffset(NSRectToCGRect(bounds), -phone.origin.x, -phone.origin.y));
     CGContextAddPath(context, path);
     CGContextEOClip(context);
     CGContextSetFillColorWithColor(context, NSColor.blackColor.CGColor);
-    // A wide ambient shadow adds depth; a tighter contact shadow defines the edge.
     CGContextSetShadowWithColor(context, CGSizeMake(0, -18), 60,
         [NSColor colorWithWhite:0 alpha:0.38].CGColor);
     CGContextAddPath(context, path);
@@ -180,6 +193,77 @@ static void *DMPhoneShadowKey = &DMPhoneShadowKey;
     CGContextFillPath(context);
     CGContextRestoreGState(context);
     CGPathRelease(path);
+}
+
+@interface DMPhoneShadowView : NSView
+@property(nonatomic) NSRect phoneRect;
+@property(nonatomic, strong) CALayer *rotationLayer;
+@property(nonatomic) NSSize cachedSize;
+@property(nonatomic) CGFloat cachedScale, cachedTop, cachedBottom;
+@property(nonatomic) NSUInteger rotationRasterizations;
+- (void)updateRotation:(DMRotationGeometry *)rotation screenSize:(NSSize)size scale:(CGFloat)scale;
+@end
+@implementation DMPhoneShadowView
+- (BOOL)isOpaque { return NO; }
+- (void)drawRect:(NSRect)dirtyRect {
+    CGContextRef context = NSGraphicsContext.currentContext.CGContext;
+    CGContextClearRect(context, NSRectToCGRect(dirtyRect));
+    if (self.rotationLayer && !self.rotationLayer.hidden) return;
+    DMDrawPhoneShadow(context, self.phoneRect, self.bounds);
+}
+
+- (void)updateRotation:(DMRotationGeometry *)rotation screenSize:(NSSize)size scale:(CGFloat)scale {
+    if (!rotation) {
+        if (self.rotationLayer && !self.rotationLayer.hidden) {
+            [CATransaction begin];
+            [CATransaction setDisableActions:YES];
+            self.rotationLayer.hidden = YES;
+            [CATransaction commit];
+            self.needsDisplay = YES;
+        }
+        return;
+    }
+    NSSize phone = NSMakeSize(rotation.rect.size.width * size.width,
+                              rotation.rect.size.height * size.height);
+    CGFloat top = DMPixelCornerRadius(phone.width, YES);
+    CGFloat bottom = DMPixelCornerRadius(phone.width, NO);
+    self.wantsLayer = YES;
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    if (!self.rotationLayer) {
+        self.rotationLayer = [CALayer layer];
+        self.rotationLayer.name = @"DroidMirrorCachedRotationShadow";
+        [self.layer addSublayer:self.rotationLayer];
+        self.rotationLayer.hidden = YES;
+    }
+    if (!NSEqualSizes(self.cachedSize, phone) || self.cachedScale != scale
+            || self.cachedTop != top || self.cachedBottom != bottom) {
+        NSSize imageSize = NSMakeSize(phone.width + 2*DMPhoneShadowInset,
+                                      phone.height + 2*DMPhoneShadowInset);
+        CGColorSpaceRef colors = CGColorSpaceCreateDeviceRGB();
+        CGContextRef bitmap = CGBitmapContextCreate(NULL, ceil(imageSize.width*scale),
+            ceil(imageSize.height*scale), 8, 0, colors, (CGBitmapInfo)kCGImageAlphaPremultipliedLast);
+        CGColorSpaceRelease(colors);
+        if (bitmap) {
+            CGContextScaleCTM(bitmap, scale, scale);
+            DMDrawPhoneShadow(bitmap, NSMakeRect(DMPhoneShadowInset,DMPhoneShadowInset,
+                phone.width,phone.height), NSMakeRect(0,0,imageSize.width,imageSize.height));
+            CGImageRef image = CGBitmapContextCreateImage(bitmap);
+            self.rotationLayer.contents = (__bridge id)image;
+            CGImageRelease(image);
+            CGContextRelease(bitmap);
+            self.rotationLayer.bounds = NSMakeRect(0,0,imageSize.width,imageSize.height);
+            self.rotationLayer.contentsScale = scale;
+            self.cachedSize = phone; self.cachedScale = scale;
+            self.cachedTop = top; self.cachedBottom = bottom;
+            ++self.rotationRasterizations;
+        }
+    }
+    if (self.rotationLayer.hidden) self.needsDisplay = YES;
+    self.rotationLayer.hidden = NO;
+    self.rotationLayer.position = CGPointMake(NSMidX(self.phoneRect),NSMidY(self.phoneRect));
+    self.rotationLayer.affineTransform = CGAffineTransformMakeRotation(-rotation.angle*M_PI/180);
+    [CATransaction commit];
 }
 @end
 
@@ -283,7 +367,9 @@ static void *DMPhoneShadowKey = &DMPhoneShadowKey;
     }
     DMPhoneShadowView *shadowView = (DMPhoneShadowView *)self.panel.contentView;
     shadowView.phoneRect = NSOffsetRect(phone, -NSMinX(panelFrame), -NSMinY(panelFrame));
-    [self.panel setFrame:panelFrame display:NO];
+    [shadowView updateRotation:objc_getAssociatedObject(screen, DMRotationGeometryKey)
+                   screenSize:screen.bounds.size scale:window.backingScaleFactor ?: 1];
+    if (!NSEqualRects(self.panel.frame, panelFrame)) [self.panel setFrame:panelFrame display:NO];
     CGFloat top = DMPixelCornerRadius(phone.size.width, YES);
     CGFloat bottom = DMPixelCornerRadius(phone.size.width, NO);
     if (!NSEqualSizes(self.drawnSize, phone.size) || !NSEqualRects(self.drawnPhoneRect, shadowView.phoneRect)
@@ -327,7 +413,7 @@ void DMApplyDeviceCorners(NSView *screen) {
     if (!screen || NSIsEmptyRect(screen.bounds)) return;
     screen.wantsLayer = YES;
     CALayer *layer = screen.layer;
-    CGPathRef path = DMCreatePixelScreenPath(layer.bounds.size, layer.geometryFlipped);
+    CGPathRef path = DMCreateViewScreenPath(screen, layer.geometryFlipped);
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
     CAShapeLayer *mask = [layer.mask isKindOfClass:CAShapeLayer.class] ? (CAShapeLayer *)layer.mask : [CAShapeLayer layer];
@@ -349,6 +435,24 @@ void DMApplyDeviceCorners(NSView *screen) {
             shadow = [[DMPhoneShadow alloc] initWithWindow:window];
             objc_setAssociatedObject(window, DMPhoneShadowKey, shadow, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         }
-        [shadow updateForScreen:screen];
+        if (objc_getAssociatedObject(screen, DMRotationGeometryKey)) [shadow applyGeometryForScreen:screen];
+        else [shadow updateForScreen:screen];
+    }
+}
+
+void DMSetDeviceRotation(NSView *screen, const float *rect, double angle) {
+    if (!screen) return;
+    DMRotationGeometry *geometry = objc_getAssociatedObject(screen, DMRotationGeometryKey);
+    BOOL wasRotating = geometry != nil;
+    if (rect) {
+        if (!geometry) geometry = [DMRotationGeometry new];
+        geometry.rect = NSMakeRect(rect[0], rect[1], rect[2], rect[3]);
+        geometry.angle = angle;
+    } else geometry = nil;
+    objc_setAssociatedObject(screen, DMRotationGeometryKey, geometry, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    DMApplyDeviceCorners(screen);
+    if (wasRotating && !rect) {
+        DMPhoneShadow *shadow = objc_getAssociatedObject(screen.window, DMPhoneShadowKey);
+        [shadow applyGeometryForScreen:screen];
     }
 }

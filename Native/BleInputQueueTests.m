@@ -53,6 +53,10 @@ int main(int argc, char **argv) {
         NSData *cutoutRequest=Envelope([NSData dataWithBytes:&cameraRequest length:1]);
         assert([queue appendRecords:cutoutRequest]);
         assert([Drain(queue,488) isEqual:cutoutRequest]);
+        const uint8_t secureCandidate[] = {26, 1, 1, 2, 3, 4};
+        NSData *secureRequest=Envelope([NSData dataWithBytes:secureCandidate length:sizeof(secureCandidate)]);
+        assert([queue appendRecords:secureRequest]);
+        assert([Drain(queue,3) isEqual:secureRequest]); // Candidate command survives tiny BLE packet boundaries.
         NSData *first=Text(1000,7), *second=Text(31,9);
         assert([queue appendRecords:first] && [queue appendRecords:second]);
         NSMutableData *sent=[NSMutableData dataWithData:[queue takePacket:100]];

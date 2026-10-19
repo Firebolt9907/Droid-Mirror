@@ -12,6 +12,7 @@ static NSUInteger DMControlSize(const uint8_t *p, NSUInteger n) {
         case 1: case 22: return n < 5 ? 0 : 5 + (NSUInteger)DMRead32(p+1);
         case 2: return 32;
         case 23: return 40; // Timestamped touch, Bluetooth companion protocol.
+        case 26: return 6;
         case 3: case 24: return 21;
         case 4: case 8: case 10: case 18: return 2;
         case 25: case 5: case 6: case 7: case 11: case 15: case 17: case 19: case 20: return 1;

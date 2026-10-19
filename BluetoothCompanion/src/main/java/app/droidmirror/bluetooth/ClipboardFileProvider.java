@@ -31,8 +31,21 @@ public final class ClipboardFileProvider extends ContentProvider {
         return ParcelFileDescriptor.open(file(uri), ParcelFileDescriptor.MODE_READ_ONLY);
     }
     @Override public String getType(Uri uri) {
-        String extension = android.webkit.MimeTypeMap.getFileExtensionFromUrl(uri.toString());
+        String name = uri.getLastPathSegment();
+        String extension = "";
+        if (name != null) {
+            int dot = name.lastIndexOf('.');
+            if (dot >= 0) extension = name.substring(dot + 1);
+        }
         String type = android.webkit.MimeTypeMap.getSingleton().getMimeTypeFromExtension(extension.toLowerCase(java.util.Locale.ROOT));
+        if (type == null) {
+            String lower = extension.toLowerCase(java.util.Locale.ROOT);
+            if (lower.matches("^(png|jpg|jpeg|webp|gif|bmp|heic|heif)$")) {
+                type = "image/" + (lower.equals("jpg") ? "jpeg" : lower);
+            } else if (lower.equals("pdf")) {
+                type = "application/pdf";
+            }
+        }
         return type == null ? "application/octet-stream" : type;
     }
     @Override public Cursor query(Uri uri, String[] projection, String selection, String[] args, String sort) {

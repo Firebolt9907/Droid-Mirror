@@ -19,7 +19,9 @@ static NSUInteger DMPINSyntheticEventsRemaining;
 static void (*DMOriginalSendEvent)(NSApplication *, SEL, NSEvent *);
 static NSView *DMSecureOverlay;
 static NSUInteger DMSecureGeneration;
-static BOOL DMSecureBlack;
+static NSUInteger DMSecureRefreshGeneration;
+static BOOL DMSecureWindow;
+static BOOL DMSecureSessionStopped;
 static __weak id DMSecureController;
 static void (*DMOriginalDetectPINPrompt)(id, SEL);
 static CFAbsoluteTime DMLastPINCheck;
@@ -42,7 +44,7 @@ static void DMReportMirrorVisible(void) {
 }
 __attribute__((visibility("default")))
 void DroidMirrorFrameVisible(void) {
-    void (^present)(void) = ^{ DMFinishConnectingPhone(); DMFrameRendered = YES; DMReportMirrorVisible(); };
+    void (^present)(void) = ^{ DMSecureSessionStopped = NO; DMFinishConnectingPhone(); DMFrameRendered = YES; DMReportMirrorVisible(); };
     // SDL presents on the main thread. Reorder the loading overlay in the same
     // turn, before Core Animation can expose the new Metal view for a frame.
     if (NSThread.isMainThread) present();
@@ -52,17 +54,20 @@ void DroidMirrorFrameVisible(void) {
 __attribute__((visibility("default")))
 void DroidMirrorSessionDidStop(void) {
     DMFrameRendered = NO;
-    DMSecureBlack = NO;
+    DMSecureSessionStopped = YES;
+    ++DMSecureGeneration;
+    ++DMSecureRefreshGeneration;
+    DMSecureWindow = NO;
     DMSecureOverlay.hidden = YES;
     DMPINSyntheticEventsRemaining = 0;
 }
 
 static void DMDetectPINPrompt(id controller, SEL selector) {
-    // A regular lock screen has visible content; unrelated secure apps may be
-    // black, so still let the original PIN-specific hierarchy check confirm it.
-    if (!DMSecureBlack || DMHostQuitRequested || !DMOriginalDetectPINPrompt) return;
+    // Secure windows can belong to unrelated apps; let the original
+    // PIN-specific hierarchy check confirm the lock screen.
+    if (!DMSecureWindow || DMHostQuitRequested || !DMOriginalDetectPINPrompt) return;
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-    if (now - DMLastPINCheck < 1.25) return; // Coalesce frame and timer triggers.
+    if (now - DMLastPINCheck < 1.25) return; // Coalesce state and timer triggers.
     DMLastPINCheck = now;
     DMOriginalDetectPINPrompt(controller, selector);
 }
@@ -104,26 +109,35 @@ static void DMDetectPINPrompt(id controller, SEL selector) {
 }
 @end
 
-// Called by the patched client on black/nonblack frame transitions. No change
-// to SDL's keyboard, pointer or HID handling: this view cannot take focus.
+// WindowManager state arrives over the existing authenticated control channel.
+// Unknown queries clear the message; black video frames never enter this path.
 __attribute__((visibility("default")))
-void DroidMirrorSetSecureScreen(int black) {
+void DroidMirrorSetSecureScreen(int secure) {
     dispatch_async(dispatch_get_main_queue(), ^{
-        BOOL enteringBlackScreen = black && !DMSecureBlack;
-        DMSecureBlack = black != 0;
+        if (DMSecureSessionStopped || DMHostQuitRequested) return;
+        NSUInteger refresh = ++DMSecureRefreshGeneration;
+        if (secure) {
+            // Clear stale UI if monitoring or control delivery stops without a disconnect.
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+                if (refresh != DMSecureRefreshGeneration) return;
+                ++DMSecureGeneration;
+                DMSecureWindow = NO;
+                DMSecureOverlay.hidden = YES;
+            });
+        }
+        if ((secure != 0) == DMSecureWindow) return;
+        DMSecureWindow = secure != 0;
         NSUInteger generation = ++DMSecureGeneration;
-        if (!black) {
+        if (!secure) {
             DMSecureOverlay.hidden = YES;
             return;
         }
-        if (enteringBlackScreen && DMSecureController) {
+        if (DMSecureController) {
             DMLastPINCheck = 0;
             DMDetectPINPrompt(DMSecureController, NSSelectorFromString(@"detectPINPrompt"));
         }
-        // A black frame may be a brief app transition. Also works for static
-        // secure pages where the encoder emits just one frame and then idles.
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 350 * NSEC_PER_MSEC),
-                       dispatch_get_main_queue(), ^{
+        // Debounce window transitions independently of video frame contents.
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 350 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
             if (generation != DMSecureGeneration || DMHostQuitRequested) return;
             DMSecureOverlay.hidden = NO;
             [DMSecureOverlay setNeedsDisplay:YES];
@@ -307,8 +321,8 @@ static void DMSetupKeyboardPassthrough(id self, SEL command) {
                         DMSecureOverlay = overlay;
                         NSLog(@"DroidMirror secure overlay attached to %@ (%@)",
                               NSStringFromClass(screen.class), NSStringFromRect(screen.bounds));
-                        if (DMSecureBlack) {
-                            DMDetectPINPrompt(self, NSSelectorFromString(@"detectPINPrompt"));
+                        if (DMSecureWindow) {
+                            DMSecureWindow = NO; // Reapply state to the newly attached view.
                             DroidMirrorSetSecureScreen(1);
                         }
                     }

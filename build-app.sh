@@ -16,17 +16,25 @@ APP="$BUILD_STAGE/DroidMirror.app"
 # Never compile or sign over code the kernel may already have mapped.
 if [[ -d "$FINAL_APP" ]]; then /usr/bin/ditto "$FINAL_APP" "$APP"; fi
 
-# Finish mirror-session cleanup before replacing either app's components.
-/usr/bin/osascript <<'APPLESCRIPT'
-if application id "app.droidmirror.mac" is running then
-    tell application id "app.droidmirror.mac" to quit
-    repeat 120 times
-        if application id "app.droidmirror.mac" is not running then return
-        delay 0.25
-    end repeat
-    error "DroidMirror did not quit; stop mirroring before rebuilding."
-end if
-APPLESCRIPT
+MAC_DESTINATION="${DROIDMIRROR_MAC_DESTINATION:-/Applications/DroidMirror.app}"
+if [[ "${DROIDMIRROR_SKIP_MAC_INSTALL:-0}" != 1 ]]; then
+  python3 - "$MAC_DESTINATION" "$FINAL_APP" <<'PYTHON'
+import os, sys
+from pathlib import Path
+path = Path(sys.argv[1]).expanduser().absolute()
+if path.suffix != '.app' or path.is_symlink() or path == Path(sys.argv[2]).absolute():
+    sys.exit('Mac destination must be a non-symlink .app path distinct from the build output.')
+if not path.parent.is_dir() or not os.access(path.parent, os.W_OK):
+    sys.exit(f'Mac install directory is not writable: {path.parent}')
+PYTHON
+  MAC_DESTINATION="${MAC_DESTINATION:A}"
+fi
+UPDATE_MAC="$BUILD_STAGE/update-mac-apps"
+UPDATE_STATE="$BUILD_STAGE/mac-apps.plist"
+/usr/bin/clang -fobjc-arc -fblocks -mmacosx-version-min=14.0 -framework AppKit \
+  "$ROOT/Native/UpdateMacApps.m" -o "$UPDATE_MAC"
+# Normal quit ends the phone session before any Android or Mac replacement.
+"$UPDATE_MAC" prepare "$UPDATE_STATE"
 
 cd "$ROOT"
 export CLANG_MODULE_CACHE_PATH="/tmp/droidmirror-clang-cache"
@@ -80,11 +88,11 @@ cp "$ROOT/Resources/Info.plist" "$APP/Contents/Info.plist"
   -framework CoreImage -framework Cocoa -framework QuartzCore \
   -I/opt/homebrew/include -L/opt/homebrew/lib -lSDL3 \
   "$ROOT/Native/ConnectingPhone.m" "$ROOT/Native/KeyboardPassthroughShim.m" "$ROOT/Native/DeviceCorners.m" \
-  "$ROOT/Native/CornerResize.m" "$ROOT/Native/ScrollDirection.m" "$ROOT/Native/MirrorMenu.m" \
+  "$ROOT/Native/CornerResize.m" "$ROOT/Native/ScrollDirection.m" "$ROOT/Native/MirrorMenu.m" "$ROOT/Native/RotationPresentation.m" \
   -o "$APP/Contents/Frameworks/libDroidMirrorStyle.dylib"
 /usr/bin/clang "${C_FLAGS[@]}" -mmacosx-version-min=14.0 -c "$ROOT/Native/ClassicBluetoothWire.c" -o /tmp/droidmirror-classic-wire.o
 /usr/bin/clang "${C_FLAGS[@]}" -fobjc-arc -fblocks -mmacosx-version-min=14.0 \
-  -framework Foundation -framework IOBluetooth -framework CoreBluetooth -framework Security \
+  -framework Foundation -framework AVFoundation -framework IOBluetooth -framework CoreBluetooth -framework Security \
   "$ROOT/Native/ClassicBluetoothBridge.m" "$ROOT/Native/BleInputTransport.m" "$ROOT/Native/BleInputQueue.m" "$ROOT/Native/BleInputCrypto.c" /tmp/droidmirror-classic-wire.o -o "$APP/Contents/Helpers/DroidMirrorBluetooth"
 # Runtime-loaded Wi-Fi Aware SPI stays isolated from the main app's deployment target.
 /usr/bin/clang "${C_FLAGS[@]}" -fobjc-arc -fblocks -mmacosx-version-min=14.0 \
@@ -124,9 +132,11 @@ rm -f "$APP/Contents/Helpers/scrcpy"
 cp "$ROOT/scrcpy-5.0/app/data/scrcpy.png" "$RENDERER/Resources/scrcpy.png"
 cp "$ROOT/scrcpy-5.0/app/data/disconnected.png" "$RENDERER/Resources/disconnected.png"
 chmod +x "$APP/Contents/MacOS/DroidMirror"
-<<<<<<< HEAD
-codesign --force --deep --sign - "$APP" >/dev/null
+sh "$ROOT/Native/sign-droidmirror.sh" "$APP"
+python3 "$ROOT/tools/app-bundle.py" check "$APP"
 
+# Catch any app reopened during compilation before replacing phone components.
+"$UPDATE_MAC" prepare "$UPDATE_STATE"
 # Update a connected phone in place, then resume its saved background bridge.
 # Set ANDROID_SERIAL to select a phone, or skip for a Mac-only build.
 if [[ "${DROIDMIRROR_SKIP_ANDROID_INSTALL:-0}" != 1 ]]; then
@@ -156,7 +166,7 @@ if [[ "${DROIDMIRROR_SKIP_ANDROID_INSTALL:-0}" != 1 ]]; then
     else
       export JAVA_HOME="${JAVA_HOME:-$(/usr/libexec/java_home -v 21)}"
       (cd "$ROOT/BluetoothCompanion" && ./gradlew --no-daemon assembleDebug)
-      "$ADB" -s "$SERIAL" install -r "$ROOT/BluetoothCompanion/build/outputs/apk/debug/BluetoothCompanion-debug.apk"
+      "$ADB" -s "$SERIAL" install -r "$ROOT/BluetoothCompanion/build/outputs/apk/debug/DroidMirrorBluetooth-debug.apk"
       START_RESULT="$("$ADB" -s "$SERIAL" shell am start -W \
         -a app.droidmirror.bluetooth.action.START_READY \
         -n app.droidmirror.bluetooth/.SilentStartActivity -f 0x10000000 2>&1)"
@@ -172,10 +182,15 @@ if [[ "${DROIDMIRROR_SKIP_ANDROID_INSTALL:-0}" != 1 ]]; then
     fi
   fi
 fi
-echo "$APP"
-=======
-sh "$ROOT/Native/sign-droidmirror.sh" "$APP"
-python3 "$ROOT/tools/app-bundle.py" check "$APP"
 python3 "$ROOT/tools/app-bundle.py" publish "$APP" "$FINAL_APP"
 echo "$FINAL_APP"
->>>>>>> c02160ea21eafda3c4ed266d80133223d2f9b0b3
+if [[ "${DROIDMIRROR_SKIP_MAC_INSTALL:-0}" != 1 ]]; then
+  # Publish the entire signed bundle, including its background/render/Bluetooth
+  # helpers. Never copy new binaries over files mapped by an older process.
+  "$UPDATE_MAC" prepare "$UPDATE_STATE"
+  python3 "$ROOT/tools/app-bundle.py" install "$FINAL_APP" "$MAC_DESTINATION"
+  "$UPDATE_MAC" resume "$UPDATE_STATE" "$MAC_DESTINATION"
+  echo "Updated $MAC_DESTINATION and bundled helpers."
+else
+  echo "Skipping Mac install (DROIDMIRROR_SKIP_MAC_INSTALL=1)."
+fi

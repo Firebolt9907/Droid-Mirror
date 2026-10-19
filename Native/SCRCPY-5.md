@@ -27,7 +27,7 @@ Preserved customizations:
 
 Secure-page checks run at most five times/second. VideoToolbox IOSurfaces are read
 through CoreVideo without downloading full hardware frames; supported software
-YUV420/NV12 frames use the same black-frame checker. The mask is a UI overlay,
+Secure-page warnings use WindowManager flags delivered over the control channel. The mask is a UI overlay,
 not a bypass of Android protected-content restrictions.
 
 Build:
@@ -41,6 +41,6 @@ sh Native/sign-droidmirror.sh
 ```
 
 Regression tests target the new source tree. Tests cover Cmd/Ctrl clipboard/HID
-reports, Escape/Back, UHID queue preservation, software NV12 black frames, and
-actual CoreVideo secure-page detection. HardwareDecodeProbe uses a hidden window
+reports, Escape/Back, UHID queue preservation, secure-window metadata, and
+secure-state control messages. HardwareDecodeProbe uses a hidden window
 and a synthetic clip, not desktop capture or a real phone session.

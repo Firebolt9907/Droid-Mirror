@@ -3,16 +3,18 @@ package app.droidmirror.bluetooth;
 import java.io.IOException;
 import java.util.Arrays;
 
-/** Session-owned Iroh endpoint. Only the paired Mac may reach the local video handoff. */
+/** Readiness-owned Iroh endpoint. Only the paired Mac may reach the local video handoff. */
 final class PeerVideoTransport implements AutoCloseable {
     private final android.content.Context context;
     private long handle;
     private volatile boolean closed;
     private Thread publisher;
+    private volatile BluetoothWire wire;
     private android.net.wifi.WifiManager.MulticastLock multicast;
 
     PeerVideoTransport(android.content.Context context, byte[] key, BluetoothWire wire) throws IOException {
         this.context = context.getApplicationContext();
+        this.wire = wire;
         try {
             System.loadLibrary("droidmirror_peer");
             android.net.wifi.WifiManager wifi = (android.net.wifi.WifiManager)
@@ -24,7 +26,7 @@ final class PeerVideoTransport implements AutoCloseable {
             }
             handle = nativeStart(context.getApplicationContext(), key);
             if (handle == 0) throw new IOException("Iroh endpoint did not start");
-            publisher = new Thread(() -> publishAddresses(wire), "IrohAddressPublisher");
+            publisher = new Thread(() -> publishAddresses(), "IrohAddressPublisher");
             publisher.start();
         } catch (UnsatisfiedLinkError | RuntimeException error) {
             close();
@@ -40,12 +42,17 @@ final class PeerVideoTransport implements AutoCloseable {
 
     private synchronized String addresses() { return handle == 0 ? "" : nativeAddresses(handle); }
 
-    private void publishAddresses(BluetoothWire wire) {
+    void attach(BluetoothWire wire) { this.wire = wire; }
+
+    private void publishAddresses() {
         String previous = "";
+        BluetoothWire previousWire = null;
         try {
             while (!closed) {
+                BluetoothWire wire = this.wire;
+                if (wire != previousWire) { previous = ""; previousWire = wire; }
                 String nativeValue = addresses();
-                if (nativeValue != null && !nativeValue.isEmpty()) {
+                if (wire != null && nativeValue != null && !nativeValue.isEmpty()) {
                     java.util.List<java.net.InetAddress> interfaces = new java.util.ArrayList<>();
                     try {
                         java.util.Enumeration<java.net.NetworkInterface> all = java.net.NetworkInterface.getNetworkInterfaces();
@@ -66,8 +73,13 @@ final class PeerVideoTransport implements AutoCloseable {
                     StringBuilder signature = new StringBuilder();
                     for (byte[] record : records) signature.append(java.util.Arrays.toString(record));
                     if (!records.isEmpty() && !signature.toString().equals(previous)) {
-                        wire.peerAddress(PeerAddress.reset());
-                        for (byte[] record : records) wire.peerAddress(record);
+                        try {
+                            wire.peerAddress(PeerAddress.reset());
+                            for (byte[] record : records) wire.peerAddress(record);
+                        } catch (IOException ended) {
+                            // A session ending must not stop idle LAN discovery.
+                            Thread.sleep(100); continue;
+                        }
                         previous = signature.toString();
                         android.util.Log.i("DroidMirrorIroh", "Shared " + records.size() + " direct IP candidates over authenticated BLE");
                     }
@@ -75,9 +87,6 @@ final class PeerVideoTransport implements AutoCloseable {
                 Thread.sleep(1000);
             }
         } catch (InterruptedException stopped) { Thread.currentThread().interrupt(); }
-        catch (IOException failed) {
-            if (!closed) android.util.Log.w("DroidMirrorIroh", "Direct address exchange ended", failed);
-        }
     }
 
     @Override public synchronized void close() {

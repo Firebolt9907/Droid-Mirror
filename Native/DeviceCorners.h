@@ -13,3 +13,6 @@ void DMRefreshDeviceCornersFromPhone(NSView *screen);
 CGPoint DMSuperellipseCornerPoint(CGFloat extent, CGFloat progress);
 CGPathRef DMCreatePixelScreenPath(CGSize size, BOOL flipped) CF_RETURNS_RETAINED;
 void DMApplyDeviceCorners(NSView *screen);
+
+// Normalized SDL rectangle and clockwise angle; NULL restores the usual shape.
+void DMSetDeviceRotation(NSView *screen, const float *rect, double angle);

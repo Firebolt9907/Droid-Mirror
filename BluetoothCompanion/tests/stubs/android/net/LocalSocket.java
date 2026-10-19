@@ -8,7 +8,20 @@ public final class LocalSocket implements AutoCloseable {
     private final Socket socket;
     LocalSocket(Socket socket) { this.socket = socket; }
     public void setSoTimeout(int timeout) throws IOException { socket.setSoTimeout(timeout); }
-    public InputStream getInputStream() throws IOException { return socket.getInputStream(); }
+    public InputStream getInputStream() throws IOException {
+        // Android's native LocalSocket read reports timeout/EAGAIN as an ordinary
+        // IOException. A java.net.SocketTimeoutException substitute hides bugs.
+        return new FilterInputStream(socket.getInputStream()) {
+            @Override public int read() throws IOException {
+                try { return in.read(); }
+                catch (java.net.SocketTimeoutException timeout) { throw new IOException("Try again",timeout); }
+            }
+            @Override public int read(byte[] bytes,int offset,int length) throws IOException {
+                try { return in.read(bytes,offset,length); }
+                catch (java.net.SocketTimeoutException timeout) { throw new IOException("Try again",timeout); }
+            }
+        };
+    }
     public static final class BlockedWrite {
         public final java.util.concurrent.CountDownLatch entered = new java.util.concurrent.CountDownLatch(1);
         final java.util.concurrent.CountDownLatch shutdown = new java.util.concurrent.CountDownLatch(1);

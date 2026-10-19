@@ -108,6 +108,46 @@ enum NotificationRuntime {
         precondition(try! Data(contentsOf: receivedURL) == fileData)
         let afterFile = controller.sent.count
         sync.poll(); precondition(controller.sent.count == afterFile)
+        // Copy Image and screenshot clipboards have pixels but no file URL.
+        let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 2, pixelsHigh: 2,
+            bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+            colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+        memset(bitmap.bitmapData!, 127, bitmap.bytesPerRow * bitmap.pixelsHigh)
+        let png = bitmap.representation(using: .png, properties: [:])!
+        for type in [NSPasteboard.PasteboardType.png, .tiff] {
+            board.clearContents()
+            board.setData(type == .png ? png : bitmap.tiffRepresentation!, forType: type)
+            board.setString("image caption must not replace pixels", forType: .string)
+            sync.poll()
+            let imageBegin = controller.sent.last!
+            precondition(imageBegin["type"] as? String == "clipboardFileBegin")
+            precondition(imageBegin["name"] as? String == "Clipboard Image.png")
+            let imageID = imageBegin["id"] as! String
+            sync.receive(["type": "clipboardFileAck", "id": imageID, "offset": 0])
+            let encoded = controller.sent.last!["data"] as! String
+            let pixels = Data(base64Encoded: encoded.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/"))!
+            precondition(NSBitmapImageRep(data: pixels)?.pixelsWide == 2)
+            if type == .png { precondition(pixels == png) }
+            sync.receive(["type": "clipboardFileAck", "id": imageID, "offset": pixels.count])
+        }
+        board.clearContents(); board.setData(Data(repeating: 0, count: 5_000_000), forType: .png)
+        let beforeLargeImage = controller.sent.count
+        sync.poll(); precondition(controller.sent.count == beforeLargeImage)
+        precondition(sync.status.contains("less than 5 MB"))
+        board.clearContents(); board.setData(png, forType: .png)
+        board.setData(Data(), forType: NSPasteboard.PasteboardType("org.nspasteboard.ConcealedType"))
+        sync.poll(); precondition(controller.sent.count == beforeLargeImage)
+        copy("ready for incoming image"); sync.poll()
+        let imageID = UUID().uuidString
+        sync.receive(["type": "clipboardFileBegin", "id": imageID, "name": "phone.png", "size": png.count])
+        sync.receive(["type": "clipboardFileChunk", "id": imageID, "offset": 0, "data": png.base64EncodedString()])
+        precondition(board.pasteboardItems?.count == 1)
+        precondition(NSBitmapImageRep(data: board.data(forType: .png)!)?.pixelsWide == 2)
+        precondition(board.data(forType: .tiff) != nil)
+        let imageURL = (board.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as! [URL])[0]
+        precondition(try! Data(contentsOf: imageURL) == png)
+        let afterImage = controller.sent.count
+        sync.poll(); precondition(controller.sent.count == afterImage)
         // Reject oversize declarations, unsafe names and out-of-order chunks without a clipboard write.
         let previousCount = board.changeCount
         for event in [

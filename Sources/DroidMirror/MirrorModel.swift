@@ -314,7 +314,8 @@ final class MirrorModel: ObservableObject {
         }
         do {
             let ports = try await classicBluetooth.connect(address: device.id, wirelessMaxSize: wifiMaxSize,
-                                                           wirelessFPS: wifiFPS, wirelessBitRate: wifiBitRate * 1_000_000)
+                                                           wirelessFPS: wifiFPS, wirelessBitRate: wifiBitRate * 1_000_000,
+                                                           audioBufferMs: preferences.wirelessVideoBufferMs)
             guard !Task.isCancelled, preferences.transport == .bluetoothClassic, !isTerminatingApplication else {
                 classicBluetooth.stop()
                 return
@@ -815,7 +816,6 @@ final class MirrorModel: ObservableObject {
             "--window-borderless",
             "--window-width=430",
             "--background-color=000000",
-            "--capture-orientation=@0",
             "--max-fps=\(preferences.maxFPS)",
             "--video-bit-rate=\(preferences.bitRateMbps)M",
             "--max-size=\(preferences.maxSize)",

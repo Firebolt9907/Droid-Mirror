@@ -10,6 +10,10 @@
 #include "util/net.h"
 #include "util/thread.h"
 
+// Main-thread black-frame candidate state, never sufficient to show the warning alone.
+void sc_receiver_set_secure_candidate(bool black);
+uint32_t sc_receiver_secure_candidate_generation(void);
+
 // receive events from the device
 // managed by the controller
 struct sc_receiver {

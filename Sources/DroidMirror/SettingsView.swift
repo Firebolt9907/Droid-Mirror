@@ -79,7 +79,7 @@ struct SettingsView: View {
                     Text("Experimental direct connection. Mirroring is unavailable in this build.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
-                Text("Bluetooth starts at 320p, up to 15 fps, and a 128 kbps HEVC ceiling, then upgrades video over Iroh to the picture settings below. Video tries direct LAN or Tailscale IPs first, then an already-paired wireless ADB connection, then stays on Bluetooth. Relays and public Iroh discovery are disabled. Wireless ADB fallback requires Wireless debugging and one-time ADB pairing. Mouse, keyboard and navigation stay on Bluetooth. Audio requires a direct ADB session. Authorize Shizuku and enable the background bridge once in the Android companion.")
+                Text("Bluetooth and direct LAN video connect in parallel. LAN can carry the first video packet; otherwise Bluetooth starts at 320p, up to 15 fps, and a 128 kbps HEVC ceiling, then upgrades to the picture settings below. Video tries direct LAN or Tailscale IPs first, then an already-paired wireless ADB connection, then stays on Bluetooth. Relays and public Iroh discovery are disabled. Wireless ADB fallback requires Wireless debugging and one-time ADB pairing. Mouse, keyboard and navigation stay on Bluetooth. Audio requires a direct ADB session. Authorize Shizuku and enable the background bridge once in the Android companion.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section("Phone hotspot") {
@@ -90,7 +90,7 @@ struct SettingsView: View {
                             Notification.Name("app.droidmirror.hotspotConfiguration"), object: nil,
                             userInfo: nil, deliverImmediately: true)
                     }
-                Text("When offline, use the hotspot icon in the menu bar to turn on your phone’s hotspot over Bluetooth. Automatic mode waits 15 seconds and tries once per outage. Uses mobile data. Join the hotspot in the Wi-Fi menu; save it once for macOS auto-join. Requires Android 11+, the background bridge and authorized Shizuku.")
+                Text("Click the hotspot menu bar icon to toggle your phone’s hotspot over Bluetooth. Green means on. The icon appears only when there is no Wi-Fi connection or you are connected to the phone’s hotspot. After you join the hotspot, switching to another Wi-Fi network turns it off. Allow Location Services to detect Wi-Fi network changes. Automatic mode waits 15 seconds and tries once per outage. Uses mobile data. Join the hotspot in the Wi-Fi menu; save it once for macOS auto-join. Requires Android 11+, the background bridge and authorized Shizuku.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             NotificationAppsView()
@@ -104,7 +104,7 @@ struct SettingsView: View {
                     }
                 Text(clipboardMirroring ? clipboardStatus.text : "Clipboard mirroring off")
                     .font(.caption).foregroundStyle(.secondary)
-                Text("Sync newly copied text and individual files in both directions, including between mirror sessions. Requires Bluetooth pairing, the Android background bridge and Shizuku. Files must be less than 5 MB; text is limited to 4 KiB. Marked sensitive clips are skipped.")
+                Text("Sync newly copied text, images and individual files in both directions, including between mirror sessions. Requires Bluetooth pairing, the Android background bridge and Shizuku. Images and files must be less than 5 MB; text is limited to 4 KiB. Marked sensitive clips are skipped.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section("Media playback") {

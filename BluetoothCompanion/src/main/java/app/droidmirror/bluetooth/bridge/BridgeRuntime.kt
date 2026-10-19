@@ -116,8 +116,8 @@ class BridgeRuntime(private val context: Context, private val onChanged: Runnabl
                 if (!destroyed && authorized() && client != null) client.openBrowser(url, { !destroyed && authorized() }, reply)
                 else reply(false)
             } },
-            onHotspotStart = { authorized, reply -> handler.post {
-                if (!destroyed && authorized()) hotspot?.start { reply(it) }
+            onHotspotToggle = { enabled, authorized, reply -> handler.post {
+                if (!destroyed && authorized()) hotspot?.setEnabled(enabled) { reply(it) }
             } }
         )
         runCatching { ble.start { update(it, details) } }

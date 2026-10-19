@@ -1,5 +1,5 @@
 // Compile with BleInputQueue.m, BleInputCrypto.c and ClassicBluetoothWire.c,
-// linking Foundation, IOBluetooth, CoreBluetooth and Security.
+// linking Foundation, AVFoundation, IOBluetooth, CoreBluetooth and Security.
 #import "BleInputTransport.m"
 #define main DMClassicHelperMain
 #import "ClassicBluetoothBridge.m"
@@ -101,6 +101,41 @@
     [self.videoBytes appendBytes:bytes length:length]; return YES;
 }
 @end
+
+@interface DMWirelessAppearanceBridge : DMStreamBridge
+- (BOOL)feedWireless:(const uint8_t *)bytes length:(size_t)length;
+@end
+@implementation DMWirelessAppearanceBridge
+- (BOOL)feedWireless:(const uint8_t *)bytes length:(size_t)length {
+    return dm_classic_wire_feed_ble(&_wifiWire,bytes,length,DMVideo,DMEvent,NULL,NULL,(__bridge void *)self);
+}
+@end
+
+static void TestWirelessStartupAppearance(void) {
+    NSData *appearance=[@"{\"deviceName\":\"Pixel\",\"hasCameraCutout\":\"true\"}\n" dataUsingEncoding:NSUTF8StringEncoding];
+    const uint8_t video[]={0,42,0,7};
+    NSMutableData *stream=[NSMutableData data];
+    uint8_t type=4; uint32_t length=htonl((uint32_t)appearance.length);
+    [stream appendBytes:&type length:1]; [stream appendBytes:&length length:4]; [stream appendData:appearance];
+    type=0; length=htonl(sizeof(video));
+    [stream appendBytes:&type length:1]; [stream appendBytes:&length length:4]; [stream appendBytes:video length:sizeof(video)];
+    const size_t fragments[]={1,2,7,4096};
+    for (size_t i=0;i<sizeof(fragments)/sizeof(fragments[0]);++i) {
+        DMWirelessAppearanceBridge *bridge=[DMWirelessAppearanceBridge new];
+        [bridge prepareWirelessVideo];
+        for (size_t offset=0;offset<stream.length;) {
+            size_t take=MIN(fragments[i],stream.length-offset);
+            assert([bridge feedWireless:(const uint8_t *)stream.bytes+offset length:take]);
+            offset+=take;
+        }
+        assert(bridge.appearanceBuffer.length==0);
+        assert([bridge.videoBytes isEqualToData:[NSData dataWithBytes:video length:sizeof(video)]]);
+        // Enabling metadata on Wi-Fi must retain JSON validation.
+        const uint8_t invalid[]={4,0,0,0,2,'x','\n'};
+        assert(![bridge feedWireless:invalid length:sizeof(invalid)]);
+    }
+    puts("Wireless startup appearance: metadata before first video, fragmented/coalesced records, decoder isolation and invalid JSON rejection passed");
+}
 
 @interface DMRecoveryTransport : DMBleInputTransport
 @property(nonatomic, strong) NSString *failure;
@@ -384,21 +419,28 @@ static void TestVideoAckCadence(void) {
 }
 
 static void TestDroppedADB(void) {
-    for (int silent=0; silent<3; ++silent) {
+    for (int silent=0; silent<4; ++silent) {
     int video[2], output[2]; assert(!socketpair(AF_UNIX,SOCK_STREAM,0,video));
     assert(!socketpair(AF_UNIX,SOCK_STREAM,0,output));
     DMStartupBridge *bridge=[DMStartupBridge new];
     DMFallbackBLE *ble=[DMFallbackBLE new]; bridge.ble=(DMBleInputTransport *)ble;
     bridge.commands=[NSMutableData data]; bridge.pending=[NSMutableData data];
+    fcntl(video[1],F_SETFL,O_NONBLOCK); // Match the production candidate socket.
     bridge.wifiSocket=video[1]; bridge.client=output[1]; bridge.wifiActive=YES;
+    bridge.announcedReady=silent!=3;
     bridge.wifiNonce=[NSMutableData dataWithLength:32]; bridge.videoReceived=123;
-    bridge.wifiLastData=NSDate.timeIntervalSinceReferenceDate-(silent==1 ? 5 : 0);
+    bridge.wifiLastData=NSDate.timeIntervalSinceReferenceDate-((silent==1 || silent==3) ? 5 : 0);
     if (silent==2) {
         bridge.wifiIsPeer=YES;
         uint64_t now=(uint64_t)(NSProcessInfo.processInfo.systemUptime*1e9);
         for (int i=0;i<7;i++) { [bridge recordLatency:now wireless:NO]; [bridge recordLatency:now-200000000 wireless:YES]; }
         assert(bridge.latencyBadSince>0);
         bridge.latencyBadSince-=3;
+    }
+    if (silent==3) {
+        [bridge pollWiFi];
+        assert(bridge.wifiSocket==video[1] && bridge.wifiActive && !bridge.wifiRecovering);
+        bridge.wifiLastData-=11; // Initial path has a bounded 15-second capture budget.
     }
     if (!silent) close(video[0]);
     [bridge pollWiFi];
@@ -447,13 +489,20 @@ static void TestPeerAddressFragments(void) {
     puts("BLE peer addresses: fragmented Tailscale hints, deduplication, reset, invalid family and decoder isolation passed");
 }
 
-static void TestColdPeerConnection(BOOL slow) {
+@interface DMInitialBridge : DMStartupBridge
+@property(nonatomic) NSUInteger bleStarts;
+@end
+@implementation DMInitialBridge
+- (void)startBleWhenAndroidReady { ++_bleStarts; }
+@end
+
+static void TestColdPeerConnection(BOOL slow, BOOL initial) {
     int listener=socket(AF_INET,SOCK_STREAM,0); assert(listener>=0);
     struct sockaddr_in address={0}; address.sin_family=AF_INET;
     address.sin_addr.s_addr=htonl(INADDR_LOOPBACK);
     assert(!bind(listener,(struct sockaddr *)&address,sizeof(address)) && !listen(listener,1));
     socklen_t size=sizeof(address); assert(!getsockname(listener,(struct sockaddr *)&address,&size));
-    DMStartupBridge *bridge=[DMStartupBridge new];
+    DMStartupBridge *bridge=initial ? [DMInitialBridge new] : [DMStartupBridge new];
     bridge.wifiSocket=-1; bridge.peerPort=ntohs(address.sin_port);
     bridge.pairingKey=[NSMutableData dataWithLength:32];
     bridge.wirelessProfile=[NSMutableData dataWithLength:12];
@@ -463,36 +512,41 @@ static void TestColdPeerConnection(BOOL slow) {
         int yes=1; setsockopt(peer,SOL_SOCKET,SO_NOSIGPIPE,&yes,sizeof(yes));
         // Model direct discovery longer than the former two-second budget.
         [NSThread sleepForTimeInterval:slow ? 0 : 3];
-        uint8_t hello[40]={0}; memcpy(hello,"DMWIFI05",8);
+        uint8_t hello[40]={0}; memcpy(hello,initial ? "DMWIFI06" : "DMWIFI05",8);
         assert(send(peer,hello,sizeof(hello),0)==sizeof(hello));
         uint8_t request[44]; assert(DMReadExact(peer,request,sizeof(request)));
         NSData *proof=DMUpgradeProof(bridge.pairingKey,"client",hello+8,request,12);
         assert(!memcmp(proof.bytes,request+12,32));
         NSData *preview=DMUpgradeProof(bridge.pairingKey,"preview server",hello+8,request,12);
         assert(send(peer,preview.bytes,32,0)==32);
-        // Deliver three preview frames over time before accepting the cutoff.
-        for (int i=0;i<3;++i) {
-            [NSThread sleepForTimeInterval:0.12];
-            uint64_t stamp=CFSwapInt64HostToBig((uint64_t)(NSProcessInfo.processInfo.systemUptime*1e9));
-            dispatch_sync(dispatch_get_main_queue(), ^{ [bridge recordLatency:CFSwapInt64BigToHost(stamp) wireless:NO]; });
-            if (slow) [NSThread sleepForTimeInterval:0.08];
-            const uint32_t marker=htonl((uint32_t)-2);
-            assert(send(peer,&marker,4,0)==4 && send(peer,&stamp,8,0)==8);
-            const uint8_t frame[]={0,0,0,1,42,0,0,0,0};
-            assert(send(peer,frame,sizeof(frame),0)==sizeof(frame));
+        if (!initial) {
+            // Deliver three preview frames over time before accepting the cutoff.
+            for (int i=0;i<3;++i) {
+                [NSThread sleepForTimeInterval:0.12];
+                uint64_t stamp=CFSwapInt64HostToBig((uint64_t)(NSProcessInfo.processInfo.systemUptime*1e9));
+                dispatch_sync(dispatch_get_main_queue(), ^{ [bridge recordLatency:CFSwapInt64BigToHost(stamp) wireless:NO]; });
+                if (slow) [NSThread sleepForTimeInterval:0.08];
+                const uint32_t marker=htonl((uint32_t)-2);
+                assert(send(peer,&marker,4,0)==4 && send(peer,&stamp,8,0)==8);
+                const uint8_t frame[]={0,0,0,1,42,0,0,0,0};
+                assert(send(peer,frame,sizeof(frame),0)==sizeof(frame));
+            }
+            uint8_t ready;
+            if (slow) {
+                assert(!DMReadExact(peer,&ready,1));
+                close(peer); close(listener); dispatch_semaphore_signal(completed); return;
+            }
+            assert(DMReadExact(peer,&ready,1) && ready==1);
+            const uint32_t end=UINT32_MAX;
+            assert(send(peer,&end,4,0)==4);
+        } else {
+            const uint32_t first=htonl((uint32_t)-3);
+            assert(send(peer,&first,4,0)==4);
         }
-        uint8_t ready;
-        if (slow) {
-            assert(!DMReadExact(peer,&ready,1));
-            close(peer); close(listener); dispatch_semaphore_signal(completed); return;
-        }
-        assert(DMReadExact(peer,&ready,1) && ready==1);
-        const uint32_t end=UINT32_MAX;
-        assert(send(peer,&end,4,0)==4);
         uint8_t response[48]={0};
         NSMutableData *authenticated=[bridge.wirelessProfile mutableCopy];
         [authenticated appendBytes:response length:8];
-        NSData *server=DMUpgradeProof(bridge.pairingKey,"server",hello+8,authenticated.bytes,authenticated.length);
+        NSData *server=DMUpgradeProof(bridge.pairingKey,initial ? "initial server" : "server",hello+8,authenticated.bytes,authenticated.length);
         memcpy(response+8,server.bytes,32); memcpy(response+40,"DMBT0006",8);
         assert(send(peer,response,sizeof(response),0)==sizeof(response));
         close(peer); close(listener); dispatch_semaphore_signal(completed);
@@ -507,13 +561,16 @@ static void TestColdPeerConnection(BOOL slow) {
         puts("Slow Iroh preview: rejects continuously delivered frames before cutoff and cools down retries"); return;
     }
     assert(bridge.wifiSocket>=0 && bridge.wifiCutoff==0 && bridge.wifiNonce.length==32);
+    if (initial) assert(bridge.wifiInitial && ((DMInitialBridge *)bridge).bleStarts==1 && !bridge.l2capReady);
     close(bridge.wifiSocket);
     assert(!dispatch_semaphore_wait(completed,dispatch_time(DISPATCH_TIME_NOW,NSEC_PER_SEC)));
     puts("Cold Iroh startup: delayed challenge survives discovery, authenticates and preserves video cutoff");
 }
 
-int main(void) {
+int main(int argc, const char *argv[]) {
     @autoreleasepool {
+        TestWirelessStartupAppearance();
+        if (argc==2 && !strcmp(argv[1],"--wire-only")) return 0;
         // A loading client may already have consumed/closed the listener before
         // authentication completes. READY must use the retained bound port.
         DMStartupBridge *earlyClient = [DMStartupBridge new];
@@ -537,8 +594,9 @@ int main(void) {
         TestNativeClassicStreams();
         TestVideoAckCadence();
         TestDroppedADB();
-        TestColdPeerConnection(NO);
-        TestColdPeerConnection(YES);
+        TestColdPeerConnection(NO, NO);
+        TestColdPeerConnection(NO, YES);
+        TestColdPeerConnection(YES, NO);
         TestPeerAddressFragments();
         DMStartupDevice *device=[DMStartupDevice new];
         DMStartupBridge *bridge=[DMStartupBridge new];

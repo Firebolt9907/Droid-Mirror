@@ -15,5 +15,7 @@ interface IDisplayGuard {
     boolean restoreBluetoothVideo(IBinder owner) = 9;
     boolean grantSecureSettings() = 10;
     byte[] phoneAppearance() = 11;
+    boolean startAudio(IBinder owner, in ParcelFileDescriptor output) = 12;
+    void stopAudio(IBinder owner) = 13;
     void destroy() = 16777114;
 }

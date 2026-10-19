@@ -21,6 +21,7 @@ public final class CaptureService extends Service {
     private volatile ClassicL2capClient listener;
     private volatile String listenerPeer;
     private volatile ParcelFileDescriptor socket;
+    private volatile PeerVideoTransport peerTransport;
     private static final class SessionState {
         final String token = UUID.randomUUID().toString();
         volatile long startedElapsed;
@@ -30,7 +31,7 @@ public final class CaptureService extends Service {
         volatile ParcelFileDescriptor controlPipe;
         volatile BluetoothWire wire;
         volatile WirelessVideoUpgrade wirelessUpgrade;
-        volatile PeerVideoTransport peerTransport;
+        volatile WirelessAudioUpgrade wirelessAudio;
         volatile BleInputServer ble;
         volatile ShizukuDisplayClient guard;
         volatile boolean stopped;
@@ -224,6 +225,10 @@ public final class CaptureService extends Service {
                     listener = new ClassicL2capClient(this);
                     listenerPeer=getSharedPreferences("ready", MODE_PRIVATE).getString("peer", "");
                     listener.listen(listenerPeer);
+                    // Bind LAN discovery while idle, alongside the Classic accept.
+                    if (peerTransport != null) peerTransport.close();
+                    try { peerTransport = new PeerVideoTransport(this, BlePairing.key(this, listenerPeer), null); }
+                    catch (IOException unavailable) { peerTransport = null; android.util.Log.d("DroidMirrorIroh", "LAN discovery unavailable", unavailable); }
                     status("Ready for your paired Mac · Classic L2CAP");
                 }
                 // Shell enforces authentication, bonding and the selected Mac before
@@ -275,23 +280,31 @@ public final class CaptureService extends Service {
                 });
                 state.ble.start(); wire.setSideChannel(state.ble::send); java.util.Arrays.fill(key,(byte)0);
                 startControls(state,state.ble.input(),wire);
-                status("Waiting for authenticated BLE input");
-                if (!state.ble.awaitInput()) throw new IOException("BLE input connection timed out");
                 try {
                     synchronized (CaptureService.this) {
+                        if (state.stopped) throw new IOException("Session ended before media endpoints started");
+                        WirelessAudioSession audio=new WirelessAudioSession(this,state.wire,state.guard);
+                        try { state.wirelessAudio=new WirelessAudioUpgrade(BlePairing.key(this,peer),audio); }
+                        catch (IOException unavailable) { android.util.Log.d("DroidMirrorAudio","Independent lane unavailable",unavailable); }
                         if (!state.stopped) state.wirelessUpgrade = new WirelessVideoUpgrade(state.wire, BlePairing.key(this, peer), profile -> {
                             ShizukuDisplayClient guard = state.guard;
                             if (state.stopped || guard == null) throw new IOException("Video session ended before quality upgrade");
-                            if (profile==null) guard.restoreBluetoothVideo(); else guard.upgradeVideo(profile);
-                        });
-                        if (!state.stopped) state.peerTransport = new PeerVideoTransport(this, BlePairing.key(this, peer), state.wire);
+                            if (profile==null) {
+                                if (state.wirelessAudio!=null) state.wirelessAudio.disconnect();
+                                guard.restoreBluetoothVideo();
+                            } else guard.upgradeVideo(profile);
+                        }, true, audio);
                     }
                 }
                 catch (IOException unavailable) { android.util.Log.d("DroidMirrorBluetooth", "Wireless upgrade unavailable", unavailable); }
+                status("Waiting for authenticated BLE input");
+                if (!state.ble.awaitInput()) throw new IOException("BLE input connection timed out");
+                if (peerTransport != null) peerTransport.attach(wire);
                 // Optional appearance must never prevent capture on unsupported OEMs.
                 try { wire.appearance(state.guard.phoneAppearance()); }
                 catch (Exception unavailable) { android.util.Log.d("DroidMirrorAppearance", "Appearance unavailable", unavailable); }
                 state.guard.startVideo(output, remoteControls, state.computerName);
+                if (state.wirelessUpgrade != null) state.wirelessUpgrade.captureReady();
             }
             ByteArrayOutputStream header = new ByteArrayOutputStream();
             VideoWire.deviceHeader(new DataOutputStream(header), Build.MODEL);
@@ -440,8 +453,9 @@ public final class CaptureService extends Service {
             // Readiness owns this foreground notification even between sessions.
             refreshNotification();
             state.videoWindow.close();
+            if (state.wirelessAudio != null) state.wirelessAudio.close();
             if (state.wirelessUpgrade != null) state.wirelessUpgrade.close();
-            if (state.peerTransport != null) state.peerTransport.close();
+            if (peerTransport != null) peerTransport.attach(null);
             if (state.ble != null) state.ble.close();
             ShizukuDisplayClient active = state.guard; state.guard = null;
             if (active != null) active.close(); else if (!state.hasGuard && state.streamStarted.get()) auditEnd(state, false);
@@ -464,6 +478,7 @@ public final class CaptureService extends Service {
         if (bridge != null) { bridge.close(); bridge = null; }
         stopSession();
         if (listener != null) listener.close();
+        if (peerTransport != null) { peerTransport.close(); peerTransport = null; }
         if (watchdog != null) watchdog.shutdownNow();
         unregisterReceiver(screenActions);
         super.onDestroy();

@@ -57,5 +57,43 @@ public final class HotspotBridgeService extends IHotspotBridge.Stub {
             return "unavailable";
         } finally { Binder.restoreCallingIdentity(identity); }
     }
+    @Override public String hotspotSSID() {
+        long identity = Binder.clearCallingIdentity();
+        try {
+            PrivilegedCapture.initialize();
+            Object wifi = FakeContext.get().getSystemService("wifi");
+            Object config = wifi.getClass().getMethod("getSoftApConfiguration").invoke(wifi);
+            return (String) config.getClass().getMethod("getSsid").invoke(config);
+        } catch (Exception | LinkageError unavailable) { return null; }
+        finally { Binder.restoreCallingIdentity(identity); }
+    }
+
+    @Override public String stopHotspot() {
+        long identity = Binder.clearCallingIdentity();
+        try {
+            if (android.os.Build.VERSION.SDK_INT < 30) return "unsupported";
+            PrivilegedCapture.initialize();
+            Class<?> api = Class.forName("android.net.TetheringManager");
+            Object manager = FakeContext.get().getSystemService("tethering");
+            if (manager == null) return "unsupported";
+            @SuppressLint("BlockedPrivateApi")
+            java.lang.reflect.Field context = api.getDeclaredField("mContext");
+            context.setAccessible(true);
+            context.set(manager, FakeContext.get());
+            api.getMethod("stopTethering", int.class).invoke(manager, 0);
+            Object wifi = FakeContext.get().getSystemService("wifi");
+            // stopTethering is asynchronous on Android 11+. Confirm Wi-Fi AP shutdown.
+            long deadline = android.os.SystemClock.elapsedRealtime() + 20000;
+            while (android.os.SystemClock.elapsedRealtime() < deadline) {
+                int state = (Integer) wifi.getClass().getMethod("getWifiApState").invoke(wifi);
+                if (state == 11) return "stopped"; // WIFI_AP_STATE_DISABLED
+                if (state == 14) return "unavailable"; // WIFI_AP_STATE_FAILED
+                Thread.sleep(200);
+            }
+            return "timeout";
+        } catch (Exception | LinkageError unavailable) { return "unavailable"; }
+        finally { Binder.restoreCallingIdentity(identity); }
+    }
+
     @Override public void destroy() { System.exit(0); }
 }

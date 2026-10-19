@@ -12,6 +12,11 @@ typedef struct {
     size_t latency_used;
     void (*latency)(void *, uint64_t);
     bool (*appearance)(void *, const uint8_t *, size_t);
+    // Audio is an explicitly negotiated extension on the authenticated Wi-Fi
+    // parser only. Classic and BLE leave this callback unset and reject it.
+    bool (*audio)(void *, uint8_t, const uint8_t *, size_t);
+    uint8_t audio_bytes[4104];
+    size_t audio_used;
     bool decided, legacy, control, ble, video_only, require_video_only;
 } DMClassicWire;
 typedef bool (*DMWireVideo)(void *, const uint8_t *, size_t);

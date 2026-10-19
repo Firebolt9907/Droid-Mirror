@@ -1,4 +1,7 @@
 #include "receiver.h"
+#ifdef __APPLE__
+#include <dlfcn.h>
+#endif
 
 #include <assert.h>
 #include <inttypes.h>
@@ -7,6 +10,7 @@
 
 #include "device_msg.h"
 #include "events.h"
+#include "secure_screen_gate.h"
 #include "util/log.h"
 #include "util/str.h"
 #include "util/thread.h"
@@ -84,9 +88,48 @@ task_set_camera_cutout(void *userdata) {
     free(userdata);
 }
 
+static struct sc_secure_screen_gate secure_gate;
+
+static void
+set_secure_overlay(bool secure) {
+#ifdef __APPLE__
+    void (*set_secure)(int) = (void (*)(int)) dlsym(RTLD_DEFAULT, "DroidMirrorSetSecureScreen");
+    if (set_secure) set_secure(secure);
+#else
+    (void) secure;
+#endif
+}
+
+void
+sc_receiver_set_secure_candidate(bool black) {
+    sc_secure_screen_gate_set(&secure_gate, black);
+    if (!black) set_secure_overlay(false);
+}
+
+uint32_t
+sc_receiver_secure_candidate_generation(void) {
+    return secure_gate.generation;
+}
+
+static void
+task_set_secure_window(void *userdata) {
+    struct sc_device_msg *msg = userdata;
+    if (sc_secure_screen_gate_accept(&secure_gate, msg->secure_window_state.generation)) {
+        set_secure_overlay(msg->secure_window_state.state == 1);
+    }
+    free(msg);
+}
+
 static void
 process_msg(struct sc_receiver *receiver, struct sc_device_msg *msg) {
     switch (msg->type) {
+        case DEVICE_MSG_TYPE_SECURE_WINDOW_STATE: {
+            struct sc_device_msg *copy = malloc(sizeof(*copy));
+            if (!copy) return;
+            *copy = *msg;
+            if (!sc_run_on_main_thread(task_set_secure_window, copy, false)) free(copy);
+            break;
+        }
         case DEVICE_MSG_TYPE_CAMERA_CUTOUT: {
             struct sc_camera_cutout *copy = malloc(sizeof(*copy));
             if (!copy) return;

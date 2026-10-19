@@ -66,7 +66,8 @@ int main(void) {
         NSEvent *outside = Mouse(window, NSEventTypeLeftMouseDown, NSMakePoint(311, 860), 3);
         assert([controller handleCutoutMouseEvent:outside] == outside);
         [controller updateCameraCutouts:@[]];
-        assert(controller.toolbarWindow.visible && controller.toolbarWindow.parentWindow == window);
+        assert(!controller.toolbarWindow.visible && !controller.toolbarWindow.parentWindow);
+        assert(controller.deviceHasCameraCutout && controller.cameraCutouts.count == 0);
         NSEvent *noCutout = Mouse(window, NSEventTypeLeftMouseDown, start, 4);
         assert([controller handleCutoutMouseEvent:noCutout] == noCutout);
         assert(window.dragCount == 2);

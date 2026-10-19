@@ -16,7 +16,7 @@ static inline void DMCachePhoneAppearance(NSDictionary *update) {
     NSString *path = DMPhoneAppearancePath();
     if (!path.length) return;
     NSMutableDictionary *value = [DMReadPhoneAppearance() mutableCopy];
-    for (NSString *key in @[@"displayDump", @"wallpaper", @"deviceName"])
+    for (NSString *key in @[@"displayDump", @"wallpaper", @"deviceName", @"hasCameraCutout"])
         if ([update[key] isKindOfClass:NSString.class] && [update[key] length]) value[key] = update[key];
     NSData *data = [NSJSONSerialization dataWithJSONObject:value options:0 error:nil];
     if (data.length <= 65536) {

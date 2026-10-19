@@ -1,5 +1,8 @@
 #include "screen.h"
 #include "camera_cutout.h"
+#include "receiver.h"
+#include "secure_black_frame.h"
+#include "rotation.h"
 
 #include <assert.h>
 #include <string.h>
@@ -10,13 +13,14 @@
 #include "options.h"
 #include "util/log.h"
 #include "util/sdl.h"
-#include "secure_black_frame.h"
 #ifdef __APPLE__
 #include <dlfcn.h>
 #include <CoreVideo/CoreVideo.h>
 #endif
 
 #define DISPLAY_MARGINS 96
+
+static void finish_rotation(struct sc_screen *screen);
 
 #define DOWNCAST(SINK) container_of(SINK, struct sc_screen, frame_sink)
 
@@ -258,6 +262,27 @@ sc_screen_update_content_rect(struct sc_screen *screen) {
                          &screen->rect);
 }
 
+// The native mask follows the same rigid video rectangle, hiding the temporary
+// drawing canvas outside it. NULL restores the normal phone silhouette.
+static void
+rotation_presentation(struct sc_screen *screen, const SDL_FRect *rect) {
+#ifdef __APPLE__
+    void (*present)(SDL_Window *, const float *, double) =
+        dlsym(RTLD_DEFAULT, "DroidMirrorRotationPresentation");
+    if (present) {
+        struct sc_size size = sc_sdl_get_window_size(screen->window);
+        float geometry[4];
+        if (rect) {
+            geometry[0] = rect->x / size.width; geometry[1] = rect->y / size.height;
+            geometry[2] = rect->w / size.width; geometry[3] = rect->h / size.height;
+        }
+        present(screen->window, rect ? geometry : NULL, screen->rotation.angle);
+    }
+#else
+    (void) screen; (void) rect;
+#endif
+}
+
 // render the texture to the renderer
 //
 // Set the update_content_rect flag if the window or content size may have
@@ -266,6 +291,14 @@ static void
 sc_screen_render(struct sc_screen *screen, bool update_content_rect) {
     assert(screen->window_shown);
 
+    if (screen->rotation.active) {
+        Uint64 now = SDL_GetTicks();
+        screen->rotation.next_tick = now + screen->rotation.frame_interval;
+        double t = sc_rotation_progress(now, screen->rotation.start);
+        screen->rotation.angle = screen->rotation.from
+            + (screen->rotation.to - screen->rotation.from) * t;
+        if (t == 1) { finish_rotation(screen); update_content_rect = true; }
+    }
     if (update_content_rect) {
         sc_screen_update_content_rect(screen);
     }
@@ -310,7 +343,24 @@ sc_screen_render(struct sc_screen *screen, bool update_content_rect) {
     }
 
     bool ok = false;
-    if (orientation == SC_ORIENTATION_0) {
+    if (screen->rotation.active) {
+        struct sc_size size = sc_sdl_get_window_size(screen->window);
+        screen->rotation.rect = (SDL_FRect){
+            (size.width - screen->rotation.surface.x)/2,
+            (size.height - screen->rotation.surface.y)/2,
+            screen->rotation.surface.x, screen->rotation.surface.y};
+        rotation_presentation(screen, &screen->rotation.rect);
+        SDL_FRect rect = screen->rotation.rect;
+        rect.x *= scale; rect.y *= scale; rect.w *= scale; rect.h *= scale;
+        ok = SDL_RenderTextureRotated(renderer, texture, srcrect, &rect,
+            screen->rotation.angle, NULL, sc_orientation_is_mirror(orientation)
+                ? SDL_FLIP_HORIZONTAL : SDL_FLIP_NONE);
+        geometry = rect;
+        if (sc_orientation_is_swap(orientation)) {
+            geometry = (SDL_FRect){rect.x + (rect.w-rect.h)/2,
+                rect.y + (rect.h-rect.w)/2, rect.h, rect.w};
+        }
+    } else if (orientation == SC_ORIENTATION_0) {
         // always align to a physical pixel
         geometry.x = (int32_t) geometry.x;
         geometry.y = (int32_t) geometry.y;
@@ -341,11 +391,13 @@ sc_screen_render(struct sc_screen *screen, bool update_content_rect) {
                                       angle, NULL, flip);
     }
 
-    sc_camera_cutout_update_window(renderer, &geometry,
+    double extra_angle = screen->rotation.active ? screen->rotation.angle
+        - 90 * sc_orientation_get_rotation(orientation) : 0;
+    sc_camera_cutout_update_window_rotated(renderer, &geometry,
         (!screen->is_icon_active && !screen->camera) ? screen->frame_size : (struct sc_size){0, 0},
-        orientation);
+        orientation, extra_angle);
     if (!screen->is_icon_active && !screen->camera) {
-        sc_camera_cutout_render(renderer, &geometry, screen->frame_size, orientation);
+        sc_camera_cutout_render_rotated(renderer, &geometry, screen->frame_size, orientation, extra_angle);
     }
 
     if (!ok) {
@@ -534,14 +586,17 @@ sc_screen_init(struct sc_screen *screen,
 
     screen->resize_pending = false;
     screen->window_shown = false;
-    screen->secure_black_frame = false;
     screen->reported_visible = false;
+    screen->secure_black_frame = false;
+    screen->secure_request_pending = false;
     screen->secure_check_at = 0;
+    sc_receiver_set_secure_candidate(false);
     screen->paused = false;
     screen->resume_frame = NULL;
     screen->camera_cutout_requested = false;
     screen->camera_cutout_request_at = 0;
     sc_camera_cutout_set(NULL);
+    screen->rotation.active = false;
     screen->orientation = SC_ORIENTATION_0;
     screen->disconnected = false;
     screen->disconnect_started = false;
@@ -843,6 +898,7 @@ sc_screen_show_initial_window(struct sc_screen *screen) {
 
 void
 sc_screen_hide_window(struct sc_screen *screen) {
+    finish_rotation(screen);
     sc_sdl_hide_window(screen->window);
     screen->window_shown = false;
 }
@@ -869,6 +925,7 @@ sc_screen_join(struct sc_screen *screen) {
 
 void
 sc_screen_destroy(struct sc_screen *screen) {
+    finish_rotation(screen);
 #ifndef NDEBUG
     assert(!screen->open);
 #endif
@@ -905,14 +962,15 @@ sc_screen_destroy(struct sc_screen *screen) {
     }
 }
 
-static void
-resize_for_content(struct sc_screen *screen, struct sc_size old_content_size,
+static struct sc_size
+window_size_for_content(struct sc_screen *screen, struct sc_size old_content_size,
                    struct sc_size new_content_size) {
     assert(screen->video);
 
     struct sc_size target_size = new_content_size;
     if (!screen->flex_display) {
-        struct sc_size window_size = sc_sdl_get_window_size(screen->window);
+        struct sc_size window_size = screen->rotation.active
+            ? screen->rotation.to_window : sc_sdl_get_window_size(screen->window);
         // Scale proportionally
         target_size.width = (uint32_t) window_size.width * target_size.width
                           / old_content_size.width;
@@ -920,6 +978,14 @@ resize_for_content(struct sc_screen *screen, struct sc_size old_content_size,
                            / old_content_size.height;
     }
     target_size = get_optimal_size(target_size, new_content_size, true);
+    return target_size;
+}
+
+static void
+resize_for_content(struct sc_screen *screen, struct sc_size old_content_size,
+                   struct sc_size new_content_size) {
+    finish_rotation(screen);
+    struct sc_size target_size = window_size_for_content(screen, old_content_size, new_content_size);
     assert(is_windowed(screen));
     set_aspect_ratio(screen, new_content_size);
     sc_sdl_set_window_size(screen->window, target_size);
@@ -960,6 +1026,16 @@ apply_pending_resize(struct sc_screen *screen) {
     }
 }
 
+static void
+center_window(struct sc_screen *screen, SDL_FPoint center) {
+    struct sc_size size = sc_sdl_get_window_size(screen->window);
+    struct sc_point position = {lround(center.x - size.width / 2.f),
+                               lround(center.y - size.height / 2.f)};
+    struct sc_point current = sc_sdl_get_window_position(screen->window);
+    if (position.x != current.x || position.y != current.y)
+        sc_sdl_set_window_position(screen->window, position);
+}
+
 void
 sc_screen_set_orientation(struct sc_screen *screen,
                           enum sc_orientation orientation) {
@@ -969,6 +1045,7 @@ sc_screen_set_orientation(struct sc_screen *screen,
         return;
     }
 
+    finish_rotation(screen);
     struct sc_size new_content_size =
         get_oriented_size(screen->frame_size, orientation);
 
@@ -978,6 +1055,107 @@ sc_screen_set_orientation(struct sc_screen *screen,
     LOGI("Display orientation set to %s", sc_orientation_get_name(orientation));
 
     sc_screen_render(screen, true);
+}
+
+static void
+finish_rotation(struct sc_screen *screen) {
+    if (!screen->rotation.active) return;
+    screen->rotation.active = false;
+    // The drawing canvas never changes size during the animation. Tighten its
+    // invisible bounds once the rigid phone surface reaches its final angle.
+    if (is_windowed(screen)) {
+        set_aspect_ratio(screen, screen->content_size);
+        sc_sdl_set_window_size(screen->window, screen->rotation.to_window);
+        center_window(screen, screen->rotation.center);
+    }
+    SDL_SetBooleanProperty(SDL_GetWindowProperties(screen->window), SC_ROTATION_PRESENTATION_PROP, false);
+    rotation_presentation(screen, NULL);
+}
+
+void
+sc_screen_tick(struct sc_screen *screen) {
+    if (screen->rotation.active && SDL_GetTicks() >= screen->rotation.next_tick)
+        sc_screen_render(screen, false);
+}
+
+void
+sc_screen_set_frame_size(struct sc_screen *screen, struct sc_size new_frame_size,
+                         bool can_resize) {
+    struct sc_size old_frame_size = screen->frame_size;
+    struct sc_size new_content_size = get_oriented_size(new_frame_size, screen->orientation);
+    bool was_rotating = screen->rotation.active;
+    struct sc_size window_size = sc_sdl_get_window_size(screen->window);
+    struct sc_point position = sc_sdl_get_window_position(screen->window);
+    SDL_FPoint center = was_rotating ? screen->rotation.center
+        : (SDL_FPoint){position.x + window_size.width/2.f, position.y + window_size.height/2.f};
+    bool orientation_changed = sc_rotation_is_orientation_change(old_frame_size.width,
+        old_frame_size.height, new_frame_size.width, new_frame_size.height);
+    bool animate = orientation_changed && can_resize && screen->window_shown
+        && !screen->camera && !screen->is_icon_active && !screen->disconnected
+        && !screen->flex_display && screen->render_fit == SC_RENDER_FIT_LETTERBOX;
+#ifdef __APPLE__
+    bool (*reduce_motion)(void) = dlsym(RTLD_DEFAULT, "DroidMirrorReduceMotion");
+    if (reduce_motion && reduce_motion()) animate = false;
+#endif
+    if (animate) {
+        // New frames already contain Android's new layout. Start them turned
+        // into the old orientation, then unwind to their normal presentation.
+        double base = 90 * sc_orientation_get_rotation(screen->orientation);
+        // Android's landscape layout is already upright in the new frames.
+        // Unwind clockwise source coordinates counterclockwise when entering
+        // landscape, and reverse that turn when returning to portrait.
+        double offset = old_frame_size.width < old_frame_size.height ? 90 : -90;
+        if (sc_orientation_is_mirror(screen->orientation)) offset = -offset;
+        screen->rotation.from = (was_rotating ? screen->rotation.angle : base) + offset;
+        screen->rotation.to = base;
+        screen->rotation.angle = screen->rotation.from;
+        screen->rotation.center = center;
+        screen->rotation.start = SDL_GetTicks();
+        screen->rotation.next_tick = screen->rotation.start;
+        const SDL_DisplayMode *mode = SDL_GetCurrentDisplayMode(SDL_GetDisplayForWindow(screen->window));
+        screen->rotation.frame_interval = sc_rotation_frame_interval(mode ? mode->refresh_rate : 0);
+        struct sc_size endpoint = was_rotating ? screen->rotation.to_window : window_size;
+        struct sc_size swapped_window = {endpoint.height, endpoint.width};
+        screen->rotation.to_window = is_windowed(screen)
+            ? get_optimal_size(swapped_window, new_content_size, true) : window_size;
+        screen->rotation.surface = (SDL_FPoint){screen->rotation.to_window.width,
+                                                screen->rotation.to_window.height};
+        if (sc_orientation_is_swap(screen->orientation)) {
+            float w = screen->rotation.surface.x;
+            screen->rotation.surface.x = screen->rotation.surface.y;
+            screen->rotation.surface.y = w;
+        }
+        screen->rotation.active = true;
+        SDL_SetBooleanProperty(SDL_GetWindowProperties(screen->window), SC_ROTATION_PRESENTATION_PROP, true);
+        if (is_windowed(screen)) {
+            // Reserve room for every angle once, rather than tweening width and
+            // height or scaling the phone to fit its bounding box each frame.
+            uint16_t diagonal = (uint16_t) ceil(hypot(screen->rotation.surface.x, screen->rotation.surface.y));
+            struct sc_size canvas = {diagonal, diagonal};
+            set_aspect_ratio(screen, canvas); // always finite (AppKit Auto Layout)
+            sc_sdl_set_window_size(screen->window, canvas);
+            center_window(screen, center);
+        } else {
+            double diagonal = hypot(screen->rotation.surface.x, screen->rotation.surface.y);
+            double scale = fmin(window_size.width, window_size.height) / diagonal;
+            screen->rotation.surface.x *= scale;
+            screen->rotation.surface.y *= scale;
+        }
+        set_content_size(screen, new_content_size, !is_windowed(screen));
+    } else if (was_rotating && !orientation_changed && can_resize
+            && sc_rotation_same_aspect(old_frame_size.width, old_frame_size.height,
+                                       new_frame_size.width, new_frame_size.height)) {
+        // Transport quality changes keep the same visible geometry and motion.
+        screen->content_size = new_content_size;
+    } else {
+        finish_rotation(screen);
+        set_content_size(screen, new_content_size, can_resize);
+        if (was_rotating) set_aspect_ratio(screen, new_content_size);
+        if (orientation_changed && can_resize && is_windowed(screen)) center_window(screen, center);
+    }
+    screen->frame_size = new_frame_size;
+    if (screen->flex_display) sc_screen_track_resize(screen, new_content_size);
+    sc_screen_update_content_rect(screen);
 }
 
 #ifdef __APPLE__
@@ -1039,19 +1217,7 @@ sc_screen_apply_frame(struct sc_screen *screen, bool can_resize) {
     }
 
     if (frame_size_changed) {
-
-        // frame dimension changed
-        screen->frame_size = new_frame_size;
-
-        struct sc_size new_content_size =
-            get_oriented_size(new_frame_size, screen->orientation);
-
-        if (screen->flex_display) {
-            sc_screen_track_resize(screen, new_content_size);
-        }
-
-        set_content_size(screen, new_content_size, can_resize);
-        sc_screen_update_content_rect(screen);
+        sc_screen_set_frame_size(screen, new_frame_size, can_resize);
     }
 
     bool ok = sc_texture_update(&screen->tex, frame);
@@ -1066,13 +1232,19 @@ sc_screen_apply_frame(struct sc_screen *screen, bool can_resize) {
         if (visible) { visible(); screen->reported_visible = true; }
     }
     Uint64 now = SDL_GetTicks();
-    if (!screen->camera && now >= screen->secure_check_at) {
+    if (!screen->camera && screen->controller && now >= screen->secure_check_at) {
         screen->secure_check_at = now + 200;
         bool black = sc_screen_is_secure_black_frame(frame);
         if (black != screen->secure_black_frame) {
             screen->secure_black_frame = black;
-            void (*set_secure)(int) = (void (*)(int)) dlsym(RTLD_DEFAULT, "DroidMirrorSetSecureScreen");
-            if (set_secure) set_secure(black);
+            sc_receiver_set_secure_candidate(black); // Clear immediately and invalidate in-flight replies.
+            screen->secure_request_pending = true;
+        }
+        if (screen->secure_request_pending) {
+            struct sc_control_msg request = {.type = SC_CONTROL_MSG_TYPE_SECURE_WINDOW_CANDIDATE};
+            request.secure_window_candidate.black = black;
+            request.secure_window_candidate.generation = sc_receiver_secure_candidate_generation();
+            screen->secure_request_pending = !sc_controller_push_msg(screen->controller, &request);
         }
     }
 #endif
@@ -1142,6 +1314,7 @@ sc_screen_set_paused(struct sc_screen *screen, bool paused) {
 
 void
 sc_screen_toggle_fullscreen(struct sc_screen *screen) {
+    finish_rotation(screen);
     assert(screen->video);
 
     bool req_fullscreen =
@@ -1320,6 +1493,9 @@ sc_screen_handle_event(struct sc_screen *screen, const SDL_Event *event) {
         case SC_EVENT_DEVICE_DISCONNECTED:
             assert(!screen->disconnected);
             screen->disconnected = true;
+            finish_rotation(screen);
+            if (screen->video && screen->window_shown)
+                set_aspect_ratio(screen, screen->content_size);
             if (!screen->window_shown) {
                 // No window open
                 return;
@@ -1408,6 +1584,16 @@ sc_screen_convert_window_to_frame_coords(struct sc_screen *screen,
     assert(screen->video);
 
     enum sc_orientation orientation = screen->orientation;
+    if (screen->rotation.active && screen->rotation.rect.w > 0 && screen->rotation.rect.h > 0) {
+        SDL_FRect rect = screen->rotation.rect;
+        SDL_FPoint point = sc_rotation_point((SDL_FPoint){x, y},
+            (SDL_FPoint){rect.x + rect.w/2, rect.y + rect.h/2}, -screen->rotation.angle);
+        struct sc_point result = {
+            (point.x - rect.x) * screen->frame_size.width / rect.w,
+            (point.y - rect.y) * screen->frame_size.height / rect.h};
+        if (sc_orientation_is_mirror(orientation)) result.x = screen->frame_size.width - result.x;
+        return result;
+    }
 
     int32_t w = screen->content_size.width;
     int32_t h = screen->content_size.height;

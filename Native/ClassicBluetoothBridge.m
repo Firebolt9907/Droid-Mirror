@@ -2,6 +2,7 @@
 #import <IOBluetooth/IOBluetooth.h>
 #import <arpa/inet.h>
 #import <fcntl.h>
+#import <netinet/tcp.h>
 #import <sys/socket.h>
 #import <unistd.h>
 #import <errno.h>
@@ -9,6 +10,7 @@
 #import <string.h>
 #import "ClassicBluetoothWire.h"
 #import "VideoPathLatency.h"
+#import "WirelessAudioPlayback.h"
 #import "PhoneAppearance.h"
 #import "BleInputTransport.h"
 #import "BleInputCrypto.h"
@@ -57,12 +59,30 @@ static NSData *DMUpgradeProof(NSData *key, const char *direction, const uint8_t 
 }
 
 @interface DMClassicBridge : NSObject <IOBluetoothL2CAPChannelDelegate, DMBleInputDelegate, NSStreamDelegate> {
-    DMClassicWire _wire, _returnWire, _wifiWire;
+    DMClassicWire _wire, _returnWire, _wifiWire, _audioWire;
     DMLatencySamples _bluetoothLatency, _candidateLatency;
 }
+@property(nonatomic, strong) DMWirelessAudioPlayback *audioPlayback;
+@property(nonatomic) uint8_t audioState;
+@property(nonatomic) int audioSocket;
+@property(nonatomic) BOOL audioDedicated;
+@property(nonatomic) NSUInteger audioGeneration;
+@property(nonatomic) uint16_t peerAudioPort;
+@property(nonatomic) uint16_t audioForwardPort;
+@property(nonatomic, strong) NSMutableDictionary<NSNumber *,NSNumber *> *audioForwards;
+@property(nonatomic) BOOL audioRequested;
+@property(nonatomic) BOOL audioStopPending;
+@property(nonatomic) NSTimeInterval audioStopSince;
+@property(nonatomic) BOOL audioLocalFailure;
+@property(nonatomic) NSTimeInterval audioRequestedAt;
+@property(nonatomic) NSTimeInterval audioLastPacket;
+@property(nonatomic) NSTimeInterval audioPublishedAt;
+@property(nonatomic, strong) id audioActionObserver;
+@property(nonatomic) NSUInteger audioBufferMs;
 @property(nonatomic) NSTimeInterval latencyBadSince;
 @property(nonatomic) NSTimeInterval latencyRetryAfter;
 @property(nonatomic) BOOL wifiIsPeer;
+@property(nonatomic) BOOL wifiInitial;
 @property(nonatomic) int wifiSocket;
 @property(nonatomic) BOOL probingWiFi;
 @property(nonatomic) void *peerLibrary;
@@ -122,6 +142,11 @@ static NSData *DMUpgradeProof(NSData *key, const char *direction, const uint8_t 
 @property(nonatomic) BOOL failing;
 @property(nonatomic) uint8_t eventMask;
 @property(nonatomic, copy) NSString *connectionStage;
+- (BOOL)receiveAudio:(uint8_t)type bytes:(const uint8_t *)bytes length:(size_t)length;
+- (void)publishAudioState;
+- (void)stopAudio;
+- (void)startAudio;
+- (void)pollAudio;
 - (void)recordLatency:(uint64_t)timestamp wireless:(BOOL)wireless;
 - (void)startBleWhenAndroidReady;
 - (void)shutdownForTermination;
@@ -141,6 +166,9 @@ static bool DMVideo(void *context, const uint8_t *bytes, size_t length) {
 }
 static bool DMAppearance(void *context, const uint8_t *bytes, size_t length) {
     return [(__bridge DMClassicBridge *)context receiveAppearance:bytes length:length];
+}
+static bool DMAudio(void *context, uint8_t type, const uint8_t *bytes, size_t length) {
+    return [(__bridge DMClassicBridge *)context receiveAudio:type bytes:bytes length:length];
 }
 static bool DMReject(void *context, const uint8_t *bytes, size_t length) { return false; }
 static bool DMControl(void *context, const uint8_t *bytes, size_t length) {
@@ -186,6 +214,8 @@ static void DMWirelessLatency(void *context, uint64_t timestamp) {
         }
         uint16_t port=0;
         _peerHandle=start(_pairingKey.bytes,&port); _peerPort=port;
+        uint16_t (*audioPort)(void *)=(void *)dlsym(_peerLibrary,"dm_peer_audio_port");
+        _peerAudioPort=audioPort ? audioPort(_peerHandle) : 0;
         if (!_peerHandle || !_peerPort) { printf("EVENT LAN_UNAVAILABLE\n"); fflush(stdout); return; }
         for (NSData *record in _peerAddresses) {
             const uint8_t *bytes=record.bytes;
@@ -199,7 +229,7 @@ static void DMWirelessLatency(void *context, uint64_t timestamp) {
 }
 - (void)stopPeer {
     if (_peerHandle && _peerStop) _peerStop(_peerHandle);
-    _peerHandle=NULL; _peerPort=0;
+    _peerHandle=NULL; _peerPort=0; _peerAudioPort=0;
     // Rust threads are stopped before the dylib may be unloaded at process exit.
 }
 - (void)probeWiFi:(uint16_t)port {
@@ -213,7 +243,7 @@ static void DMWirelessLatency(void *context, uint64_t timestamp) {
     NSData *profile=_wirelessProfile;
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY,0), ^{
         int fd=socket(AF_INET,SOCK_STREAM,0);
-        BOOL valid=NO; uint64_t cutoff=0; NSData *nonce=nil;
+        BOOL valid=NO; BOOL initial=NO; uint64_t cutoff=0; NSData *nonce=nil;
         if (fd >= 0) {
             // Direct discovery and video warm-up run off the main run loop;
             // Classic video and BLE acknowledgements continue throughout.
@@ -224,7 +254,7 @@ static void DMWirelessLatency(void *context, uint64_t timestamp) {
             struct sockaddr_in address={0}; address.sin_family=AF_INET;
             address.sin_addr.s_addr=htonl(INADDR_LOOPBACK); address.sin_port=htons(port);
             uint8_t hello[40], response[48];
-            if (!connect(fd,(struct sockaddr *)&address,sizeof(address)) && DMReadExact(fd,hello,sizeof(hello)) && !memcmp(hello,"DMWIFI05",8)) {
+            if (!connect(fd,(struct sockaddr *)&address,sizeof(address)) && DMReadExact(fd,hello,sizeof(hello)) && (!memcmp(hello,"DMWIFI05",8) || !memcmp(hello,"DMWIFI06",8))) {
                 nonce=[NSData dataWithBytes:hello+8 length:32];
                 NSData *proof=DMUpgradeProof(key,"client",hello+8,profile.bytes,profile.length);
                 NSMutableData *request=[profile mutableCopy]; [request appendData:proof];
@@ -247,6 +277,9 @@ static void DMWirelessLatency(void *context, uint64_t timestamp) {
                         uint32_t encodedLength;
                         if (!DMReadExact(fd,&encodedLength,4)) break;
                         int32_t length=(int32_t)ntohl(encodedLength);
+                        if (length == -3 && !memcmp(hello,"DMWIFI06",8)) {
+                            initial=YES; warmed=YES; break;
+                        }
                         if (length == -2) {
                             uint64_t timestamp;
                             if (!DMReadExact(fd,&timestamp,8)) break;
@@ -284,11 +317,11 @@ static void DMWirelessLatency(void *context, uint64_t timestamp) {
                 }
                 if (warmed && DMReadExact(fd,response,sizeof(response))) {
                     NSMutableData *authenticated=[profile mutableCopy]; [authenticated appendBytes:response length:8];
-                    NSData *expected=DMUpgradeProof(key,"server",hello+8,authenticated.bytes,authenticated.length);
+                    NSData *expected=DMUpgradeProof(key,initial ? "initial server" : "server",hello+8,authenticated.bytes,authenticated.length);
                     uint8_t difference=0;
                     for (size_t i=0;i<32;++i) difference |= ((const uint8_t *)expected.bytes)[i]^response[8+i];
                     memcpy(&cutoff,response,8); cutoff=CFSwapInt64BigToHost(cutoff);
-                    valid=difference==0 && !memcmp(response+40,"DMBT0006",8);
+                    valid=difference==0 && (!initial || cutoff==0) && !memcmp(response+40,"DMBT0006",8);
                 }
             }
         }
@@ -307,20 +340,32 @@ static void DMWirelessLatency(void *context, uint64_t timestamp) {
             fcntl(fd,F_SETFL,O_NONBLOCK);
             fprintf(stderr,"Video handoff authenticated over %s\n",port == self.peerPort ? "direct IP (LAN/VPN)" : "wireless ADB");
             self.wifiIsPeer=isPeer;
+            self.wifiInitial=initial;
+            self.audioForwardPort=[self.audioForwards[@(port)] unsignedShortValue];
             self.wifiNonce=nonce;
             self.wifiSocket=fd; self.wifiCutoff=cutoff; self.wifiLastData=NSDate.timeIntervalSinceReferenceDate;
             self.wifiPendingSince=NSDate.timeIntervalSinceReferenceDate;
-            dm_classic_wire_init_video_only(&self->_wifiWire);
-            self->_wifiWire.latency=DMWirelessLatency;
-            // The worker consumed the complete authenticated header and magic
-            // before committing, so a truncated probe cannot replace Bluetooth.
-            const uint8_t magic[]="DMBT0006";
-            if (!dm_classic_wire_feed_ble(&self->_wifiWire,magic,8,DMVideo,DMEvent,NULL,NULL,(__bridge void *)self))
-                [self fail:@"Invalid wireless video header"];
+            [self prepareWirelessVideo];
+            [self startBleWhenAndroidReady];
         });
     });
 }
+- (void)prepareWirelessVideo {
+    dm_classic_wire_init_video_only(&_wifiWire);
+    _wifiWire.latency=DMWirelessLatency;
+    // Initial LAN/ADB selection can precede the phone appearance record.
+    // Handle the same metadata as Classic without sending it to scrcpy.
+    _wifiWire.appearance=DMAppearance;
+    _wifiWire.audio=DMAudio;
+    // The worker consumed the complete authenticated header and magic before
+    // committing, so a truncated probe cannot replace Bluetooth.
+    const uint8_t magic[]="DMBT0006";
+    if (!dm_classic_wire_feed_ble(&_wifiWire,magic,8,DMVideo,DMEvent,NULL,NULL,(__bridge void *)self))
+        [self fail:@"Invalid wireless video header"];
+}
 - (void)fallbackToBluetooth {
+    _wifiActive=NO;
+    [self stopAudio]; _audioState=0; [self publishAudioState];
     if (_wifiSocket>=0) close(_wifiSocket);
     _wifiSocket=-1; _wifiActive=NO; _wifiRecovering=YES;
     _wifiRecoveryRequested=NSDate.timeIntervalSinceReferenceDate;
@@ -331,6 +376,21 @@ static void DMWirelessLatency(void *context, uint64_t timestamp) {
     fprintf(stderr,"Peer video dropped; requested Bluetooth video over BLE\n");
 }
 - (void)pollWiFi {
+    [self pollAudio];
+    if (_audioStopPending && _wifiActive && _wifiSocket >= 0) {
+        if (NSDate.timeIntervalSinceReferenceDate-_audioStopSince > 1) { [self fallbackToBluetooth]; return; }
+        uint8_t stop=3;
+        ssize_t sent=send(_wifiSocket,&stop,1,0);
+        if (sent==1) _audioStopPending=NO;
+        else if (sent<0 && errno!=EAGAIN && errno!=EWOULDBLOCK && errno!=EINTR) {
+            [self fallbackToBluetooth]; return;
+        }
+    }
+    BOOL audioStalled=_audioPlayback && NSDate.timeIntervalSinceReferenceDate-_audioLastPacket > 2;
+    if (_audioRequested && (audioStalled || (!_audioPlayback && NSDate.timeIntervalSinceReferenceDate-_audioRequestedAt > 5))) {
+        [self stopAudio]; _audioLocalFailure=YES; [self publishAudioState];
+    }
+    if (NSDate.timeIntervalSinceReferenceDate-_audioPublishedAt > 0.5) [self publishAudioState];
     uint8_t command[256];
     ssize_t n=read(STDIN_FILENO,command,sizeof(command));
     if (n > 0) {
@@ -348,6 +408,13 @@ static void DMWirelessLatency(void *context, uint64_t timestamp) {
                 if (port > 0 && port <= UINT16_MAX) [self probeWiFi:(uint16_t)port];
             }
             if ([line isEqualToString:@"UPGRADE_PEER"]) [self probePeer];
+            if ([line hasPrefix:@"AUDIO_FORWARD "]) {
+                NSArray *fields=[line componentsSeparatedByString:@" "];
+                if (fields.count==3) {
+                    NSInteger video=[fields[1] integerValue], audio=[fields[2] integerValue];
+                    if (video>0 && video<=65535 && audio>0 && audio<=65535) self.audioForwards[@(video)]=@(audio);
+                }
+            }
 
         }
     }
@@ -366,7 +433,7 @@ static void DMWirelessLatency(void *context, uint64_t timestamp) {
         _latencyRetryAfter=NSProcessInfo.processInfo.systemUptime+60;
         [self fallbackToBluetooth]; return;
     }
-    if (NSDate.timeIntervalSinceReferenceDate-_wifiLastData > 4) {
+    if (NSDate.timeIntervalSinceReferenceDate-_wifiLastData > (_announcedReady ? 4 : 15)) {
         fprintf(stderr,"Peer video stalled: queued=%lu received=%llu\n",(unsigned long)_pending.length,(unsigned long long)_videoReceived);
         [self fallbackToBluetooth]; return;
     }
@@ -375,12 +442,14 @@ static void DMWirelessLatency(void *context, uint64_t timestamp) {
             if (NSDate.timeIntervalSinceReferenceDate-_wifiPendingSince > 3) [self fallbackToBluetooth];
             return;
         }
-        if (!dm_classic_wire_complete(&_wire)) [self fail:@"Wi-Fi handoff split a Bluetooth record"];
+        if (!_wifiInitial && !dm_classic_wire_complete(&_wire)) [self fail:@"Wi-Fi handoff split a Bluetooth record"];
         const uint8_t ready=1;
         ssize_t sent=send(_wifiSocket,&ready,1,0);
         if (sent < 0 && (errno==EAGAIN || errno==EWOULDBLOCK || errno==EINTR)) return;
         if (sent != 1) { [self fallbackToBluetooth]; return; }
         _wifiActive=YES;
+        const uint8_t audioExtension=4;
+        if (send(_wifiSocket,&audioExtension,1,0) != 1) { [self fallbackToBluetooth]; return; }
         printf("EVENT WIFI_ACTIVE\n"); fflush(stdout);
     }
     // Drain enough per tick for the Wi-Fi bitrate, while bounding queued video
@@ -413,6 +482,7 @@ static void DMWirelessLatency(void *context, uint64_t timestamp) {
 - (void)shutdownForTermination {
     if (_failing) return;
     _failing=YES;
+    [self stopAudio]; _audioState=0; [self publishAudioState];
     fprintf(stderr,"Closing Bluetooth session before helper termination\n");
     [self stopPeer];
     [self closeClassicStreams];
@@ -426,6 +496,7 @@ static void DMWirelessLatency(void *context, uint64_t timestamp) {
 - (void)fail:(NSString *)reason {
     if (_failing) return;
     _failing = YES;
+    [self stopAudio]; _audioState=0; [self publishAudioState];
     fprintf(stderr, "%s\n", reason.UTF8String);
     if (_wifiSocket >= 0) close(_wifiSocket);
     if (_client >= 0) close(_client);
@@ -508,7 +579,7 @@ static void DMWirelessLatency(void *context, uint64_t timestamp) {
     return dm_classic_wire_feed_ble(&_returnWire,bytes.bytes,bytes.length,DMReject,DMEvent,DMControl,DMPeerAddress,(__bridge void *)self);
 }
 - (void)announceReady {
-    if (_announcedReady || !_l2capReady || !_ble.ready) return;
+    if (_announcedReady || (!_l2capReady && !_wifiInitial) || !_ble.ready) return;
     _announcedReady=YES;
     printf("READY %u %u\n",_videoPort,_controlPort); fflush(stdout);
     fprintf(stderr,"BLE side channel authenticated; Classic L2CAP carries video only (phone to Mac)\n");
@@ -521,7 +592,7 @@ static void DMWirelessLatency(void *context, uint64_t timestamp) {
 - (void)acknowledgeVideoAtTime:(NSTimeInterval)now {
     BOOL movingVideo = _videoReceived != _lastVideoAcknowledged;
     NSTimeInterval interval = movingVideo ? 0.04 : 0.25;
-    if (!_l2capReady || !_ble.ready || now - _lastHeartbeatSent < interval) return;
+    if ((!_l2capReady && !_wifiInitial) || !_ble.ready || now - _lastHeartbeatSent < interval) return;
     if (![_ble acknowledgeVideo:_videoReceived]) { [self fail:@"BLE video acknowledgement failed"]; return; }
     _lastVideoAcknowledged = _videoReceived;
     _lastHeartbeatSent = now;
@@ -552,6 +623,123 @@ static void DMWirelessLatency(void *context, uint64_t timestamp) {
     }
     [self acknowledgeVideoAtTime:NSDate.timeIntervalSinceReferenceDate];
     [self flushControl];
+}
+- (void)publishAudioState {
+    _audioPublishedAt=NSDate.timeIntervalSinceReferenceDate;
+    BOOL available=(_audioState & 1) && _wifiActive && !_failing;
+    [NSDistributedNotificationCenter.defaultCenter postNotificationName:@"app.droidmirror.audioState"
+        object:[NSString stringWithFormat:@"%d",getppid()]
+        userInfo:@{@"helper":@(getpid()), @"available":@(available), @"requested":@(_audioRequested),
+                   @"playing":@(_audioPlayback != nil), @"failed":@(_audioLocalFailure || (_audioState & 4))}
+        deliverImmediately:YES];
+}
+- (void)startAudio {
+    // Wireless ADB multiplexes its forwards over the same phone connection.
+    // Prefer paired QUIC audio even when video won the ADB upgrade race.
+    uint16_t peerPort=_peerAudioPort, adbPort=_wifiIsPeer ? 0 : _audioForwardPort;
+    if (!peerPort && !adbPort) { _audioLocalFailure=YES; [self publishAudioState]; return; }
+    _audioRequested=YES; _audioDedicated=YES; _audioLocalFailure=NO;
+    _audioRequestedAt=NSDate.timeIntervalSinceReferenceDate;
+    NSUInteger generation=++_audioGeneration;
+    NSData *key=_pairingKey;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED,0), ^{
+        int fd=-1;
+        BOOL authenticated=NO, usedPeer=NO;
+        uint16_t ports[2]={peerPort,adbPort};
+        for (unsigned attempt=0;attempt<2 && !authenticated;attempt++) {
+            uint16_t port=ports[attempt];
+            if (!port) continue;
+            __block BOOL current=NO;
+            dispatch_sync(dispatch_get_main_queue(), ^{ current=self.audioRequested && self.audioGeneration==generation && self.wifiActive && !self.failing; });
+            if (!current) break;
+            fd=socket(AF_INET,SOCK_STREAM,0);
+            if (fd<0) continue;
+            struct timeval timeout={2,0};
+            setsockopt(fd,SOL_SOCKET,SO_RCVTIMEO,&timeout,sizeof(timeout));
+            setsockopt(fd,SOL_SOCKET,SO_SNDTIMEO,&timeout,sizeof(timeout));
+            int one=1; setsockopt(fd,IPPROTO_TCP,TCP_NODELAY,&one,sizeof(one));
+            setsockopt(fd,SOL_SOCKET,SO_NOSIGPIPE,&one,sizeof(one));
+            struct sockaddr_in address={0}; address.sin_family=AF_INET; address.sin_len=sizeof(address);
+            address.sin_addr.s_addr=htonl(INADDR_LOOPBACK); address.sin_port=htons(port);
+            uint8_t hello[40], response[32];
+            if (!connect(fd,(struct sockaddr *)&address,sizeof(address)) && DMReadExact(fd,hello,sizeof(hello)) && !memcmp(hello,"DMAUDIO1",8)) {
+                NSData *proof=DMUpgradeProof(key,"audio client",hello+8,NULL,0);
+                NSData *server=DMUpgradeProof(key,"audio server",hello+8,NULL,0);
+                if (send(fd,proof.bytes,proof.length,0)==proof.length && DMReadExact(fd,response,32) && !memcmp(response,server.bytes,32)) {
+                    __block BOOL current=NO;
+                    dispatch_sync(dispatch_get_main_queue(), ^{ current=self.audioRequested && self.audioGeneration==generation && self.wifiActive && !self.failing; });
+                    const uint8_t ready=1;
+                    authenticated=current && send(fd,&ready,1,0)==1;
+                }
+            }
+            if (authenticated) usedPeer=(attempt==0);
+            else { shutdown(fd,SHUT_RDWR); close(fd); fd=-1; }
+        }
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (!authenticated || self.audioGeneration!=generation || !self.audioRequested || !self.wifiActive || self.failing) {
+                if (fd>=0) { shutdown(fd,SHUT_RDWR); close(fd); }
+                if (self.audioGeneration==generation && self.audioRequested) {
+                    [self stopAudio]; self.audioLocalFailure=YES; [self publishAudioState];
+                }
+                return;
+            }
+            fcntl(fd,F_SETFL,O_NONBLOCK); self.audioSocket=fd;
+            dm_classic_wire_init_video_only(&self->_audioWire); self->_audioWire.audio=DMAudio;
+            fprintf(stderr,"Independent audio lane authenticated (%s)\n",usedPeer ? "paired QUIC" : "wireless ADB");
+        });
+    });
+}
+- (void)pollAudio {
+    if (!_audioDedicated || _audioSocket<0 || !_audioRequested) return;
+    for (size_t total=0;total<128*1024;) {
+        uint8_t buffer[8192]; ssize_t count=recv(_audioSocket,buffer,sizeof(buffer),0);
+        if (count<0 && (errno==EAGAIN || errno==EWOULDBLOCK || errno==EINTR)) return;
+        if (count<=0 || !dm_classic_wire_feed(&_audioWire,buffer,(size_t)count,DMReject,DMEvent,(__bridge void *)self)) {
+            [self stopAudio]; _audioLocalFailure=YES; [self publishAudioState]; return;
+        }
+        total+=(size_t)count;
+    }
+}
+- (void)stopAudio {
+    ++_audioGeneration;
+    if (_audioDedicated && _audioSocket>=0) {
+        shutdown(_audioSocket,SHUT_RDWR); close(_audioSocket); _audioSocket=-1;
+    }
+    if (_audioRequested && !_audioDedicated && _wifiActive && _wifiSocket >= 0) {
+        uint8_t command=3; _audioStopPending=send(_wifiSocket,&command,1,0)!=1;
+        _audioStopSince=NSDate.timeIntervalSinceReferenceDate;
+    }
+    if (!_wifiActive) _audioStopPending=NO;
+    _audioDedicated=NO; _audioRequested=NO;
+    [_audioPlayback stop]; _audioPlayback=nil;
+}
+- (BOOL)receiveAudio:(uint8_t)type bytes:(const uint8_t *)bytes length:(size_t)length {
+    if (type == 6) {
+        if (length != 1 || bytes[0] > 7) return NO;
+        _audioState=bytes[0];
+        // A Retry may cross the previous failure status already in flight.
+        BOOL newFailure=(_audioState & 4) && (_audioPlayback ||
+            NSDate.timeIntervalSinceReferenceDate-_audioRequestedAt > 1);
+        if (!(_audioState & 1) || newFailure) [self stopAudio];
+        [self publishAudioState]; return YES;
+    }
+    if (!_audioRequested) return YES; // Drain ordered packets already in flight after Stop.
+    _audioLastPacket=NSDate.timeIntervalSinceReferenceDate;
+    @try {
+        if (!_audioPlayback) {
+            _audioPlayback=[[DMWirelessAudioPlayback alloc] initWithBufferMs:_audioBufferMs];
+            if (!_audioPlayback) {
+                [self stopAudio]; _audioLocalFailure=YES; [self publishAudioState]; return YES;
+            }
+        }
+        if (![_audioPlayback appendPacket:bytes length:length]) {
+            [self stopAudio]; _audioLocalFailure=YES; [self publishAudioState];
+        }
+    } @catch (NSException *error) {
+        fprintf(stderr,"Audio output failed: %s\n",error.reason.UTF8String);
+        [self stopAudio]; _audioLocalFailure=YES; [self publishAudioState];
+    }
+    return YES;
 }
 - (BOOL)receiveVideo:(const uint8_t *)data length:(size_t)length {
     if (length > DMQueueLimit - _pending.length) return NO;
@@ -621,9 +809,10 @@ static void DMWirelessLatency(void *context, uint64_t timestamp) {
 }
 - (void)startBleWhenAndroidReady {
     // macOS can report a local channel open before Android accepts it. The
-    // validated wire header is the first actual evidence of an Android session.
-    if (_failing || _benchmark || !_l2capReady || !_wire.decided || _ble) return;
-    fprintf(stderr,"Android accepted Classic session; starting BLE discovery\n");
+    // validated Classic header or authenticated initial LAN handoff is evidence
+    // that Android has created its per-session BLE service.
+    if (_failing || _benchmark || (!(_l2capReady && _wire.decided) && !_wifiInitial) || _ble) return;
+    fprintf(stderr,"Android accepted mirror session; starting BLE discovery\n");
     _ble=[[DMBleInputTransport alloc] initWithPairingKey:_pairingKey]; _ble.delegate=self;
     _connectionStage=@"authenticating the paired BLE side channel";
     _lastData=NSDate.timeIntervalSinceReferenceDate;
@@ -634,7 +823,8 @@ static void DMWirelessLatency(void *context, uint64_t timestamp) {
     _terminationSource=dispatch_source_create(DISPATCH_SOURCE_TYPE_SIGNAL,SIGTERM,0,dispatch_get_main_queue());
     dispatch_source_set_event_handler(_terminationSource,^{ [self shutdownForTermination]; });
     dispatch_resume(_terminationSource);
-    _wifiSocket=-1; _commands=[NSMutableData data];
+    _wifiSocket=-1; _audioSocket=-1; _commands=[NSMutableData data];
+    _audioForwards=[NSMutableDictionary dictionary];
     NSDictionary *environment=NSProcessInfo.processInfo.environment;
     NSInteger maxSize=environment[@"DROIDMIRROR_WIFI_MAX_SIZE"] ? [environment[@"DROIDMIRROR_WIFI_MAX_SIZE"] integerValue] : 1920;
     NSInteger fps=environment[@"DROIDMIRROR_WIFI_FPS"] ? [environment[@"DROIDMIRROR_WIFI_FPS"] integerValue] : 60;
@@ -647,6 +837,18 @@ static void DMWirelessLatency(void *context, uint64_t timestamp) {
     fcntl(STDIN_FILENO,F_SETFL,O_NONBLOCK);
     _listener = -1; _client = -1; _controlListener = -1; _controlClient = -1;
     _controlPending = [NSMutableData data]; _outgoing = [NSMutableData data];
+    _audioBufferMs=MIN(200,MAX(0,[NSProcessInfo.processInfo.environment[@"DROIDMIRROR_AUDIO_BUFFER_MS"] integerValue]));
+    __weak typeof(self) weakAudioSelf=self;
+    _audioActionObserver=[NSDistributedNotificationCenter.defaultCenter addObserverForName:@"app.droidmirror.audioAction"
+        object:[NSString stringWithFormat:@"%d",getpid()] queue:NSOperationQueue.mainQueue usingBlock:^(__unused NSNotification *note) {
+            DMClassicBridge *bridge=weakAudioSelf;
+            if (!bridge || bridge.failing || !bridge.wifiActive || bridge.wifiSocket < 0) return;
+            if (bridge.audioRequested) { [bridge stopAudio]; }
+            else if ((bridge.audioState & 1) && !bridge.audioStopPending) {
+                [bridge startAudio];
+            }
+            [bridge publishAudioState];
+        }];
     _pending = [NSMutableData data];
     dm_classic_wire_init_video_only(&_wire);
     dm_classic_wire_init(&_returnWire);
@@ -714,6 +916,7 @@ static void DMWirelessLatency(void *context, uint64_t timestamp) {
                 [self fail:@"Video client closed"];
         }
     }];
+    if (!_benchmark) [self probePeer];
     _connectionStage = @"initializing the Mac Bluetooth framework";
     // New macOS IOBluetooth shims initialize their Classic manager asynchronously.
     // Opening in start(), before the run loop runs, reports powered-off API misuse.

@@ -23,6 +23,7 @@ use tokio::{
 use zeroize::Zeroize;
 
 const ALPN: &[u8] = b"droidmirror/video/1";
+const AUDIO_ALPN: &[u8] = b"droidmirror/audio/1";
 
 fn diagnostic(message: &str) {
     #[cfg(target_os = "android")]
@@ -62,13 +63,15 @@ async fn endpoint(secret: SecretKey) -> Result<Endpoint> {
         .relay_mode(RelayMode::Disabled)
         // Conservative datagrams work across Android VPN interfaces as well as
         // LAN. Do not rely on offload or path-MTU support in a tunnel driver.
-        .transport_config(QuicTransportConfig::builder()
-            .initial_mtu(1200)
-            .mtu_discovery_config(None)
-            .enable_segmentation_offload(false)
-            .build())
+        .transport_config(
+            QuicTransportConfig::builder()
+                .initial_mtu(1200)
+                .mtu_discovery_config(None)
+                .enable_segmentation_offload(false)
+                .build(),
+        )
         .secret_key(secret)
-        .alpns(vec![ALPN.to_vec()])
+        .alpns(vec![ALPN.to_vec(), AUDIO_ALPN.to_vec()])
         .bind()
         .await?;
     // A network blocking multicast leaves this path unavailable; the host tries ADB.
@@ -160,6 +163,7 @@ async fn desktop(
     peer: EndpointId,
     listener: TcpListener,
     hints: Arc<RwLock<Vec<SocketAddr>>>,
+    alpn: &'static [u8],
 ) -> Result<()> {
     listener.set_nonblocking(true)?;
     let listener = tokio::net::TcpListener::from_std(listener)?;
@@ -172,7 +176,7 @@ async fn desktop(
         for hint in hints.read().expect("address hints poisoned").iter() {
             address = address.with_ip_addr(*hint);
         }
-        match tokio::time::timeout(Duration::from_secs(5), ep.connect(address, ALPN)).await {
+        match tokio::time::timeout(Duration::from_secs(5), ep.connect(address, alpn)).await {
             Ok(Ok(conn)) => {
                 if let Some(path) = conn.paths().iter().find(|path| path.is_selected()) {
                     diagnostic(&format!(
@@ -204,43 +208,65 @@ async fn phone(ep: Endpoint, peer: EndpointId) -> Result<()> {
         android::net::SocketAddrExt,
         unix::net::{SocketAddr, UnixStream},
     };
+    let permits = Arc::new(tokio::sync::Semaphore::new(2));
     while let Some(incoming) = ep.accept().await {
         let Ok(Ok(conn)) = tokio::time::timeout(Duration::from_secs(5), incoming).await else {
             continue;
         };
         if !paired(&conn, peer) {
-            diagnostic("Rejected unpaired QUIC identity");
             continue;
         }
-        // This abstract socket is present only during an authenticated BLE capture session.
-        let address = SocketAddr::from_abstract_name(b"droidmirror_video_upgrade")?;
-        diagnostic("Paired Mac connected");
-        // Do not open the application socket until the encrypted stream and its
-        // preface are ready: opening it starts Android's two-second proof timer.
-        let streams = match prepare_stream(&conn, false).await {
-            Ok(streams) => streams,
-            Err(error) => {
-                diagnostic(&format!("Stream setup failed: {error:#}"));
-                conn.close(0u32.into(), b"stream setup failed");
-                continue;
-            }
+        let Ok(permit) = permits.clone().try_acquire_owned() else {
+            conn.close(1u32.into(), b"media connection limit");
+            continue;
         };
-        match UnixStream::connect_addr(&address) {
-            Ok(socket) => {
-                socket.set_nonblocking(true)?;
-                let socket = tokio::net::UnixStream::from_std(socket)?;
-                if let Err(error) = copy_stream(socket, streams.0, streams.1).await {
-                    diagnostic(&format!("Video tunnel failed: {error:#}"));
+        let audio = conn.alpn() == AUDIO_ALPN;
+        tokio::spawn(async move {
+            let _permit = permit;
+            let name = if audio {
+                b"droidmirror_audio_upgrade".as_slice()
+            } else {
+                b"droidmirror_video_upgrade".as_slice()
+            };
+            let address = match SocketAddr::from_abstract_name(name) {
+                Ok(a) => a,
+                Err(_) => return,
+            };
+            // The two independent QUIC connections never share application queues.
+            // Pair identity, ALPN and the application's fresh proof gate both.
+            let streams = match prepare_stream(&conn, false).await {
+                Ok(streams) => streams,
+                Err(_) => {
+                    conn.close(0u32.into(), b"stream setup failed");
+                    return;
+                }
+            };
+            let socket = tokio::time::timeout(Duration::from_secs(15), async {
+                loop {
+                    match UnixStream::connect_addr(&address) {
+                        Ok(socket) => break Ok::<_, std::io::Error>(socket),
+                        Err(_) => tokio::time::sleep(Duration::from_millis(50)).await,
+                    }
+                }
+            })
+            .await;
+            if let Ok(Ok(socket)) = socket {
+                if socket.set_nonblocking(true).is_ok() {
+                    if let Ok(socket) = tokio::net::UnixStream::from_std(socket) {
+                        if let Err(error) = copy_stream(socket, streams.0, streams.1).await {
+                            diagnostic(&format!("Media tunnel failed: {error:#}"));
+                        }
+                    }
                 }
             }
-            Err(error) => diagnostic(&format!("Local video endpoint failed: {error}")),
-        }
-        conn.close(0u32.into(), b"video disconnected");
+            conn.close(0u32.into(), b"media disconnected");
+        });
     }
     Ok(())
 }
 
 pub struct Bridge {
+    audio_port: u16,
     local: Arc<RwLock<Option<Endpoint>>>,
     remote: Arc<RwLock<Vec<SocketAddr>>>,
     stop: Option<oneshot::Sender<()>>,
@@ -272,6 +298,16 @@ fn start(mut key: [u8; 32], is_phone: bool) -> Result<(Bridge, u16)> {
         .map(|l| l.local_addr().map(|a| a.port()))
         .transpose()?
         .unwrap_or(0);
+    let audio_listener = if is_phone {
+        None
+    } else {
+        Some(TcpListener::bind(("127.0.0.1", 0))?)
+    };
+    let audio_port = audio_listener
+        .as_ref()
+        .map(|l| l.local_addr().map(|a| a.port()))
+        .transpose()?
+        .unwrap_or(0);
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
@@ -290,7 +326,14 @@ fn start(mut key: [u8; 32], is_phone: bool) -> Result<(Bridge, u16)> {
                 result = async {
                     let ep = endpoint(secret).await?;
                     *worker_local.write().expect("local endpoint poisoned") = Some(ep.clone());
-                    if let Some(listener) = listener { desktop(ep, peer, listener, worker_remote).await }
+                    if let Some(listener) = listener {
+                        let audio_listener = audio_listener.context("audio listener missing")?;
+                        tokio::try_join!(
+                            desktop(ep.clone(), peer, listener, worker_remote.clone(), ALPN),
+                            desktop(ep, peer, audio_listener, worker_remote, AUDIO_ALPN)
+                        )?;
+                        Ok(())
+                    }
                     else {
                         #[cfg(target_os = "android")]
                         { phone(ep, peer).await }
@@ -305,6 +348,7 @@ fn start(mut key: [u8; 32], is_phone: bool) -> Result<(Bridge, u16)> {
     })?;
     Ok((
         Bridge {
+            audio_port,
             local,
             remote,
             stop: Some(stop),
@@ -337,6 +381,16 @@ pub unsafe extern "C" fn dm_peer_start(key: *const u8, port: *mut u16) -> *mut B
         }
         Err(_) => std::ptr::null_mut(),
     }
+}
+
+/// Audio has its own bounded local listener and encrypted peer connection.
+/// # Safety
+/// bridge must be a live handle returned by dm_peer_start.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dm_peer_audio_port(bridge: *const Bridge) -> u16 {
+    unsafe { bridge.as_ref() }
+        .map(|b| b.audio_port)
+        .unwrap_or(0)
 }
 
 /// Accept only concrete unicast IP candidates; TLS still authenticates the paired identity.
@@ -525,6 +579,47 @@ mod tests {
         drop(bridge);
         assert!(started.elapsed() < Duration::from_secs(3));
         assert!(std::net::TcpStream::connect(("127.0.0.1", port)).is_err());
+    }
+
+    #[tokio::test]
+    async fn audio_lane_progresses_while_video_is_blocked() {
+        use tokio::io::AsyncReadExt;
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let key = [81; 32];
+            let server = Endpoint::builder(presets::Minimal)
+                .secret_key(identity(&key, b"phone"))
+                .alpns(vec![ALPN.to_vec(), AUDIO_ALPN.to_vec()])
+                .bind()
+                .await
+                .unwrap();
+            let (bridge, port) = start(key, false).unwrap();
+            bridge
+                .remote
+                .write()
+                .unwrap()
+                .extend(server.addr().ip_addrs().copied());
+            let _video = tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .unwrap();
+            let video_conn = server.accept().await.unwrap().await.unwrap();
+            assert_eq!(video_conn.alpn(), ALPN);
+            let _blocked_video = prepare_stream(&video_conn, false).await.unwrap();
+            let mut audio = tokio::net::TcpStream::connect(("127.0.0.1", bridge.audio_port))
+                .await
+                .unwrap();
+            let audio_conn = server.accept().await.unwrap().await.unwrap();
+            assert_eq!(audio_conn.alpn(), AUDIO_ALPN);
+            assert!(paired(&audio_conn, identity(&key, b"mac").public()));
+            let (mut send, _recv) = prepare_stream(&audio_conn, false).await.unwrap();
+            send.write_all(b"audio progresses").await.unwrap();
+            let mut result = [0; 16];
+            audio.read_exact(&mut result).await.unwrap();
+            assert_eq!(&result, b"audio progresses");
+            drop(bridge);
+            server.close().await;
+        })
+        .await
+        .unwrap();
     }
 
     #[tokio::test]

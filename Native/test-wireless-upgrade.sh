@@ -21,8 +21,26 @@ java -cp "$work" FrameFreshnessTest
 java -cp "$work" BluetoothWireTest
 java -cp "$work" WirelessUpgradeTest "$work"
 java -cp "$work" WirelessFallbackTest "$work"
+javac -cp "$work" -d "$work" BluetoothCompanion/tests/BluetoothInitialPathTest.java
+java -cp "$work" app.droidmirror.bluetooth.BluetoothInitialPathTest
 javac -cp "$work" -d "$work" BluetoothCompanion/tests/stubs/android/system/*.java BluetoothCompanion/tests/stubs/android/net/*.java "$src/WirelessVideoUpgrade.java" BluetoothCompanion/tests/WirelessVideoUpgradeTest.java
 java -cp "$work" app.droidmirror.bluetooth.WirelessVideoUpgradeTest
+javac -cp "$work" -d "$work" BluetoothCompanion/tests/WirelessAudioProtocolTest.java
+java -cp "$work" app.droidmirror.bluetooth.WirelessAudioProtocolTest
+javac -cp "$work" -d "$work" BluetoothCompanion/tests/stubs/android/util/Log.java "$src/WirelessAudioUpgrade.java" BluetoothCompanion/tests/WirelessAudioUpgradeTest.java
+java -cp "$work" app.droidmirror.bluetooth.WirelessAudioUpgradeTest
+clang -fobjc-arc -fblocks -Wno-deprecated-declarations -framework Foundation -framework AVFoundation -framework IOBluetooth -framework CoreBluetooth -framework Security Native/WirelessAudioLaneTests.m Native/BleInputQueue.m Native/BleInputCrypto.c Native/ClassicBluetoothWire.c -o "$work/audio-lane"
+java -cp "$work" app.droidmirror.bluetooth.WirelessAudioUpgradeTest serve "$work" &
+audio_server=$!
+for ((attempt=0; attempt<100; attempt++)); do
+    [[ -f "$work/audio-port" ]] && break
+    sleep 0.02
+done
+"$work/audio-lane" "$(cat "$work/audio-port")"
+touch "$work/audio-done"
+wait "$audio_server"
+clang -fsanitize=address,undefined -g Native/ClassicBluetoothWire.c Native/WirelessAudioWireTests.c -o "$work/audio-wire"
+"$work/audio-wire"
 # Exercise the recovery state MAC across the actual Java and C implementations.
 clang Native/BleInputCrypto.c Native/BleInputCryptoTests.c -o "$work/input-crypto"
 "$work/input-crypto" "$work/input.bin"
@@ -35,5 +53,5 @@ clang -fsanitize=address,undefined -g Native/ClassicBluetoothWire.c Native/Wirel
 "$work/fallback" "$work/fallback-initial.bin" "$work/fallback-wifi.bin" "$work/fallback-resumed.bin" "$work/fallback-expected.bin"
 clang -fobjc-arc -framework Foundation Native/BleInputQueue.m Native/BleInputQueueTests.m -o "$work/ble-queue"
 "$work/ble-queue"
-clang -fobjc-arc -fblocks -Wno-deprecated-declarations -framework Foundation -framework IOBluetooth -framework CoreBluetooth -framework Security Native/ClassicBluetoothStartupTests.m Native/BleInputQueue.m Native/BleInputCrypto.c Native/ClassicBluetoothWire.c -o "$work/bridge-tests"
+clang -fobjc-arc -fblocks -Wno-deprecated-declarations -framework Foundation -framework AVFoundation -framework IOBluetooth -framework CoreBluetooth -framework Security Native/ClassicBluetoothStartupTests.m Native/BleInputQueue.m Native/BleInputCrypto.c Native/ClassicBluetoothWire.c -o "$work/bridge-tests"
 "$work/bridge-tests" </dev/null

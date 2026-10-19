@@ -12,6 +12,7 @@ final class ClassicBluetoothTransport {
     private var upgradeTask: Task<Void, Never>?
     private var lanProbeFinished = false
     private var forwards: [String: String] = [:]
+    private var audioForwards: [String: String] = [:]
     private var wirelessActive = false
     var onEvent: ((Event) -> Void)?
     enum Event: String {
@@ -42,7 +43,6 @@ final class ClassicBluetoothTransport {
         guard upgradeTask == nil else { return }
         let token = generation
         upgradeTask = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(3))
             while !Task.isCancelled {
                 guard let self, token == self.generation, !self.wirelessActive,
                       self.process?.isRunning == true else { return }
@@ -94,6 +94,20 @@ final class ClassicBluetoothTransport {
             }
             guard token == generation, !Task.isCancelled, !wirelessActive else { return }
             if let port, let value = UInt16(port), value > 0 {
+                if audioForwards[serial] == nil {
+                    let audio = try? await ProcessRunner.output(adb, ["-s", serial, "forward", "tcp:0", "localabstract:droidmirror_audio_upgrade"], timeout: 3)
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    if let audio, let number = UInt16(audio), number > 0 {
+                        if token != generation || Task.isCancelled {
+                            _ = try? await ProcessRunner.output(adb, ["-s", serial, "forward", "--remove", "tcp:\(audio)"], timeout: 3)
+                            return
+                        }
+                        audioForwards[serial] = audio
+                    }
+                }
+                if let audio = audioForwards[serial] {
+                    try? commands?.write(contentsOf: Data("AUDIO_FORWARD \(port) \(audio)\n".utf8))
+                }
                 try? commands?.write(contentsOf: Data("UPGRADE \(value)\n".utf8))
                 try? await Task.sleep(for: .seconds(3))
             }
@@ -144,7 +158,7 @@ final class ClassicBluetoothTransport {
             Notification.Name("app.droidmirror.receiverConfiguration"), object: nil, userInfo: nil, deliverImmediately: true)
     }
 
-    func connect(address: String, wirelessMaxSize: Int = 1920, wirelessFPS: Int = 60, wirelessBitRate: Int = 12_000_000) async throws -> Ports {
+    func connect(address: String, wirelessMaxSize: Int = 1920, wirelessFPS: Int = 60, wirelessBitRate: Int = 12_000_000, audioBufferMs: Int = 50) async throws -> Ports {
         stop()
         guard let helper = Self.helperPath else { throw RunnerError.failed("Bluetooth helper missing. Rebuild DroidMirror with build-app.sh.") }
         let token = generation
@@ -157,6 +171,7 @@ final class ClassicBluetoothTransport {
         var environment = ToolProcessEnvironment.clean()
         let device = AndroidDevice(id: address, state: "device", model: "", product: "", transport: "bluetooth-classic")
         environment["DROIDMIRROR_APPEARANCE_CACHE"] = PhoneAppearanceCache.path(for: device)
+        environment["DROIDMIRROR_AUDIO_BUFFER_MS"] = String(min(200, max(0, audioBufferMs)))
         environment["DROIDMIRROR_WIFI_MAX_SIZE"] = String(wirelessMaxSize)
         environment["DROIDMIRROR_WIFI_FPS"] = String(wirelessFPS)
         environment["DROIDMIRROR_WIFI_BIT_RATE"] = String(wirelessBitRate)
@@ -170,6 +185,7 @@ final class ClassicBluetoothTransport {
         outputURL = url; outputHandle = handle; process = child; consumedLines = 0
         do {
             try child.run()
+            attemptWirelessUpgrade()
             // Baseband, L2CAP and BLE each have a bounded startup phase.
             for _ in 0..<500 {
                 guard token == generation else { throw CancellationError() }
@@ -202,7 +218,8 @@ final class ClassicBluetoothTransport {
         monitor?.cancel(); monitor = nil
         upgradeTask?.cancel(); upgradeTask = nil
         try? commands?.close(); commands = nil
-        let oldForwards = forwards; forwards.removeAll()
+        let oldForwards = Array(forwards) + Array(audioForwards)
+        forwards.removeAll(); audioForwards.removeAll()
         if !oldForwards.isEmpty, let adb = ToolLocator.find("adb") {
             Task {
                 for (serial, port) in oldForwards {

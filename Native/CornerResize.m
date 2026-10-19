@@ -8,10 +8,14 @@ DMResizeCorner DMCornerAtPoint(NSPoint point, NSSize size) {
     CGFloat x = left ? point.x : size.width - point.x;
     CGFloat y = bottom ? point.y : size.height - point.y;
     CGFloat radius = MIN(DMPixelCornerRadius(size.width, !bottom), MIN(size.width, size.height) / 2);
-    if (radius <= 0) return DMResizeCornerNone;
-    // Only the diagonal portion of the visible superellipse, not straight sides or
-    // the phone UI further inside. Transparent cutouts need no extra window.
-    if (x < radius * .06 || y < radius * .06 || x > radius * .65 || y > radius * .65) return DMResizeCornerNone;
+    // Use AppKit points so the target stays easy to grab at every window size.
+    // Include the rectangular corner and a generous band around the visible arc;
+    // square/unknown phone geometry must also have usable resize handles.
+    const CGFloat target = 28, tolerance = 16;
+    CGFloat reach = MAX(target, radius * .65 + tolerance);
+    if (x > reach || y > reach) return DMResizeCornerNone;
+    BOOL inCornerTarget = x <= target && y <= target;
+    if (!inCornerTarget && radius <= 0) return DMResizeCornerNone;
     CGFloat distance = CGFLOAT_MAX;
     CGPoint previous = DMSuperellipseCornerPoint(radius, 0);
     for (NSUInteger i = 1; i <= 128; ++i) {
@@ -23,7 +27,7 @@ DMResizeCorner DMCornerAtPoint(NSPoint point, NSSize size) {
         distance = MIN(distance, hypot(x - (previous.x + t * dx), y - (previous.y + t * dy)));
         previous = next;
     }
-    if (distance > 6) return DMResizeCornerNone;
+    if (!inCornerTarget && distance > tolerance) return DMResizeCornerNone;
     if (bottom) return left ? DMResizeCornerBottomLeft : DMResizeCornerBottomRight;
     return left ? DMResizeCornerTopLeft : DMResizeCornerTopRight;
 }

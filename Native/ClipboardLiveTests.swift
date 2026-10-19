@@ -1,5 +1,6 @@
 import AppKit
 import Darwin
+import CryptoKit
 
 enum ClipboardLiveFailure: Error { case failed(String) }
 @main struct ClipboardLiveTests {
@@ -38,12 +39,22 @@ enum ClipboardLiveFailure: Error { case failed(String) }
             DistributedNotificationCenter.default().postNotificationName(Notification.Name("app.droidmirror.clipboardConfiguration"), object: nil, userInfo: nil, deliverImmediately: true)
         }
         let prefix = "DroidMirror-test-" + UUID().uuidString
+        let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 2, pixelsHigh: 2,
+            bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+            colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+        memset(bitmap.bitmapData!, 127, bitmap.bytesPerRow * bitmap.pixelsHigh)
+        let png = bitmap.representation(using: .png, properties: [:])!
+        func isTestImage() -> Bool {
+            if board.data(forType: .png) == png { return true }
+            guard let path = board.string(forType: .fileURL), let url = URL(string: path), url.isFileURL else { return false }
+            return (try? Data(contentsOf: url)) == png
+        }
         defer {
             configure(false); pause(1)
             _ = try? exchange("restore")
             try? input.fileHandleForWriting.close()
             // Restore only if the clipboard still belongs to the test; preserve concurrent user copies.
-            if board.string(forType: .string)?.hasPrefix(prefix) == true {
+            if board.string(forType: .string)?.hasPrefix(prefix) == true || isTestImage() {
                 board.clearContents()
                 let items = original.map { values -> NSPasteboardItem in
                     let item = NSPasteboardItem()
@@ -73,5 +84,31 @@ enum ClipboardLiveFailure: Error { case failed(String) }
         }
         guard matched else { throw ClipboardLiveFailure.failed("Android to Mac timed out") }
         print("PASS: Android → Mac over authenticated BLE")
+        board.clearContents(); board.setData(png, forType: .png)
+        let digest = SHA256.hash(data: png).map { String(format: "%02x", $0) }.joined()
+        matched = false
+        for _ in 0..<24 {
+            pause(0.5)
+            if try exchange("check-image DroidMirror-test-" + digest) == "MATCH" { matched = true; break }
+        }
+        guard matched else { throw ClipboardLiveFailure.failed("Mac image to Android timed out") }
+        print("PASS: Mac → Android image bytes over authenticated BLE")
+        // Establish a new text clipboard first so the return trip must deliver pixels.
+        let separator = prefix + "-image-return"
+        board.clearContents(); board.setString(separator, forType: .string)
+        matched = false
+        for _ in 0..<12 {
+            pause(0.5)
+            if try exchange("check " + separator) == "MATCH" { matched = true; break }
+        }
+        guard matched else { throw ClipboardLiveFailure.failed("Image return baseline timed out") }
+        guard try exchange("set-image " + prefix) == "SET" else { throw ClipboardLiveFailure.failed("Could not copy phone image") }
+        matched = false
+        for _ in 0..<24 {
+            pause(0.5)
+            if isTestImage(), board.data(forType: .png) != nil, board.data(forType: .tiff) != nil { matched = true; break }
+        }
+        guard matched else { throw ClipboardLiveFailure.failed("Android image to Mac timed out") }
+        print("PASS: Android → Mac image pixels and original file over authenticated BLE")
     }
 }
