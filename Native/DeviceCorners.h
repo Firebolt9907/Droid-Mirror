@@ -6,6 +6,7 @@
 CGFloat DMPixelCornerRadius(CGFloat streamWidth, BOOL top);
 CGFloat DMCornerExtentForRadius(CGFloat radius);
 BOOL DMUpdateDeviceGeometryFromDisplayDump(NSString *dump);
+void DMLoadCachedDeviceCorners(NSView *screen);
 void DMRefreshDeviceCornersFromPhone(NSView *screen);
 // Local corner coordinates for an exponent-3 superellipse, from (0, extent)
 // to (extent, 0). The legacy radius value is now the corner's extent.

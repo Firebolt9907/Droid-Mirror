@@ -7,24 +7,33 @@ struct NotificationDeliveryTests {
             precondition(NotificationRuntime.preferences === UserDefaults.standard,
                          "Host must not force-unwrap its own preferences suite")
         }
-        var policy = NotificationDeliveryPolicy()
+        let policy = NotificationDeliveryPolicy()
         var focus = NotificationFocusPolicy()
         precondition(focus.requestOnce())
         for _ in 0..<100 { precondition(!focus.requestOnce(), "Reconnect retries must never steal focus") }
         focus = NotificationFocusPolicy(); precondition(focus.requestOnce())
-        precondition(policy.shouldDeliver(), "Background receiver must deliver without mirroring")
-        policy.session(active: true)
-        precondition(!policy.shouldDeliver(), "Active mirroring must suppress notifications")
-        policy.session(active: false)
-        precondition(policy.shouldDeliver(), "Closing mirroring must resume delivery")
-        policy.reconcile(hostIsRunning: true, hasSessionState: false)
-        precondition(!policy.shouldDeliver(), "Launch must suppress before first heartbeat")
-        policy.reconcile(hostIsRunning: false, hasSessionState: false)
-        precondition(policy.shouldDeliver(), "Exit before heartbeat must not leave suppression stuck")
-        for _ in 0..<20 {
-            policy.session(active: true); precondition(!policy.shouldDeliver())
-            policy.session(active: false); precondition(policy.shouldDeliver())
+        let message: [String: Any] = ["type": "notification", "id": "message", "package": "com.example.chat"]
+        precondition(policy.shouldDeliver(event: message), "Live messages must deliver independently of mirror state")
+        precondition(policy.shouldDeliver(event: ["id": "legacy"]), "Older companions remain compatible")
+        for field in ["ongoing", "persistent"] {
+            var event = message
+            event[field] = true
+            precondition(!policy.shouldDeliver(event: event), "Persistent items must be filtered")
+            event[field] = false
+            precondition(policy.shouldDeliver(event: event))
         }
+        precondition(!policy.shouldDeliver(event: ["package": "app.droidmirror.bluetooth"]),
+                     "The companion's session history must not loop back to the Mac")
+        for event: [String: Any] in [
+            ["package": "android", "category": "sys"],
+            ["package": "android", "channel": "PHYSICAL_KEYBOARD"],
+            ["package": "com.android.systemui", "channel": "virtual_keyboard"],
+            ["category": "service"], ["category": "transport"], ["progress": true]
+        ] { precondition(!policy.shouldDeliver(event: event)) }
+        for category in ["msg", "call", "alarm", "err"] {
+            precondition(policy.shouldDeliver(event: ["package": "android", "category": category]))
+        }
+        precondition(policy.shouldDeliver(event: ["package": "downloads", "progress": false]))
         print("Notification delivery policy tests passed")
     }
 }

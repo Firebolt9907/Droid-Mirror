@@ -12,6 +12,13 @@ import android.annotation.TargetApi;
 import android.content.Context;
 import android.hardware.display.VirtualDisplay;
 import android.os.Handler;
+import android.os.Build;
+import android.graphics.Rect;
+import android.graphics.RectF;
+import android.graphics.Path;
+import android.view.DisplayCutout;
+import java.util.ArrayList;
+import java.util.List;
 import android.view.Display;
 import android.view.Surface;
 
@@ -150,6 +157,46 @@ public final class DisplayManager {
         } catch (ReflectiveOperationException e) {
             throw new AssertionError(e);
         }
+    }
+
+    /** Logical display coordinates, including its current rotation. Empty means no known camera cutout. */
+    public List<Rect> getCameraCutoutBounds(int displayId) {
+        List<Rect> result = new ArrayList<>();
+        if (Build.VERSION.SDK_INT < 28) {
+            return result;
+        }
+        try {
+            Object info = getGetDisplayInfoMethod().invoke(manager, displayId);
+            if (info == null) {
+                return result;
+            }
+            DisplayCutout cutout = (DisplayCutout) info.getClass().getDeclaredField("displayCutout").get(info);
+            if (cutout == null) {
+                return result;
+            }
+            Path outline = Build.VERSION.SDK_INT >= 31 ? cutout.getCutoutPath() : null;
+            for (Rect bound : cutout.getBoundingRects()) {
+                Rect camera = new Rect(bound);
+                if (outline != null && !outline.isEmpty()) {
+                    // Safe bounding rectangles may include padding to the edge of the display.
+                    // Prefer the actual opening's outline, clipped to this individual cutout.
+                    Path clip = new Path();
+                    clip.addRect(new RectF(bound), Path.Direction.CW);
+                    Path shape = new Path(outline);
+                    if (shape.op(clip, Path.Op.INTERSECT) && !shape.isEmpty()) {
+                        RectF tight = new RectF();
+                        shape.computeBounds(tight, true);
+                        tight.roundOut(camera);
+                    }
+                }
+                if (!camera.isEmpty()) {
+                    result.add(camera);
+                }
+            }
+        } catch (ReflectiveOperationException | RuntimeException e) {
+            Ln.d("Camera cutout information unavailable: " + e.getMessage());
+        }
+        return result;
     }
 
     public int[] getDisplayIds() {

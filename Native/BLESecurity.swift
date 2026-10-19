@@ -142,12 +142,13 @@ struct BLEFragments {
     }
     static func split(_ data: Data, id: UInt32, maximum: Int) -> [Data] {
         guard !data.isEmpty, data.count <= 8192, maximum > 9 else { return [] }
+        let capacity = min(maximum, 512) - 9
         var frames: [Data] = []
-        for offset in stride(from: 0, to: data.count, by: maximum - 9) {
+        for offset in stride(from: 0, to: data.count, by: capacity) {
             let head: [UInt8] = [0xd2, UInt8(truncatingIfNeeded: id >> 24), UInt8(truncatingIfNeeded: id >> 16),
                 UInt8(truncatingIfNeeded: id >> 8), UInt8(truncatingIfNeeded: id),
                 UInt8(offset >> 8), UInt8(offset & 255), UInt8(data.count >> 8), UInt8(data.count & 255)]
-            frames.append(Data(head) + data.subdata(in: offset..<min(data.count, offset + maximum - 9)))
+            frames.append(Data(head) + data.subdata(in: offset..<min(data.count, offset + capacity)))
         }
         return frames
     }

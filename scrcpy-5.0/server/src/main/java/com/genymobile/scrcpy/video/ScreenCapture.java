@@ -101,8 +101,13 @@ public class ScreenCapture extends SurfaceCapture {
         filter.addOrientation(displayRotation, locked, captureOrientation);
         filter.addAngle(angle);
 
-        transform = filter.getInverseTransform();
         videoSize = filter.getOutputSize().constrain(videoConstraints);
+        // Codec alignment can change the aspect ratio (e.g. a 1080x2400
+        // display becomes 464x1056). Android's virtual-display projection
+        // letterboxes that surface. Render the full display at its native
+        // aspect ratio, then scale through GL to the aligned encoder size.
+        filter.addResizeIfAspectRatioChanged(videoSize);
+        transform = filter.getInverseTransform();
     }
 
     @Override

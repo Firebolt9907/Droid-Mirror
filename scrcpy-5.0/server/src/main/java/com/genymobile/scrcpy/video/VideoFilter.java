@@ -104,6 +104,12 @@ public class VideoFilter {
         transform = AffineMatrix.rotate(ccwAngle).withAspectRatio(size).fromCenter().multiply(transform);
     }
 
+    public void addResizeIfAspectRatioChanged(Size targetSize) {
+        if ((long) size.getWidth() * targetSize.getHeight() != (long) size.getHeight() * targetSize.getWidth()) {
+            addResize(targetSize);
+        }
+    }
+
     public void addResize(Size targetSize) {
         if (size.equals(targetSize)) {
             return;

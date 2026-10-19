@@ -7,6 +7,7 @@ import com.genymobile.scrcpy.util.Ln;
 import android.annotation.SuppressLint;
 import android.annotation.TargetApi;
 import android.content.IContentProvider;
+import android.content.ComponentName;
 import android.content.Intent;
 import android.os.Binder;
 import android.os.Bundle;
@@ -37,6 +38,19 @@ public final class ActivityManager {
             return new ActivityManager(am);
         } catch (ReflectiveOperationException e) {
             throw new AssertionError(e);
+        }
+    }
+
+    public ComponentName startForegroundService(Intent intent) throws ReflectiveOperationException {
+        Class<?> caller = Class.forName("android.app.IApplicationThread");
+        try {
+            return (ComponentName) manager.getClass().getMethod("startService", caller, Intent.class, String.class,
+                    boolean.class, String.class, String.class, int.class)
+                .invoke(manager, null, intent, null, true, FakeContext.PACKAGE_NAME, null, 0);
+        } catch (NoSuchMethodException older) {
+            return (ComponentName) manager.getClass().getMethod("startService", caller, Intent.class, String.class,
+                    boolean.class, String.class, int.class)
+                .invoke(manager, null, intent, null, true, FakeContext.PACKAGE_NAME, 0);
         }
     }
 

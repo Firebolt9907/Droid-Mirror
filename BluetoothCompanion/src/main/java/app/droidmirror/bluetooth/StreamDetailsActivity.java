@@ -48,10 +48,16 @@ public final class StreamDetailsActivity extends Activity {
         content.setOrientation(LinearLayout.VERTICAL);
         int padding = (int) (24 * getResources().getDisplayMetrics().density);
         content.setPadding(padding, padding, padding, padding);
-        TextView peer = new TextView(this);
-        peer.setText(getString(R.string.stream_destination, getIntent().getStringExtra(StreamNotifications.PEER)));
-        peer.setTextSize(18); content.addView(peer);
+        TextView phone = new TextView(this);
+        phone.setText(StreamNotifications.mirroringText(this));
+        phone.setTextSize(18); content.addView(phone);
         duration = new TextView(this); content.addView(duration);
+        Button minimize = new Button(this); minimize.setText(R.string.stream_minimize);
+        minimize.setOnClickListener(view -> {
+            try { StreamNotifications.action(this, StreamNotifications.MINIMIZE, token).send(); }
+            catch (PendingIntent.CanceledException ignored) {}
+        });
+        content.addView(minimize);
         Button disconnect = new Button(this); disconnect.setText(R.string.stream_disconnect);
         disconnect.setOnClickListener(view -> {
             try { StreamNotifications.action(this, StreamNotifications.DISCONNECT, token).send(); }

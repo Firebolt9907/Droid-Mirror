@@ -56,14 +56,34 @@ final class PhysicalDisplayPower implements DisplayLease.Power {
         }
         tokens.clear(); tokens.addAll(discovered);
     }
+    private int restorationMode() throws Exception {
+        Class<?> global = Class.forName("android.hardware.display.DisplayManagerGlobal");
+        Object manager = global.getMethod("getInstance").invoke(null);
+        Object info = global.getMethod("getDisplayInfo", int.class).invoke(manager, 0);
+        if (info == null) throw new IllegalStateException("Display policy unavailable");
+        int state = info.getClass().getField("state").getInt(info);
+        return restorationMode(state);
+    }
+    static int restorationMode(int state) {
+        // Display.STATE_* -> SurfaceControl.POWER_MODE_*. Never light a sleeping phone.
+        switch (state) {
+            case 1: return 0; // OFF
+            case 3: return 1; // DOZE
+            case 4: return 3; // DOZE_SUSPEND
+            case 2: case 5: case 6: return 2; // ON / VR / ON_SUSPEND
+            default: throw new IllegalStateException("Display policy unavailable");
+        }
+    }
+    @Override public void prepare() throws Exception { resolve(); }
     @Override public void set(boolean on) throws Exception {
         if (tokens.isEmpty()) {
             try { resolve(); }
             catch (LinkageError unsupported) { throw new IllegalStateException("Display API unavailable", unsupported); }
         }
+        int mode = on ? restorationMode() : 0;
         Exception failure = null;
         for (IBinder token : tokens) {
-            try { setPower.invoke(null, token, on ? 2 : 0); }
+            try { setPower.invoke(null, token, mode); }
             catch (Exception error) { failure = error; }
         }
         // Restore every cached display token even when one call fails.
@@ -73,7 +93,7 @@ final class PhysicalDisplayPower implements DisplayLease.Power {
             resolve();
             failure = null;
             for (IBinder token : tokens) {
-                try { setPower.invoke(null, token, 2); }
+                try { setPower.invoke(null, token, restorationMode()); }
                 catch (Exception error) { failure = error; }
             }
         }

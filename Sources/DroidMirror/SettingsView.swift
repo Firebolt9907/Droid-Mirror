@@ -1,19 +1,69 @@
 import SwiftUI
 
+@MainActor
+private final class ClipboardConnectionStatus: NSObject, ObservableObject {
+    @Published var mediaText = "Waiting for the background receiver…"
+    @Published var text = "Waiting for the background receiver…"
+    override init() {
+        super.init()
+        DistributedNotificationCenter.default().addObserver(self, selector: #selector(receive(_:)),
+            name: Notification.Name("app.droidmirror.receiverStatus"), object: nil)
+    }
+    @objc private func receive(_ event: Notification) {
+        if let status = event.userInfo?["media"] as? String { mediaText = status }
+        if let status = event.userInfo?["clipboard"] as? String { text = status }
+    }
+    deinit { DistributedNotificationCenter.default().removeObserver(self) }
+}
+
 struct SettingsView: View {
     @EnvironmentObject private var model: MirrorModel
+    @AppStorage("DroidMirror.clipboard.enabled") private var clipboardMirroring = false
+    @AppStorage("DroidMirror.hotspot.automatic") private var automaticHotspot = false
+    @AppStorage("DroidMirror.media.enabled") private var mediaSync = false
+    @StateObject private var clipboardStatus = ClipboardConnectionStatus()
+    @StateObject private var backgroundLogin = BackgroundLoginService()
 
     var body: some View {
         Form {
+            Section("Background service") {
+                Toggle("Start background service at login", isOn: Binding(
+                    get: { backgroundLogin.enabled }, set: { backgroundLogin.setEnabled($0) }))
+                    .disabled(model.isMirroring || model.isStarting)
+                Text("Keeps phone notifications, link sharing and enabled sync features available after you log in. Does not open the mirror or start a mirroring session.")
+                    .font(.caption).foregroundStyle(.secondary)
+                if model.isMirroring || model.isStarting {
+                    Text("Stop mirroring before changing background startup.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                if backgroundLogin.needsApproval {
+                    Text("Allow DroidMirror under Login Items & Extensions in System Settings to finish enabling background startup.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Button("Open Login Items Settings…") { backgroundLogin.openLoginSettings() }
+                }
+                if !backgroundLogin.message.isEmpty {
+                    Text(backgroundLogin.message).font(.caption).foregroundStyle(.red)
+                }
+            }
             Section("Connection") {
+                Button("Set up a phone…") { OnboardingWindowController.shared.show(model: model) }
+                Text("Follow the guided setup for Bluetooth, phone permissions and your first mirror.")
+                    .font(.caption).foregroundStyle(.secondary)
                 Picker("Transport", selection: $model.preferences.transport) {
                     ForEach(MirrorTransport.allCases) { Text($0.label).tag($0) }
-                }.disabled(model.isMirroring || model.isStarting)
+                }.disabled(model.isMirroring || model.isStarting || model.isPairingBluetooth)
                 if model.preferences.transport == .bluetoothClassic {
                     Picker("Paired phone", selection: $model.selectedID) {
                         Text("Select a phone").tag(String?.none)
                         ForEach(model.devices) { Text($0.displayName).tag(Optional($0.id)) }
+                    }.disabled(model.isMirroring || model.isStarting || model.isPairingBluetooth)
+                    HStack {
+                        SecureField("BLE pairing code from Android", text: $model.bluetoothPairingCode)
+                        Button("Pair Mac") { model.pairBluetooth() }
+                            .disabled(model.selectedDevice == nil || model.bluetoothPairingCode.isEmpty || model.isPairingBluetooth)
                     }.disabled(model.isMirroring || model.isStarting)
+                    Text("Once per phone: open Pair Mac (mirroring and notifications) in DroidMirror on Android and paste its code here. This pairs mirroring, notification forwarding and ADB discovery together. Allow notification forwarding on Android once.")
+                        .font(.caption).foregroundStyle(.secondary)
                     HStack {
                         Button("Refresh") { model.refreshDevices() }.disabled(model.isStarting || model.isMirroring)
                         Button(model.isMirroring || model.isStarting ? "Stop" : "Mirror") {
@@ -22,7 +72,52 @@ struct SettingsView: View {
                     }
                     Text(model.status).font(.caption).foregroundStyle(.secondary)
                 }
-                Text("Bluetooth uses the Android companion at 480p, up to 30 fps, and 1 Mbps H.264. Authorize Shizuku and enable Mac connections once on Android; future streams start from the Mac. Audio and remote input require ADB. For screen-off, enable Shizuku recovery in the Android companion.")
+                if model.preferences.transport == .wifiAware {
+                    Text(model.wifiAwareStatus).font(.caption).foregroundStyle(.secondary)
+                    Button("Check Wi-Fi Aware support") { model.checkWiFiAware() }
+                        .disabled(model.isRefreshing || model.isMirroring || model.isStarting)
+                    Text("Experimental direct connection. Mirroring is unavailable in this build.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                Text("Bluetooth starts at 320p, up to 15 fps, and a 128 kbps HEVC ceiling, then upgrades video over Iroh to the picture settings below. Video tries direct LAN or Tailscale IPs first, then an already-paired wireless ADB connection, then stays on Bluetooth. Relays and public Iroh discovery are disabled. Wireless ADB fallback requires Wireless debugging and one-time ADB pairing. Mouse, keyboard and navigation stay on Bluetooth. Audio requires a direct ADB session. Authorize Shizuku and enable the background bridge once in the Android companion.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Section("Phone hotspot") {
+                Toggle("Automatically turn on phone hotspot when Mac is offline", isOn: $automaticHotspot)
+                    .onChange(of: automaticHotspot) { _, _ in
+                        UserDefaults.standard.synchronize()
+                        DistributedNotificationCenter.default().postNotificationName(
+                            Notification.Name("app.droidmirror.hotspotConfiguration"), object: nil,
+                            userInfo: nil, deliverImmediately: true)
+                    }
+                Text("When offline, use the hotspot icon in the menu bar to turn on your phone’s hotspot over Bluetooth. Automatic mode waits 15 seconds and tries once per outage. Uses mobile data. Join the hotspot in the Wi-Fi menu; save it once for macOS auto-join. Requires Android 11+, the background bridge and authorized Shizuku.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            NotificationAppsView()
+            Section("Clipboard") {
+                Toggle("Mirror clipboard over Bluetooth", isOn: $clipboardMirroring)
+                    .onChange(of: clipboardMirroring) { _, _ in
+                        UserDefaults.standard.synchronize()
+                        DistributedNotificationCenter.default().postNotificationName(
+                            Notification.Name("app.droidmirror.clipboardConfiguration"), object: nil,
+                            userInfo: nil, deliverImmediately: true)
+                    }
+                Text(clipboardMirroring ? clipboardStatus.text : "Clipboard mirroring off")
+                    .font(.caption).foregroundStyle(.secondary)
+                Text("Sync newly copied text and individual files in both directions, including between mirror sessions. Requires Bluetooth pairing, the Android background bridge and Shizuku. Files must be less than 5 MB; text is limited to 4 KiB. Marked sensitive clips are skipped.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Section("Media playback") {
+                Toggle("Sync phone and Apple Music playback", isOn: $mediaSync)
+                    .onChange(of: mediaSync) { _, _ in
+                        UserDefaults.standard.synchronize()
+                        DistributedNotificationCenter.default().postNotificationName(
+                            Notification.Name("app.droidmirror.mediaConfiguration"), object: nil,
+                            userInfo: nil, deliverImmediately: true)
+                    }
+                Text(mediaSync ? clipboardStatus.mediaText : "Media syncing off")
+                    .font(.caption).foregroundStyle(.secondary)
+                Text("Show phone media in macOS Now Playing and Apple Music on your phone. Syncs track details and playback controls over paired Bluetooth; audio stays on its original device. Allow notification access on Android and Music Automation permission on Mac. Local playback takes priority on each device.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section("iPhone-like behavior") {
@@ -31,10 +126,14 @@ struct SettingsView: View {
                 Toggle("Keep the mirror above other windows", isOn: $model.preferences.alwaysOnTop)
                 Toggle("Forward audio when no media is already playing", isOn: $model.preferences.forwardAudio)
             }
-            .disabled(model.preferences.transport == .bluetoothClassic)
-            Section("Picture (ADB)") {
-                Picker("Codec", selection: $model.preferences.codec) {
-                    ForEach(VideoCodec.allCases) { Text($0.label).tag($0) }
+            .disabled(model.preferences.transport != .adb)
+            Section("Picture (Wi-Fi / ADB)") {
+                if model.preferences.transport == .bluetoothClassic {
+                    LabeledContent("Codec", value: "HEVC (H.265)")
+                } else {
+                    Picker("Codec", selection: $model.preferences.codec) {
+                        ForEach(VideoCodec.allCases) { Text($0.label).tag($0) }
+                    }
                 }
                 Picker("Frame rate", selection: $model.preferences.maxFPS) {
                     Text("30 fps").tag(30); Text("60 fps").tag(60); Text("90 fps").tag(90)
@@ -43,8 +142,16 @@ struct SettingsView: View {
                     Text("1280 px").tag(1280); Text("1920 px").tag(1920); Text("Native").tag(0)
                 }
                 Stepper("Bit rate: \(model.preferences.bitRateMbps) Mbps", value: $model.preferences.bitRateMbps, in: 4...32, step: 2)
+                Stepper("Wireless video buffer: \(model.preferences.wirelessVideoBufferMs) ms",
+                        value: $model.preferences.wirelessVideoBufferMs, in: 0...200, step: 25)
+                Text("A small buffer smooths uneven Wi-Fi frame delivery by adding playback delay. Default: 50 ms; 0 ms prioritizes latency. Applies next session to wireless ADB and automatic Bluetooth / Wi-Fi sessions.")
+                    .font(.caption).foregroundStyle(.secondary)
+                if model.preferences.transport == .bluetoothClassic {
+                    Text("These targets apply after the Wi-Fi handoff on your next session. Hybrid sessions keep regular HEVC throughout; input stays on BLE. Direct ADB sessions use their own selected codec and ADB input.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
             }
-            .disabled(model.preferences.transport == .bluetoothClassic)
+            .disabled(model.preferences.transport == .wifiAware)
             Section("Input") {
                 Picker("Scrolling", selection: $model.preferences.scrollMode) {
                     ForEach(ScrollMode.allCases) { Text($0.label).tag($0) }
@@ -56,11 +163,12 @@ struct SettingsView: View {
                 Text("Touch-style scrolling is handled inside the mirror and does not require Accessibility permission. Smart text input gives the best clipboard behavior; UHID behaves like a physical keyboard.")
                     .font(.caption).foregroundStyle(.secondary)
             }
-            .disabled(model.preferences.transport == .bluetoothClassic)
+            .disabled(model.preferences.transport != .adb)
         }.formStyle(.grouped).padding(.vertical, 12)
-        .alert("DroidMirror", isPresented: Binding(get: { model.errorMessage != nil }, set: { if !$0 { model.errorMessage = nil } })) {
-            Button("OK") { model.errorMessage = nil }
-        } message: { Text(model.errorMessage ?? "") }
+            .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+                backgroundLogin.refresh()
+            }
+
     }
 }
 

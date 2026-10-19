@@ -1,5 +1,7 @@
 package com.genymobile.scrcpy.control;
 
+import android.graphics.Rect;
+
 import com.genymobile.scrcpy.model.Point;
 import com.genymobile.scrcpy.model.Position;
 import com.genymobile.scrcpy.model.Size;
@@ -29,6 +31,26 @@ public final class PositionMapper {
 
     public Size getVideoSize() {
         return videoSize;
+    }
+
+    /** Inverse of touch mapping: place physical camera geometry in the encoded video. */
+    public Rect mapDeviceRect(Rect rect) {
+        AffineMatrix inverse = videoToDeviceMatrix == null ? AffineMatrix.IDENTITY : videoToDeviceMatrix.invert();
+        if (inverse == null) {
+            return null;
+        }
+        Point[] corners = {new Point(rect.left, rect.top), new Point(rect.right, rect.top),
+                new Point(rect.left, rect.bottom), new Point(rect.right, rect.bottom)};
+        int left = Integer.MAX_VALUE, top = Integer.MAX_VALUE;
+        int right = Integer.MIN_VALUE, bottom = Integer.MIN_VALUE;
+        for (Point corner : corners) {
+            Point point = inverse.apply(corner);
+            left = Math.min(left, point.getX());
+            top = Math.min(top, point.getY());
+            right = Math.max(right, point.getX());
+            bottom = Math.max(bottom, point.getY());
+        }
+        return new Rect(left, top, right, bottom);
     }
 
     public Point map(Position position) {

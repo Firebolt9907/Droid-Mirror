@@ -29,6 +29,7 @@ public final class CleanUp {
 
     private Thread thread;
     private boolean interrupted;
+    private boolean localUse;
 
     private CleanUp(Options options) {
         thread = new Thread(() -> runCleanUp(options), "cleanup");
@@ -37,6 +38,10 @@ public final class CleanUp {
 
     public static CleanUp start(Options options) {
         return new CleanUp(options);
+    }
+
+    public synchronized void preserveLocalUse() {
+        localUse = true;
     }
 
     public synchronized void interrupt() {
@@ -153,6 +158,10 @@ public final class CleanUp {
                     }
                 }
                 if (interrupted) {
+                    if (localUse) {
+                        out.write(2); // Restore panel and keep the local lock screen awake.
+                        out.flush();
+                    }
                     break;
                 }
                 localPendingChanges = pendingChanges;
@@ -213,7 +222,8 @@ public final class CleanUp {
             int msg;
             while ((msg = System.in.read()) != -1) {
                 // Only restore display power
-                assert msg == 0 || msg == 1;
+                assert msg >= 0 && msg <= 2;
+                if (msg == 2) powerOffScreen = false;
                 restoreDisplayPower = msg != 0;
             }
         } catch (IOException e) {

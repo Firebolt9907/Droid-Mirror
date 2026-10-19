@@ -17,6 +17,7 @@ import android.media.MediaCodec;
 import android.media.MediaCodecInfo;
 import android.media.MediaFormat;
 import android.os.Build;
+import android.os.Bundle;
 import android.os.Looper;
 import android.os.SystemClock;
 import android.view.Surface;
@@ -38,9 +39,13 @@ public class SurfaceEncoder implements AsyncProcessor {
 
     private final SurfaceCapture capture;
     private final Streamer streamer;
+    private Runnable firstFrameListener;
+
+    public void setFirstFrameListener(Runnable listener) { firstFrameListener = listener; }
+
     private final String encoderName;
-    private final List<CodecOption> codecOptions;
-    private final int videoBitRate;
+    private List<CodecOption> codecOptions;
+    private int videoBitRate;
     private final int maxSize;
     private final float maxFps;
     private final boolean downsizeOnError;
@@ -49,6 +54,17 @@ public class SurfaceEncoder implements AsyncProcessor {
 
     private boolean firstFrameSent;
     private int consecutiveErrors;
+    private long maxFrameAgeUs;
+    private int maxAdaptiveBitRate;
+    private int minAdaptiveBitRate;
+
+    public void setMinAdaptiveBitRate(int value) { minAdaptiveBitRate = value; }
+
+    /** Optional ceiling for bandwidth probing on freshness-controlled transports. */
+    public void setMaxAdaptiveBitRate(int value) { maxAdaptiveBitRate = value; }
+
+    /** Opt in only for transports where queued historical frames are undesirable. */
+    public void setMaxFrameAgeUs(long value) { maxFrameAgeUs = value; }
 
     private Thread thread;
     private final AtomicBoolean stopped = new AtomicBoolean();
@@ -56,6 +72,18 @@ public class SurfaceEncoder implements AsyncProcessor {
     private final CaptureControl captureControl = new CaptureControl();
 
     private VideoConstraints videoConstraints;
+    private static final class VideoProfile {
+        final Options options; final long frameAgeUs;
+        VideoProfile(Options options,long frameAgeUs) { this.options=options; this.frameAgeUs=frameAgeUs; }
+    }
+    private final java.util.concurrent.atomic.AtomicReference<VideoProfile> pendingProfile = new java.util.concurrent.atomic.AtomicReference<>();
+
+    /** Called from Binder; codec and capture changes run only on the encoder thread. */
+    public void requestVideoProfile(Options options) { requestVideoProfile(options,0); }
+    public void requestVideoProfile(Options options, long frameAgeUs) {
+        pendingProfile.set(new VideoProfile(options,frameAgeUs));
+        captureControl.reset(CaptureControl.RESET_REASON_CLIENT_RESIZED);
+    }
 
     public SurfaceEncoder(SurfaceCapture capture, Streamer streamer, Options options) {
         this.capture = capture;
@@ -112,6 +140,23 @@ public class SurfaceEncoder implements AsyncProcessor {
                     // The reasons for the previous failed encoding must be preserved when retrying
                     resetReasons |= retainedResetReasons;
                     retainedResetReasons = 0;
+                }
+
+                VideoProfile request = pendingProfile.getAndSet(null);
+                if (request != null) {
+                    Options profile=request.options;
+                    VideoConstraints updated = videoConstraints.withMaxSize(profile.getMaxSize());
+                    if (!capture.applyNewVideoConstraints(updated)) throw new IOException("Capture rejected hybrid video constraints");
+                    videoConstraints = updated;
+                    videoBitRate = profile.getVideoBitRate();
+                    codecOptions = profile.getVideoCodecOptions();
+                    // Each transport profile carries its own codec settings and
+                    // freshness policy, including when returning to Bluetooth.
+                    maxFrameAgeUs = request.frameAgeUs;
+                    format = createFormat(codec.getMimeType(), videoBitRate, profile.getMaxFps(), codecOptions);
+                    resetReasons |= CaptureControl.RESET_REASON_CLIENT_RESIZED;
+                    Ln.i("Hybrid video profile: max-size=" + profile.getMaxSize() + ", max-fps=" + profile.getMaxFps()
+                            + ", bit-rate=" + videoBitRate);
                 }
 
                 capture.prepare();
@@ -251,15 +296,51 @@ public class SurfaceEncoder implements AsyncProcessor {
 
     private void encode(MediaCodec codec, Streamer streamer) throws IOException {
         MediaCodec.BufferInfo bufferInfo = new MediaCodec.BufferInfo();
+        FrameFreshness freshness = maxFrameAgeUs > 0 ? new FrameFreshness(maxFrameAgeUs) : null;
+        int currentBitRate = videoBitRate;
+        int ceiling = Math.max(videoBitRate, maxAdaptiveBitRate);
+        long recoveryIntervalUs = ceiling > videoBitRate ? 2000000 : 10000000;
+        BitrateRecovery bitrateRecovery = minAdaptiveBitRate > 0
+                ? new BitrateRecovery(videoBitRate, ceiling, recoveryIntervalUs, Math.min(videoBitRate, minAdaptiveBitRate))
+                : new BitrateRecovery(videoBitRate, ceiling, recoveryIntervalUs);
 
         boolean eos;
         do {
             int outputBufferId = codec.dequeueOutputBuffer(bufferInfo, -1);
+            if (freshness != null && outputBufferId == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+                Ln.i("Bluetooth encoder output: " + codec.getOutputFormat());
+            }
             try {
                 eos = (bufferInfo.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0;
                 // On EOS, there might be data or not, depending on bufferInfo.size
                 if (outputBufferId >= 0 && bufferInfo.size > 0) {
                     boolean isConfig = (bufferInfo.flags & MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0;
+                    if (freshness != null) {
+                        boolean keyframe = (bufferInfo.flags & MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0;
+                        boolean send = freshness.shouldSend(bufferInfo.presentationTimeUs, System.nanoTime() / 1000, isConfig, keyframe);
+                        if (freshness.takeSyncRequest()) {
+                            currentBitRate = bitrateRecovery.stalled();
+                            Bundle parameters = new Bundle();
+                            parameters.putInt(MediaCodec.PARAMETER_KEY_VIDEO_BITRATE, currentBitRate);
+                            parameters.putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0);
+                            codec.setParameters(parameters);
+                            Ln.i("Video fell behind; requesting current keyframe at " + currentBitRate + " bit/s");
+                        }
+                        if (!send) continue;
+                        if (!isConfig) {
+                            long nowUs = System.nanoTime() / 1000;
+                            boolean backlogged = nowUs - bufferInfo.presentationTimeUs > Math.min(400000, maxFrameAgeUs / 2);
+                            int recovered = backlogged ? bitrateRecovery.backlogged(nowUs) : bitrateRecovery.healthy(nowUs);
+                            if (recovered != currentBitRate) {
+                                Bundle parameters = new Bundle();
+                                parameters.putInt(MediaCodec.PARAMETER_KEY_VIDEO_BITRATE, recovered);
+                                codec.setParameters(parameters);
+                                currentBitRate = recovered;
+                                Ln.i("Video " + (backlogged ? "queue building; adjusting to " : "healthy; increasing ")
+                                        + recovered + " bit/s");
+                            }
+                        }
+                    }
                     if (!isConfig) {
                         // If this is not a config packet, then it contains a frame
                         firstFrameSent = true;
@@ -268,6 +349,10 @@ public class SurfaceEncoder implements AsyncProcessor {
 
                     ByteBuffer codecBuffer = codec.getOutputBuffer(outputBufferId);
                     streamer.writePacket(codecBuffer, bufferInfo);
+                    if (!isConfig && firstFrameListener != null) {
+                        firstFrameListener.run();
+                        firstFrameListener = null;
+                    }
                 }
             } finally {
                 if (outputBufferId >= 0) {

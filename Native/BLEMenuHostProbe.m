@@ -12,8 +12,8 @@ static void CheckMenu(void) {
         [NSPredicate predicateWithBlock:^BOOL(NSMenuItem *item, NSDictionary *bindings) {
             return [item.title isEqualToString:@"Pair phone using authorized ADB…"];
         }]].firstObject;
-    if (commands.count != 1 || !pair.enabled || ![pair.target respondsToSelector:pair.action]) {
-        NSLog(@"FAIL: pairing command absent/disabled; menu=%@", [menu.itemArray valueForKey:@"title"]);
+    if (commands.count != 1 || pair != nil) {
+        NSLog(@"FAIL: discovery menu missing or legacy pairing still present; menu=%@", [menu.itemArray valueForKey:@"title"]);
         exit(2);
     }
 }
@@ -28,7 +28,7 @@ __attribute__((constructor)) static void Probe(void) {
         [replacement removeAllItems];
         [replacement addItemWithTitle:@"Quit DroidMirror" action:@selector(terminate:) keyEquivalent:@"q"];
         CheckMenu();
-        NSLog(@"PASS: live host pairing menu survives startup, submenu replacement and item reconstruction");
+        NSLog(@"PASS: discovery menu survives reconstruction without a separate notification pairing action");
         [NSApp terminate:nil];
     });
 }

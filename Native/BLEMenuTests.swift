@@ -6,7 +6,7 @@ import AppKit
         let old = NSMenu()
         let quit = NSMenuItem(title: "Quit DroidMirror", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         old.addItem(quit)
-        let command = NSMenuItem(title: "Wireless ADB over Bluetooth", action: nil, keyEquivalent: "")
+        let command = NSMenuItem(title: "Background Bluetooth", action: nil, keyEquivalent: "")
         BLEMenuAttachment.ensure(command, in: old)
         precondition(old.items == [command, quit])
         BLEMenuAttachment.ensure(command, in: old)

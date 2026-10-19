@@ -1,17 +1,20 @@
 #import "DeviceCorners.h"
+#import "PhoneAppearance.h"
 #import <QuartzCore/QuartzCore.h>
 #import <math.h>
 #import <signal.h>
+#import <objc/runtime.h>
 
-// Pixel 8 fallback, replaced with the connected phone's physical display data.
-static CGFloat DMTopCornerRatio = 104.0 / 1080.0;
-static CGFloat DMBottomCornerRatio = 102.0 / 1080.0;
+// Unknown geometry stays square until the phone reports its physical radii.
+static CGFloat DMTopCornerRatio;
+static CGFloat DMBottomCornerRatio;
 
 CGFloat DMCornerExtentForRadius(CGFloat radius) {
     // Match the 45-degree inset of Android's circular approximation:
     // circle: r(1 - 1/sqrt(2)); superellipse n=3: e(1 - 2^(-1/3)).
-    // This is a geometric conversion, not a phone-specific rounding multiplier.
-    return radius * (1 - M_SQRT1_2) / (1 - pow(.5, 1.0 / 3.0));
+    // Tighten the silhouette slightly to avoid over-rounding the mirrored image.
+    // The mask, shadow and resize hit areas all share this adjustment.
+    return 0.92 * radius * (1 - M_SQRT1_2) / (1 - pow(.5, 1.0 / 3.0));
 }
 
 static double DMGeometryNumber(NSString *line, NSString *pattern, NSUInteger capture) {
@@ -38,7 +41,15 @@ BOOL DMUpdateDeviceGeometryFromDisplayDump(NSString *dump) {
     return NO;
 }
 
+void DMLoadCachedDeviceCorners(NSView *screen) {
+    DMTopCornerRatio = DMBottomCornerRatio = 0;
+    id dump = DMReadPhoneAppearance()[@"displayDump"];
+    if ([dump isKindOfClass:NSString.class]) DMUpdateDeviceGeometryFromDisplayDump(dump);
+    DMApplyDeviceCorners(screen);
+}
+
 void DMRefreshDeviceCornersFromPhone(NSView *screen) {
+    DMLoadCachedDeviceCorners(screen);
     NSString *serial = NSProcessInfo.processInfo.environment[@"DROIDMIRROR_SERIAL"];
     if (!serial.length) return;
     __weak NSView *weakScreen = screen;
@@ -72,7 +83,14 @@ void DMRefreshDeviceCornersFromPhone(NSView *screen) {
         if (!dump) return;
         dispatch_async(dispatch_get_main_queue(), ^{
             NSView *surface = weakScreen;
-            if (surface && DMUpdateDeviceGeometryFromDisplayDump(dump)) DMApplyDeviceCorners(surface);
+            // A previous asynchronous ADB query must not change a new device's shape.
+            if (![serial isEqualToString:NSProcessInfo.processInfo.environment[@"DROIDMIRROR_SERIAL"]]) return;
+            if (surface && DMUpdateDeviceGeometryFromDisplayDump(dump)) {
+                for (NSString *line in [dump componentsSeparatedByCharactersInSet:NSCharacterSet.newlineCharacterSet])
+                    if ([line containsString:@"DisplayDeviceInfo{"] && [line containsString:@"type INTERNAL"])
+                        DMCachePhoneAppearance(@{@"displayDump": line});
+                DMApplyDeviceCorners(surface);
+            }
         });
     });
 }
@@ -125,6 +143,186 @@ CGPoint DMSuperellipseCornerPoint(CGFloat extent, CGFloat progress) {
                        extent * (1 - pow(sin(angle), power)));
 }
 
+// A separate, click-through child gives the blur room outside SDL's clipped
+// surface without changing video coordinates or the window's resize hit areas.
+static const CGFloat DMPhoneShadowInset = 120;
+static void *DMPhoneShadowKey = &DMPhoneShadowKey;
+
+@interface DMPhoneShadowView : NSView
+@property(nonatomic) NSRect phoneRect;
+@end
+@implementation DMPhoneShadowView
+- (BOOL)isOpaque { return NO; }
+- (void)drawRect:(NSRect)dirtyRect {
+    CGContextRef context = NSGraphicsContext.currentContext.CGContext;
+    NSRect phone = self.phoneRect;
+    CGPathRef path = DMCreatePixelScreenPath(phone.size, NO);
+    CGContextSaveGState(context);
+    // The panel reuses its backing store as the phone moves and resizes.
+    // Erase the previous silhouette before painting the new shadow.
+    CGContextClearRect(context, NSRectToCGRect(dirtyRect));
+    CGContextTranslateCTM(context, phone.origin.x, phone.origin.y);
+    // Draw only the blur outside the phone. A solid shadow caster can show as
+    // a second black phone while AppKit moves/resizes the two windows.
+    CGContextAddRect(context, CGRectOffset(NSRectToCGRect(self.bounds),
+        -phone.origin.x, -phone.origin.y));
+    CGContextAddPath(context, path);
+    CGContextEOClip(context);
+    CGContextSetFillColorWithColor(context, NSColor.blackColor.CGColor);
+    // A wide ambient shadow adds depth; a tighter contact shadow defines the edge.
+    CGContextSetShadowWithColor(context, CGSizeMake(0, -18), 60,
+        [NSColor colorWithWhite:0 alpha:0.38].CGColor);
+    CGContextAddPath(context, path);
+    CGContextFillPath(context);
+    CGContextSetShadowWithColor(context, CGSizeMake(0, -4), 16,
+        [NSColor colorWithWhite:0 alpha:0.22].CGColor);
+    CGContextAddPath(context, path);
+    CGContextFillPath(context);
+    CGContextRestoreGState(context);
+    CGPathRelease(path);
+}
+@end
+
+@interface DMPhoneShadowPanel : NSPanel
+@end
+@implementation DMPhoneShadowPanel
+- (BOOL)canBecomeKeyWindow { return NO; }
+- (BOOL)canBecomeMainWindow { return NO; }
+@end
+
+@interface DMPhoneShadow : NSObject
+@property(nonatomic, weak) NSWindow *host;
+@property(nonatomic, strong) DMPhoneShadowPanel *panel;
+@property(nonatomic, strong) id closeObserver;
+@property(nonatomic) BOOL updateScheduled;
+@property(nonatomic) NSSize drawnSize;
+@property(nonatomic) NSRect drawnPhoneRect;
+@property(nonatomic) CGFloat topRadius;
+@property(nonatomic) CGFloat bottomRadius;
+- (instancetype)initWithWindow:(NSWindow *)window;
+- (void)updateForScreen:(NSView *)screen;
+- (void)applyGeometryForScreen:(NSView *)screen;
+@end
+
+@implementation DMPhoneShadow
+- (instancetype)initWithWindow:(NSWindow *)window {
+    if (!(self = [super init])) return nil;
+    _host = window;
+    _panel = [[DMPhoneShadowPanel alloc] initWithContentRect:NSZeroRect
+        styleMask:NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel
+        backing:NSBackingStoreBuffered defer:NO];
+    _panel.releasedWhenClosed = NO;
+    _panel.opaque = NO;
+    _panel.backgroundColor = NSColor.clearColor;
+    _panel.hasShadow = NO;
+    _panel.ignoresMouseEvents = YES;
+    _panel.hidesOnDeactivate = NO;
+    _panel.animationBehavior = NSWindowAnimationBehaviorNone;
+    _panel.collectionBehavior = NSWindowCollectionBehaviorAuxiliary | NSWindowCollectionBehaviorFullScreenAuxiliary |
+        NSWindowCollectionBehaviorTransient | NSWindowCollectionBehaviorIgnoresCycle;
+    _panel.contentView = [[DMPhoneShadowView alloc] initWithFrame:NSZeroRect];
+    __weak typeof(self) weakSelf = self;
+    _closeObserver = [NSNotificationCenter.defaultCenter addObserverForName:NSWindowWillCloseNotification
+        object:window queue:nil usingBlock:^(__unused NSNotification *note) {
+            [weakSelf.panel orderOut:nil];
+        }];
+    return self;
+}
+
+- (void)dealloc {
+    if (_closeObserver) [NSNotificationCenter.defaultCenter removeObserver:_closeObserver];
+    [_host removeChildWindow:_panel];
+    [_panel orderOut:nil];
+}
+
+- (void)updateForScreen:(NSView *)screen {
+    // AppKit moves attached children after posting the parent's move notification.
+    // Setting the panel's absolute frame inside that notification applies the
+    // movement twice. Let AppKit carry the existing silhouette, then reconcile
+    // desktop clipping and size changes after the window operation has finished.
+    if (!self.panel.parentWindow) {
+        [self applyGeometryForScreen:screen];
+        [self.panel displayIfNeeded];
+        return;
+    }
+    if (self.updateScheduled) return;
+    self.updateScheduled = YES;
+    __weak typeof(self) weakSelf = self;
+    __weak NSView *weakScreen = screen;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        DMPhoneShadow *shadow = weakSelf;
+        NSView *surface = weakScreen;
+        if (!shadow) return;
+        if (surface && surface.window == shadow.host) {
+            [shadow applyGeometryForScreen:surface];
+            [shadow.panel displayIfNeeded];
+        }
+        shadow.updateScheduled = NO;
+    });
+}
+
+- (void)applyGeometryForScreen:(NSView *)screen {
+    NSWindow *window = self.host;
+    window.hasShadow = NO; // The explicit silhouette supplies both shadow layers.
+    if (window.styleMask & NSWindowStyleMaskFullScreen) {
+        [window removeChildWindow:self.panel];
+        [self.panel orderOut:nil];
+        return;
+    }
+    NSRect phone = [window convertRectToScreen:[screen convertRect:screen.bounds toView:nil]];
+    NSScreen *screenForWindow = window.screen;
+    NSRect shadowFrame = NSInsetRect(phone, -DMPhoneShadowInset, -DMPhoneShadowInset);
+    // A transparent child panel that extends behind the menu bar can expose a
+    // straight compositor edge there. Keep the shadow surface in the desktop
+    // area and position its silhouette relative to the clipped panel frame.
+    NSRect panelFrame = shadowFrame;
+    if (screenForWindow) {
+        NSRect desktopFrame = screenForWindow.frame;
+        desktopFrame.size.height = MAX(0, NSMaxY(screenForWindow.visibleFrame) - NSMinY(desktopFrame));
+        panelFrame = NSIntersectionRect(shadowFrame, desktopFrame);
+    }
+    DMPhoneShadowView *shadowView = (DMPhoneShadowView *)self.panel.contentView;
+    shadowView.phoneRect = NSOffsetRect(phone, -NSMinX(panelFrame), -NSMinY(panelFrame));
+    [self.panel setFrame:panelFrame display:NO];
+    CGFloat top = DMPixelCornerRadius(phone.size.width, YES);
+    CGFloat bottom = DMPixelCornerRadius(phone.size.width, NO);
+    if (!NSEqualSizes(self.drawnSize, phone.size) || !NSEqualRects(self.drawnPhoneRect, shadowView.phoneRect)
+        || self.topRadius != top || self.bottomRadius != bottom) {
+        self.drawnSize = phone.size;
+        self.drawnPhoneRect = shadowView.phoneRect;
+        self.topRadius = top;
+        self.bottomRadius = bottom;
+        self.panel.contentView.needsDisplay = YES;
+    }
+    if (self.panel.parentWindow != window) [window addChildWindow:self.panel ordered:NSWindowBelow];
+}
+@end
+
+static void *DMPhoneBorderKey = &DMPhoneBorderKey;
+
+static void DMApplyPhoneBorder(NSView *screen, CGPathRef path) {
+    CAShapeLayer *border = objc_getAssociatedObject(screen, DMPhoneBorderKey);
+    if (!border) {
+        border = [CAShapeLayer layer];
+        border.name = @"DroidMirrorPhoneBorder";
+        // Keep the outline above video and connection/status overlays. Layers
+        // do not receive mouse events, so edge gestures still reach the phone.
+        border.zPosition = 1000;
+        border.fillColor = nil;
+        // The screen mask clips the outer half of the centered stroke, leaving
+        // a one-point charcoal outline like the supplied iPhone Mirroring edge.
+        border.lineWidth = 2;
+        border.strokeColor = [NSColor colorWithSRGBRed:100.0 / 255 green:100.0 / 255
+            blue:100.0 / 255 alpha:120.0 / 255].CGColor;
+        [screen.layer addSublayer:border];
+        objc_setAssociatedObject(screen, DMPhoneBorderKey, border, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    border.frame = screen.layer.bounds;
+    border.path = path;
+    border.contentsScale = screen.window.backingScaleFactor ?: 1;
+    border.hidden = (screen.window.styleMask & NSWindowStyleMaskFullScreen) != 0;
+}
+
 void DMApplyDeviceCorners(NSView *screen) {
     if (!screen || NSIsEmptyRect(screen.bounds)) return;
     screen.wantsLayer = YES;
@@ -141,7 +339,16 @@ void DMApplyDeviceCorners(NSView *screen) {
     layer.masksToBounds = YES;
     layer.mask = mask;
     layer.shadowPath = path;
+    DMApplyPhoneBorder(screen, path);
     [CATransaction commit];
     CGPathRelease(path);
-    [screen.window invalidateShadow];
+    NSWindow *window = screen.window;
+    if (window) {
+        DMPhoneShadow *shadow = objc_getAssociatedObject(window, DMPhoneShadowKey);
+        if (!shadow) {
+            shadow = [[DMPhoneShadow alloc] initWithWindow:window];
+            objc_setAssociatedObject(window, DMPhoneShadowKey, shadow, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+        [shadow updateForScreen:screen];
+    }
 }

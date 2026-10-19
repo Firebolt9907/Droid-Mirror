@@ -537,11 +537,21 @@ static void test_serialize_scan_file(void) {
     assert(!memcmp(buf, expected, sizeof(expected)));
 }
 
+static void test_serialize_wheel(void) {
+    struct sc_control_msg msg = {.type=SC_CONTROL_MSG_TYPE_WHEEL_SCROLL,
+        .wheel_scroll={.position={.point={232,528},.screen_size={464,1056}},.dx=7,.dy=-100}};
+    uint8_t buf[SC_CONTROL_MSG_MAX_SIZE];
+    const uint8_t expected[]={24,0,0,0,232,0,0,2,16,1,208,4,32,0,0,0,7,255,255,255,156};
+    assert(sc_control_msg_serialize(&msg,buf)==sizeof(expected));
+    assert(!memcmp(buf,expected,sizeof(expected)));
+}
+
 int main(int argc, char *argv[]) {
     (void) argc;
     (void) argv;
 
     test_serialize_inject_keycode();
+    test_serialize_wheel();
     test_serialize_inject_text();
     test_serialize_inject_text_long();
     test_serialize_inject_touch_event();

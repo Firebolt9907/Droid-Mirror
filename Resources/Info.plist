@@ -12,5 +12,9 @@
   <key>NSHighResolutionCapable</key><true/>
   <key>NSBluetoothAlwaysUsageDescription</key><string>DroidMirror streams your Android screen over Bluetooth Classic.</string>
   <key>NSBluetoothPeripheralUsageDescription</key><string>DroidMirror connects to your paired Android phone.</string>
+  <key>NSLocalNetworkUsageDescription</key><string>DroidMirror finds your paired Android phone on the local network for direct encrypted video.</string>
+  <key>DroidMirrorSupportsLaunchCheck</key><true/>
+  <key>LSUIElement</key><true/>
+  <key>NSAppleEventsUsageDescription</key><string>Sync Apple Music playback and controls with your paired Android phone.</string>
   <key>NSPrincipalClass</key><string>NSApplication</string>
 </dict></plist>

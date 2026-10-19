@@ -4,11 +4,10 @@ The customized client is now in `scrcpy-5.0/`. `scrcpy-4.1/` and
 `outputs/DroidMirror-before-scrcpy-5.0.app` retain the previous version for rollback.
 Upstream source: https://github.com/Genymobile/scrcpy/releases/tag/v5.0
 
-The matching official Android server is bundled next to the client as
-`Contents/Helpers/scrcpy-server`. Portable server lookup prevents accidentally
-launching Homebrew's old 4.1 server. The official signed SHA256SUMS was verified
-against maintainer fingerprint `456958E85A185DD5C2D1E4E80C822B298461FA03`.
-Server SHA-256: `26cbc9ad0aced6c2282455bef4fb43462605c1f8758c74b4ab1dbf818c229daa`.
+The Android server is now built from the customized 5.0 sources by `build-app.sh`
+and bundled as `Contents/Helpers/scrcpy-server`. It includes the shared gesture-pill
+controller used by ADB and the Bluetooth companion. Portable server lookup prevents
+accidentally launching Homebrew's old server. See [gesture-pill behavior](GESTURE-PILL.md).
 
 Hardware decoding uses upstream's default `--hwdec=auto` with software fallback.
 VideoToolbox/Metal zero-copy texture import was verified on this Mac using ten
@@ -37,7 +36,7 @@ Build:
 CC=clang meson setup scrcpy-5.0/build scrcpy-5.0 --buildtype=release -Dcompile_server=false -Dportable=true -Dvideotoolbox=true
 meson compile -C scrcpy-5.0/build
 cp scrcpy-5.0/build/app/scrcpy outputs/DroidMirror.app/Contents/Helpers/scrcpy
-# Copy the verified 5.0 server to Contents/Helpers/scrcpy-server too.
+# Use ./build-app.sh to compile and package the customized Android server too.
 sh Native/sign-droidmirror.sh
 ```
 

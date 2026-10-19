@@ -11,7 +11,7 @@ public final class VideoWire {
     private VideoWire() {}
     public static void header(DataOutputStream out, String name, int width, int height) throws IOException {
         deviceHeader(out, name);
-        out.writeInt(0x68323634); // h264
+        out.writeInt(HevcCapturePolicy.WIRE_CODEC_ID); // h265, regular HEVC
         out.writeInt(0x80000000); // v5 session packet
         out.writeInt(width);
         out.writeInt(height);
@@ -33,7 +33,7 @@ public final class VideoWire {
     }
     public static int[] dimensions(int width, int height) {
         if (width < 16 || height < 16) throw new IllegalArgumentException("Invalid display size");
-        double scale = Math.min(1.0, 480.0 / Math.min(width, height));
-        return new int[]{Math.max(16, (int)(width * scale) / 16 * 16), Math.max(16, (int)(height * scale) / 16 * 16)};
+        int limit = (int) Math.min(Math.max(width, height), (long) Math.max(width, height) * HevcCapturePolicy.BLUETOOTH_SHORT_EDGE / Math.min(width, height));
+        return com.genymobile.scrcpy.model.ExactAspectRatio.fit(width, height, limit, 2, null);
     }
 }

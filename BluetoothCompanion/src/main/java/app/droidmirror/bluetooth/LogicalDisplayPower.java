@@ -22,6 +22,12 @@ final class LogicalDisplayPower {
         try { return (boolean)type.getMethod("isDisplayInteractive", int.class).invoke(power, 0); }
         catch (NoSuchMethodException older) { return (boolean)type.getMethod("isInteractive").invoke(power); }
     }
+    boolean inUse() throws Exception {
+        if (!interactive()) return false;
+        if (window == null) window = service("window", "android.view.IWindowManager");
+        return !(boolean)Class.forName("android.view.IWindowManager")
+            .getMethod("isKeyguardLocked").invoke(window);
+    }
     void keepAwake() throws Exception {
         if (power == null) power = service("power", "android.os.IPowerManager");
         Class<?> type = Class.forName("android.os.IPowerManager");
@@ -38,6 +44,21 @@ final class LogicalDisplayPower {
         long deadline = SystemClock.elapsedRealtime() + 500;
         while (!(boolean)locked.invoke(window)) {
             if (SystemClock.elapsedRealtime() >= deadline) throw new IllegalStateException("Keyguard lock not confirmed");
+            SystemClock.sleep(10);
+        }
+    }
+    void sleep() throws Exception {
+        if (power == null) power = service("power", "android.os.IPowerManager");
+        Class.forName("android.os.IPowerManager").getMethod("goToSleep", long.class, int.class, int.class)
+            .invoke(power, SystemClock.uptimeMillis(), 0, 0); // Allow normal doze/AOD policy.
+        Class<?> global = Class.forName("android.hardware.display.DisplayManagerGlobal");
+        Object manager = global.getMethod("getInstance").invoke(null);
+        long deadline = SystemClock.elapsedRealtime() + 1500;
+        while (true) {
+            Object info = global.getMethod("getDisplayInfo", int.class).invoke(manager, 0);
+            int state = info == null ? 0 : info.getClass().getField("state").getInt(info);
+            if (!interactive() && (state == 1 || state == 3 || state == 4)) return;
+            if (SystemClock.elapsedRealtime() >= deadline) throw new IllegalStateException("Display sleep not confirmed");
             SystemClock.sleep(10);
         }
     }
