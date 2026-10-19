@@ -37,6 +37,8 @@ chmod +x build-app.sh
 open outputs/DroidMirror.app
 ```
 
+`build-app.sh` quits the running Mac app before rebuilding. With an authorized Android phone connected, it also builds and installs the debug companion and automatically resumes its previously enabled bridge. Android builds require JDK 21 and the Android SDK (`ANDROID_HOME`, defaulting to `~/Library/Android/sdk`). Set `ANDROID_SERIAL` when multiple devices are connected, or `DROIDMIRROR_SKIP_ANDROID_INSTALL=1` for a Mac-only build. First-time setup and Shizuku authorization still happen in the Android app.
+
 For ADB mode, on Android enable **Developer options → USB debugging**. Connect once by USB and approve the computer. For wireless use, open the app's **Wireless connection** sheet and follow the pairing instructions.
 
 Launch the app from Finder. Opening it through a sandboxed preview host can prevent adb from opening its local port. Touch-style scrolling is intercepted inside the scrcpy window and does not require Accessibility permission.
