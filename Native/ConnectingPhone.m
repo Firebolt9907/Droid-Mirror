@@ -345,7 +345,18 @@ void DroidMirrorShowConnecting(SDL_Window *sdlWindow) {
     DMHostCommand(@"app.droidmirror.connectingVisible");
 }
 
-void DMFinishConnectingPhone(void) {
+__attribute__((visibility("default")))
+void DroidMirrorVideoSurfaceReady(void) {
+    // SDL may insert/reinsert its Metal view while creating or presenting the
+    // first drawable. Cover that empty drawable in the same main-thread turn.
+    DMConnectingPhoneView *overlay = (DMConnectingPhoneView *)DMLoadingSurface;
+    if (!overlay || overlay.revealingVideo || !overlay.superview) return;
+    NSView *screen = overlay.superview;
+    if (screen.subviews.lastObject != overlay)
+        [screen addSubview:overlay positioned:NSWindowAbove relativeTo:nil];
+}
+
+static void DMFinishConnectingPhoneWithMotion(BOOL animate) {
     DMConnectingPhoneView *overlay = (DMConnectingPhoneView *)DMLoadingSurface;
     if (!overlay || overlay.revealingVideo) return;
     NSView *screen = overlay.superview;
@@ -359,7 +370,7 @@ void DMFinishConnectingPhone(void) {
     // video underneath a fading wallpaper, without snapshots or buffering frames.
     overlay.revealingVideo = YES;
     NSUInteger generation = ++DMPresentationGeneration;
-    if (!DMPhoneMotionAllowed(screen.window)) {
+    if (!animate || !DMPhoneMotionAllowed(screen.window)) {
         [overlay removeFromSuperview]; DMLoadingSurface = nil; DMSetChrome(YES);
         return;
     }
@@ -416,6 +427,9 @@ void DMFinishConnectingPhone(void) {
         [overlay removeFromSuperview]; DMLoadingSurface = nil; DMSetChrome(YES);
     });
 }
+
+void DMFinishConnectingPhone(void) { DMFinishConnectingPhoneWithMotion(YES); }
+void DMFinishConnectingPhoneWithoutAnimation(void) { DMFinishConnectingPhoneWithMotion(NO); }
 
 static NSString *DMStopPath(void) {
     NSString *command = NSProcessInfo.processInfo.environment[@"DROIDMIRROR_SESSION_COMMANDS"];

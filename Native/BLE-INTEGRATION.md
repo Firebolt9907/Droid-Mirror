@@ -254,6 +254,15 @@ include queue time. Requests are not retried across sessions: callers must decid
 whether retrying an operation is safe. Link sharing uses this API; existing
 notification and hotspot policies keep their feature-specific correlation.
 
+Updated Android endpoints advertise write-without-response and notification support,
+while retaining write-with-response and indications for older clients. After mutual
+authentication, the Mac streams writes while `canSendWriteWithoutResponse` is true
+and resumes in `peripheralIsReady(toSendWriteWithoutResponse:)`. Handshake writes
+and older endpoints retain ATT responses. Android honors the selected CCC mode and
+waits for `onNotificationSent` before sending another notification/indication.
+Application replies, file byte-offset acknowledgments, encryption and directional
+sequence checks still determine success; streaming writes alone do not.
+
 Both peers bound outbound queues and schedule plaintext messages before sealing.
 Health probes/replies take priority over waiting messages.
 Up to four control messages may pass waiting file chunks before a chunk gets a

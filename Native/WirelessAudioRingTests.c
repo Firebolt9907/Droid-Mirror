@@ -17,7 +17,7 @@ static void produce(DMAudioRing *ring, unsigned frames) {
 }
 int main(void) {
     DMAudioRing *ring=calloc(1,sizeof(*ring)); dm_audio_ring_init(ring,50);
-    assert(ring->target==5760); // A zero/small video buffer still gets a jitter reserve.
+    assert(ring->target==11520); // A zero/small video buffer still gets a jitter reserve.
     float left[480],right[480];
     assert(!dm_audio_ring_render(ring,left,right,480));
     produce(ring,1024); assert(!dm_audio_ring_render(ring,left,right,480));
@@ -41,6 +41,7 @@ int main(void) {
     assert(atomic_load(&ring->underruns)==0 && atomic_load(&ring->trims)==0 && atomic_load(&ring->overflows)==0);
     for (unsigned i=0;i<100;i++) dm_audio_ring_render(ring,left,right,480);
     assert(atomic_load(&ring->underruns)==1 && !ring->playing);
+    assert(ring->target==300*48); // Starvation grows the reserve, rather than repeating forever.
     produce(ring,ring->target); assert(dm_audio_ring_render(ring,left,right,480) && ring->playing);
     assert(atomic_load(&ring->underruns)==1); // A single starvation re-buffers once.
     produce(ring,30000); dm_audio_ring_render(ring,left,right,480);
@@ -50,5 +51,21 @@ int main(void) {
     assert(!dm_audio_ring_write(ring,overflow,DM_AUDIO_CAPACITY));
     dm_audio_ring_render(ring,left,right,480); assert(!ring->playing && atomic_load(&ring->overflows)==1);
     free(overflow); free(ring);
-    puts("Audio ring: three minutes of burst delivery, continuous samples, bounded latency, drift correction, starvation recovery and overflow passed");
+    // Live phone delivery occasionally batches 180 ms of audio. Exercise that
+    // pattern for three minutes on the independent hardware render clock.
+    ring=calloc(1,sizeof(*ring)); dm_audio_ring_init(ring,0);
+    for (unsigned tick=0;tick<18000;tick++) {
+        if (tick%18==0) produce(ring,8640);
+        dm_audio_ring_render(ring,left,right,480);
+    }
+    assert(atomic_load(&ring->underruns)==0 && atomic_load(&ring->trims)==0);
+    // Unusually long outages can increase the reserve only to its hard cap.
+    for (unsigned outage=0;outage<5;outage++) {
+        for (unsigned tick=0;tick<150;tick++) dm_audio_ring_render(ring,left,right,480);
+        assert(ring->target<=DM_AUDIO_MAX_RESERVE_MS*48);
+        produce(ring,ring->target); dm_audio_ring_render(ring,left,right,480);
+    }
+    assert(ring->target==DM_AUDIO_MAX_RESERVE_MS*48);
+    free(ring);
+    puts("Audio ring: burst delivery including 180 ms live-network gaps, adaptive bounded reserve, continuous samples, bounded latency, drift correction, starvation recovery and overflow passed");
 }

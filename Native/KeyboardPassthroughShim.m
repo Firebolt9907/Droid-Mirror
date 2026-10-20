@@ -50,6 +50,12 @@ void DroidMirrorFrameVisible(void) {
     if (NSThread.isMainThread) present();
     else dispatch_async(dispatch_get_main_queue(), present);
 }
+__attribute__((visibility("default")))
+void DroidMirrorFrameVisibleWithoutAnimation(void) {
+    void (^present)(void) = ^{ DMSecureSessionStopped = NO; DMFinishConnectingPhoneWithoutAnimation(); DMFrameRendered = YES; DMReportMirrorVisible(); };
+    if ([NSThread isMainThread]) present(); else dispatch_async(dispatch_get_main_queue(), present);
+}
+
 
 __attribute__((visibility("default")))
 void DroidMirrorSessionDidStop(void) {

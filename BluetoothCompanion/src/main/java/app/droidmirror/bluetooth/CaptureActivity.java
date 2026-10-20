@@ -145,7 +145,7 @@ public final class CaptureActivity extends Activity {
     }
 
     private void finishPage() {
-        card("1. Lock your phone", "Press your phone’s power button before starting. DroidMirror will wait while your phone is unlocked and in use.");
+        card("1. Lock your phone", "Press your phone’s power button before starting. Optionally save your PIN under Optional features and recovery to unlock automatically before video starts. DroidMirror will wait while your phone is unlocked and in use.");
         card("2. Start on the Mac", "In the Mac setup, press Mirror my phone. A successful mirror verifies the pairing. Next time, just press Mirror on your Mac.");
         card("3. Keep these ready", "Keep Bluetooth on, Shizuku running and the background bridge enabled. On the same Wi-Fi, video can upgrade automatically. Wireless debugging is optional for video fallback.");
         page.addView(button("Enable / retry background bridge", this::enableBridge));
@@ -221,6 +221,7 @@ public final class CaptureActivity extends Activity {
         screenOff.setChecked(getSharedPreferences("ready", MODE_PRIVATE).getBoolean("panelOff", true));
         screenOff.setOnCheckedChangeListener((v, checked) -> getSharedPreferences("ready", MODE_PRIVATE).edit().putBoolean("panelOff", checked).apply());
         options.addView(screenOff);
+        options.addView(button("Automatic unlock / saved PIN (optional)", () -> open(new Intent(this, UnlockPinActivity.class))));
         options.addView(button("Restore phone display", () -> ShizukuDisplayClient.restoreDisplay(this, value -> runOnUiThread(() -> status.setText(value)))));
         options.addView(button("Stop background bridge", () -> {
             BackgroundBridgePreferences.setEnabled(this, false);

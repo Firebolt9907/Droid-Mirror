@@ -7,7 +7,7 @@
 - (void)stop { self.running=NO; }
 @end
 static void pts(uint8_t *bytes,uint64_t value) {
-    for (NSUInteger i=0;i<8;i++) bytes[i]=(uint8_t)(value>>(56-8*i));
+    for (NSUInteger i=0;i<16;i++) bytes[i]=(uint8_t)(value>>(56-8*i));
 }
 int main(void) {
     @autoreleasepool {
@@ -20,7 +20,7 @@ int main(void) {
         assert([audio appendPacket:packet length:sizeof(packet)]);
         assert(![audio appendPacket:packet length:sizeof(packet)]); // Duplicate PTS.
         assert(![audio appendPacket:packet length:13]);
-        for (NSUInteger i=1;i<8;i++) { pts(packet,1000000+i*21333); assert([audio appendPacket:packet length:sizeof(packet)]); }
+        for (NSUInteger i=1;i<16;i++) { pts(packet,1000000+i*21333); assert([audio appendPacket:packet length:sizeof(packet)]); }
         float left[480],right[480];
         assert(dm_audio_ring_render(&audio.buffer->ring,left,right,480));
         assert(left[300]==-1.0f && right[300]>.999f);

@@ -7,17 +7,63 @@ import android.content.Intent;
 import android.content.pm.ServiceInfo;
 import android.os.*;
 import com.genymobile.scrcpy.AdbStreamSession;
+import java.security.MessageDigest;
+import java.security.SecureRandom;
 import java.util.UUID;
 
 /** Shell-only entry point; the shell server owns capture and the lifetime of this notification. */
 public final class AdbStreamService extends Service {
     private static final int NOTIFICATION = 3;
+    private static final int ROOT_UID = 0;
+    private static final int SHELL_UID = 2000;
     private final Handler main = new Handler(Looper.getMainLooper());
     private IBinder owner;
     private IBinder.DeathRecipient death;
     private String token;
     private long started;
     private boolean dismissed;
+
+    static void verifyCaller(IBinder target) throws RemoteException, SecurityException {
+        if (target == null) throw new IllegalArgumentException("Target binder is null");
+        final int[] verifiedUid = new int[]{-1};
+        final byte[] nonce = new byte[16];
+        new SecureRandom().nextBytes(nonce);
+        final boolean[] nonceMatched = new boolean[]{false};
+
+        Binder verifier = new Binder() {
+            @Override protected boolean onTransact(int code, Parcel data, Parcel reply, int flags) throws RemoteException {
+                if (code == 1) {
+                    data.enforceInterface(AdbStreamSession.DESCRIPTOR);
+                    byte[] received = data.createByteArray();
+                    nonceMatched[0] = received != null && MessageDigest.isEqual(nonce, received);
+                    verifiedUid[0] = Binder.getCallingUid();
+                    if (reply != null) reply.writeNoException();
+                    return true;
+                }
+                return super.onTransact(code, data, reply, flags);
+            }
+        };
+
+        Parcel request = Parcel.obtain();
+        Parcel reply = Parcel.obtain();
+        try {
+            request.writeInterfaceToken(AdbStreamSession.DESCRIPTOR);
+            request.writeStrongBinder(verifier);
+            request.writeByteArray(nonce);
+            if (!target.transact(AdbStreamSession.VERIFY_CALLER, request, reply, 0)) {
+                throw new SecurityException("Caller verification unavailable");
+            }
+            reply.readException();
+        } finally {
+            request.recycle();
+            reply.recycle();
+        }
+
+        if (!nonceMatched[0] || (verifiedUid[0] != SHELL_UID && verifiedUid[0] != ROOT_UID)) {
+            throw new SecurityException("Untrusted caller UID: " + verifiedUid[0]);
+        }
+    }
+
     private Binder eventsFor(IBinder generation) {
         return new Binder() {
             @Override protected boolean onTransact(int code, Parcel data, Parcel reply, int flags) throws RemoteException {
@@ -62,6 +108,13 @@ public final class AdbStreamService extends Service {
             AdbStreamSession.signal(next, AdbStreamSession.DISCONNECT);
             return START_NOT_STICKY;
         }
+        try {
+            verifyCaller(next);
+        } catch (Exception error) {
+            AdbStreamSession.signal(next, AdbStreamSession.DISCONNECT);
+            if (owner == null) stopSelfResult(startId);
+            return START_NOT_STICKY;
+        }
         finishSessionState();
         SessionAudit.clear(this);
         owner = next;
@@ -73,6 +126,27 @@ public final class AdbStreamService extends Service {
         final IBinder generation = owner;
         death = () -> main.post(() -> { if (owner == generation) finishSession(); });
         try {
+            if (intent.getBooleanExtra("prepareUnlock", false)) {
+                verifyCaller(owner);
+                byte[] pin = null;
+                try {
+                    pin = SavedUnlockPin.beginAttempt(this);
+                    Parcel request = Parcel.obtain();
+                    Parcel reply = Parcel.obtain();
+                    try {
+                        request.writeInterfaceToken(AdbStreamSession.DESCRIPTOR);
+                        request.writeByteArray(pin);
+                        if (!owner.transact(AdbStreamSession.PREPARE_UNLOCK, request, reply, 0))
+                            throw new IllegalStateException("Unlock handshake unavailable");
+                        reply.readException();
+                        if (reply.readInt() != 1) throw new IllegalStateException("Automatic unlock failed");
+                    } finally { request.recycle(); reply.recycle(); }
+                    if (pin != null) SavedUnlockPin.completed(this);
+                } catch (Exception error) {
+                    AdbStreamSession.signal(owner, AdbStreamSession.DISCONNECT);
+                    finishSession(); return START_NOT_STICKY;
+                } finally { if (pin != null) java.util.Arrays.fill(pin, (byte) 0); }
+            }
             owner.linkToDeath(death, 0);
             Parcel data = Parcel.obtain();
             try {

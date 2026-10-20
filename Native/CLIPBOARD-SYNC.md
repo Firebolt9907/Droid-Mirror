@@ -50,12 +50,22 @@ clipboard subscription. Older companions continue to support text sync. File eve
 (`clipboardFileBegin`, `clipboardFileChunk`, `clipboardFileAck`, `clipboardFileCancel`)
 use the existing authenticated session and sequence checks. Each chunk contains up
 to 3072 bytes encoded as URL-safe Base64, avoiding JSON slash expansion within the
-8192-byte encrypted message limit. Only one chunk is sent before its matching byte
-offset is acknowledged. Both sides validate declared sizes, actual byte counts,
+8192-byte encrypted message limit. Updated peers negotiate a window of up to eight
+chunks (24 KiB) and acknowledge the exact cumulative byte offset after each window
+and the final chunk. Peers without a window field retain one-chunk acknowledgments.
+This reduces a 66 KiB transfer from 22 chunk round trips to three batches.
+Authenticated Mac writes stream using Core Bluetooth buffer backpressure when the
+characteristic supports writes without response; older companions retain writes
+with response. Android supports notifications as well as legacy indications and
+honors the subscribed CCC mode, pacing sends with `onNotificationSent`. This avoids
+ATT round trips for every fragment on the streaming path. File completion still
+requires the receiver to apply the clipboard and acknowledge the final byte offset.
+Both sides validate declared sizes, actual byte counts,
 filenames and chunk offsets. Sources are snapshotted with bounded reads. A newer local
 copy, lock, disconnect or opt-out discards pending transfers; stalled transfers expire
 after 60 seconds without progress. Partial files are never placed on the clipboard.
-Large transfers over Bluetooth can take time; there is no network upload or fallback.
+Bluetooth throughput still depends on the negotiated MTU and radio conditions;
+there is no network upload or fallback.
 
 ## Validation
 
@@ -63,7 +73,8 @@ Large transfers over Bluetooth can take time; there is no network upload or fall
   access to the macOS pasteboard service), opt-in, new copies, echo suppression,
   local conflicts, privacy markers, limits, reconnects, old-peer compatibility;
   file send/receive, empty files, exact 5 MB rejection, 4,999,999-byte acceptance,
-  invalid names/offsets and cancellation; PNG/TIFF image sending, image-over-text
+  invalid names/offsets and cancellation; 66 KiB windowed send/receive, bounded
+  negotiation, cumulative acknowledgment rejection and legacy fallback; PNG/TIFF image sending, image-over-text
   priority, native image/file receiving, image size/privacy checks and no image echo.
   The JVM harness exercises the production
   Android file-transfer state machine with a fake bridge and temporary cache.
@@ -78,6 +89,9 @@ without an open mirror session. The probe preserved both original clipboards in
 memory and restored them after temporarily pausing sync. Reproduce with
 `bash Native/test-clipboard-live.sh SERIAL` after compiling the debug companion;
 keep the phone unlocked, clipboard sync enabled, and the Mac receiver running.
+The live test now also times an approximately 66 KB incompressible PNG from Mac to
+Android, verifies its SHA-256, and fails if delivery exceeds 15 seconds. This new
+throughput check still needs a connected phone to run.
 No clipboard contents are printed by the probe.
 
 The phone's simultaneous Classic and LE GATT links caused the original handshake

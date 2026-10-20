@@ -80,6 +80,16 @@ public final class DisplayLeaseTest {
         require(lease.acquire(owner, 10000));
         clock.addAndGet(10000); lease.tick(); require(power.on && !lease.owns(owner));
 
+        // Android wake can override the initial OFF while PIN entry is running.
+        // The independent startup guard reblanks without extending the deadline.
+        power = new Power(); lease = new DisplayLease(power, clock::get);
+        require(lease.acquire(owner, 10000)); power.on = true;
+        try { lease.keepDark(owner); } catch (Exception failure) { throw new AssertionError(failure); }
+        require(!power.on);
+        clock.addAndGet(10000); lease.tick();
+        try { lease.keepDark(owner); } catch (Exception failure) { throw new AssertionError(failure); }
+        require(power.on && !lease.owns(owner)); // No stale timer can reblank after recovery.
+
         // Verify onRestore callback (e.g. UHID keyboard cleanup)
         java.util.concurrent.atomic.AtomicInteger restores = new java.util.concurrent.atomic.AtomicInteger();
         power = new Power();

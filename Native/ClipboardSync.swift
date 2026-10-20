@@ -17,6 +17,7 @@ struct ClipboardTextPolicy {
 struct ClipboardFilePolicy {
     static let limit = 5_000_000
     static let chunk = 3072
+    static let window = 8
     static func allowed(_ size: Int) -> Bool { size >= 0 && size < limit }
     static func nameAllowed(_ name: String) -> Bool {
         !name.isEmpty && name != "." && name != ".." && name.utf8.count <= 240
@@ -38,6 +39,8 @@ final class ClipboardSync {
         var size: Int
         var data: Data
         var offset = 0
+        var window = 1
+        var chunksSinceAck = 0
         var changedAt = Date()
     }
     private var incoming: Transfer?
@@ -170,7 +173,7 @@ final class ClipboardSync {
     private func sendFileData(_ data: Data, name: String) {
         let transfer = Transfer(id: UUID().uuidString, name: name, size: data.count, data: data)
         outgoing = transfer
-        if controller?.send(["type": "clipboardFileBegin", "id": transfer.id, "name": transfer.name, "size": transfer.size]) != true { resetFiles(); return }
+        if controller?.send(["type": "clipboardFileBegin", "id": transfer.id, "name": transfer.name, "size": transfer.size, "window": ClipboardFilePolicy.window]) != true { resetFiles(); return }
         status = "Sending clipboard file…"
     }
     private func receiveFile(_ event: [String: Any]) {
@@ -191,8 +194,9 @@ final class ClipboardSync {
             }
             resetFiles(notify: true)
             incoming = Transfer(id: id, name: name, size: size, data: Data())
+            incoming!.window = max(1, min(event["window"] as? Int ?? 1, ClipboardFilePolicy.window))
             status = "Receiving clipboard file…"
-            if size == 0 { completeFile() } else { controller?.send(["type": "clipboardFileAck", "id": id, "offset": 0]) }
+            if size == 0 { completeFile() } else { controller?.send(["type": "clipboardFileAck", "id": id, "offset": 0, "window": incoming!.window]) }
         case "clipboardFileChunk":
             guard incoming?.id == id else { return }
             guard event["offset"] as? Int == incoming!.data.count,
@@ -200,16 +204,29 @@ final class ClipboardSync {
                   let chunk = Data(base64Encoded: encoded.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")), !chunk.isEmpty,
                   chunk.count <= ClipboardFilePolicy.chunk, incoming!.data.count + chunk.count <= incoming!.size else { resetFiles(notify: true); return }
             incoming!.data.append(chunk); incoming!.changedAt = Date()
+            incoming!.chunksSinceAck += 1
             if incoming!.data.count == incoming!.size { completeFile() }
-            else { controller?.send(["type": "clipboardFileAck", "id": id, "offset": incoming!.data.count]) }
+            else if incoming!.chunksSinceAck == incoming!.window {
+                incoming!.chunksSinceAck = 0
+                controller?.send(["type": "clipboardFileAck", "id": id, "offset": incoming!.data.count])
+            }
         case "clipboardFileAck":
             guard var transfer = outgoing, transfer.id == id else { return }
             guard event["offset"] as? Int == transfer.offset else { resetFiles(notify: true); return }
             if transfer.offset == transfer.size { outgoing = nil; status = "Clipboard mirroring ready"; return }
-            let end = min(transfer.offset + ClipboardFilePolicy.chunk, transfer.size)
-            let chunk = transfer.data.subdata(in: transfer.offset..<end)
-            guard controller?.send(["type": "clipboardFileChunk", "id": id, "offset": transfer.offset, "data": chunk.base64EncodedString().replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_")]) == true else { resetFiles(); return }
-            transfer.offset = end; transfer.changedAt = Date(); outgoing = transfer
+            if transfer.offset == 0 {
+                transfer.window = max(1, min(event["window"] as? Int ?? 1, ClipboardFilePolicy.window))
+            }
+            // Bound queued bulk data and wait for one cumulative acknowledgment.
+            // A peer without window support keeps the original one-chunk protocol.
+            for _ in 0..<transfer.window {
+                let end = min(transfer.offset + ClipboardFilePolicy.chunk, transfer.size)
+                let chunk = transfer.data.subdata(in: transfer.offset..<end)
+                guard controller?.send(["type": "clipboardFileChunk", "id": id, "offset": transfer.offset, "data": chunk.base64EncodedString().replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_")]) == true else { resetFiles(notify: true); return }
+                transfer.offset = end
+                if end == transfer.size { break }
+            }
+            transfer.changedAt = Date(); outgoing = transfer
         default: break
         }
     }

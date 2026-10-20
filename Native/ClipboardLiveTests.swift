@@ -44,10 +44,12 @@ enum ClipboardLiveFailure: Error { case failed(String) }
             colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
         memset(bitmap.bitmapData!, 127, bitmap.bytesPerRow * bitmap.pixelsHigh)
         let png = bitmap.representation(using: .png, properties: [:])!
+        var testImages = [png]
         func isTestImage() -> Bool {
-            if board.data(forType: .png) == png { return true }
+            if let data = board.data(forType: .png), testImages.contains(data) { return true }
             guard let path = board.string(forType: .fileURL), let url = URL(string: path), url.isFileURL else { return false }
-            return (try? Data(contentsOf: url)) == png
+            guard let data = try? Data(contentsOf: url) else { return false }
+            return testImages.contains(data)
         }
         defer {
             configure(false); pause(1)
@@ -110,5 +112,29 @@ enum ClipboardLiveFailure: Error { case failed(String) }
         }
         guard matched else { throw ClipboardLiveFailure.failed("Android image to Mac timed out") }
         print("PASS: Android → Mac image pixels and original file over authenticated BLE")
+        // Incompressible pixels produce a PNG around the reported 66 KB size.
+        let screenshot = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 128, pixelsHigh: 128,
+            bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+            colorSpaceName: .deviceRGB, bitmapFormat: .alphaNonpremultiplied, bytesPerRow: 0, bitsPerPixel: 0)!
+        var random: UInt32 = 0x12345678
+        for index in 0..<(screenshot.bytesPerRow * screenshot.pixelsHigh) {
+            random ^= random << 13; random ^= random >> 17; random ^= random << 5
+            screenshot.bitmapData![index] = UInt8(truncatingIfNeeded: random)
+        }
+        let screenshotPNG = screenshot.representation(using: .png, properties: [:])!
+        precondition(screenshotPNG.count > 60_000 && screenshotPNG.count < 75_000)
+        testImages.append(screenshotPNG)
+        let screenshotDigest = SHA256.hash(data: screenshotPNG).map { String(format: "%02x", $0) }.joined()
+        let started = ProcessInfo.processInfo.systemUptime
+        board.clearContents(); board.setData(screenshotPNG, forType: .png)
+        matched = false
+        for _ in 0..<30 {
+            pause(0.5)
+            if try exchange("check-image DroidMirror-test-" + screenshotDigest) == "MATCH" { matched = true; break }
+        }
+        let elapsed = ProcessInfo.processInfo.systemUptime - started
+        guard matched else { throw ClipboardLiveFailure.failed("66 KB screenshot exceeded the 15-second transfer budget") }
+        print(String(format: "PASS: Mac → Android %d-byte PNG in %.2f seconds (exact SHA-256 match)", screenshotPNG.count, elapsed))
+
     }
 }

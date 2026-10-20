@@ -19,6 +19,9 @@ struct ConnectionFailureTests {
             ("EVENT PHONE_LOCAL_USE\nBluetooth stream closed", "Phone in use"),
             ("EVENT SESSION_ENDED\nWARN: Device disconnected", "Remote session ended"),
             ("EVENT PHONE_IN_USE", "Phone in use"),
+            ("EVENT PIN_PAUSED\nEVENT CAPTURE_FAILED", "Could not start screen capture"),
+            ("EVENT PIN_FAILED\nBluetooth connection timed out", "Automatic unlock failed"),
+            ("Automatic unlock paused after an incomplete startup", "Automatic unlock paused"),
             ("EVENT CAPTURE_FAILED", "Could not start screen capture"),
             ("Bluetooth stream closed. Reconnect from your Mac.", "Bluetooth disconnected"),
             ("BLE clock synchronization failed. Update the Android companion.", "Update DroidMirror")

@@ -140,7 +140,7 @@ static NSData *DMUpgradeProof(NSData *key, const char *direction, const uint8_t 
 @property(nonatomic) NSTimeInterval pendingSince;
 @property(nonatomic) NSTimeInterval lastData;
 @property(nonatomic) BOOL failing;
-@property(nonatomic) uint8_t eventMask;
+@property(nonatomic) uint16_t eventMask;
 @property(nonatomic, copy) NSString *connectionStage;
 - (BOOL)receiveAudio:(uint8_t)type bytes:(const uint8_t *)bytes length:(size_t)length;
 - (void)publishAudioState;
@@ -756,11 +756,11 @@ static void DMWirelessLatency(void *context, uint64_t timestamp) {
         fprintf(stderr, "Minimize command received over capture BLE for host %d\n", getppid());
         return; // Window commands may repeat; lifecycle event deduplication does not apply.
     }
-    if (event < 1 || event > 8) return;
-    uint8_t mask = (uint8_t)(1u << (event - 1));
+    if (event < 1 || event > 10) return;
+    uint16_t mask = (uint16_t)(1u << (event - 1));
     if (_eventMask & mask) return;
     _eventMask |= mask;
-    const char *names[] = {"PHONE_ON", "SESSION_ENDED", "PHONE_LOCAL_USE", "STREAM_STARTED", "CAPTURE_FAILED", "ALIVE", "MINIMIZE_WINDOW", "PHONE_IN_USE"};
+    const char *names[] = {"PHONE_ON", "SESSION_ENDED", "PHONE_LOCAL_USE", "STREAM_STARTED", "CAPTURE_FAILED", "ALIVE", "MINIMIZE_WINDOW", "PHONE_IN_USE", "PIN_PAUSED", "PIN_FAILED"};
     printf("EVENT %s\n", names[event - 1]); fflush(stdout);
 }
 - (void)l2capChannelData:(IOBluetoothL2CAPChannel *)channel data:(void *)data length:(size_t)length {

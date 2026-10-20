@@ -305,6 +305,11 @@ final class MirrorModel: ObservableObject {
             case .phoneInUse:
                 self.errorMessage = PhoneUsePolicy.errorMessage
                 self.status = "Phone in use"
+            case .pinPaused:
+                self.status = "PIN cooling down · unlock manually or reconnect after 15 seconds"
+            case .pinFailed:
+                self.errorMessage = "EVENT PIN_FAILED\n" + self.classicBluetooth.diagnostic
+                self.status = "Automatic unlock failed"
             case .captureFailed:
                 self.errorMessage = "EVENT CAPTURE_FAILED\n" + self.classicBluetooth.diagnostic
             case .sessionEnded:

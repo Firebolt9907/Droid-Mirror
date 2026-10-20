@@ -12,6 +12,12 @@ struct ConnectionFailure {
         func known(_ title: String, _ message: String) -> ConnectionFailure {
             ConnectionFailure(title: title, message: message, showsLog: false)
         }
+        if has("automatic unlock paused after an incomplete startup") {
+            return known("Automatic unlock paused", "On your Android phone, open DroidMirror → Optional features and recovery → Automatic unlock / saved PIN. Check and save your PIN again, or remove it to unlock manually. Then lock the phone and reconnect.")
+        }
+        if has("event pin_failed", "automatic unlock failed") {
+            return known("Automatic unlock failed", "Mirroring remains available for manual unlock. Wait 15 seconds before reconnecting to try automatic entry again. If it keeps failing, check the saved screen-lock PIN and any lockout message on your phone.")
+        }
         if has("event phone_on", "event phone_local_use") {
             return known("Phone in use", "Your phone’s power or screen-lock action ended remote streaming. Lock your phone, then connect again when you’re ready.")
         }

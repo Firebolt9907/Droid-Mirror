@@ -15,8 +15,18 @@ marker and restores settings without injecting another Sleep key.
 While streaming, user activity with NO_CHANGE_LIGHTS prevents an ordinary idle
 timeout without lighting the panel or changing the user's timeout settings.
 
-After the first video frame is written, the shell server starts the companion's
-`AdbStreamService`. Version 0.12 or newer of the companion is required for the phone
+Before capture begins, the shell server starts the companion's
+`AdbStreamService` and allows up to eight seconds for a phone-local Binder handshake while the
+encoder warms in parallel. Codec metadata may pass during preparation; captured
+frames stay gated until successful preparation and a fresh keyframe.
+The service decrypts an optional saved screen-lock PIN and sends it only to that
+shell process for one pre-video unlock attempt. A failure or interrupted attempt
+starts a 15-second automatic-entry cooldown. During that cooldown the normal
+streaming path remains available for manual unlock. A new connection after the
+cooldown may retry the PIN; there are no automatic background retries. The PIN never travels
+over the ADB connection to the Mac. Older companions attach without a PIN;
+without a companion, mirroring retains its manual unlock behavior.
+The foreground stream notification now appears during this preparation step. Version 0.12 or newer of the companion is required for the phone
 Live Activity; power-button recovery works without it. The service reuses the
 Bluetooth notification's promoted status, details, dismissal and Stop Mirroring
 action. Companion 0.22 adds **Minimize** to the notification and stream

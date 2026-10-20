@@ -4,7 +4,7 @@ import java.util.function.LongSupplier;
 
 /** Session end policy independent of the app process and display lease. */
 public final class RemoteSession {
-    public static final int STOP = 1, TIMEOUT = 2, LOCAL_USE = 3, APP_DIED = 4, GUARD_STOP = 5, RECOVERY = 6;
+    public static final int STOP = 1, TIMEOUT = 2, LOCAL_USE = 3, APP_DIED = 4, GUARD_STOP = 5, RECOVERY = 6, UNLOCK_FAILED = 7;
     public interface End { boolean run(Object token, int cause); }
     private final LongSupplier clock;
     private final End end;

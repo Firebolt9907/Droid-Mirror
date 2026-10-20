@@ -5,7 +5,7 @@ import android.os.Bundle;
 import android.os.SystemClock;
 import java.lang.reflect.Method;
 
-/** Runs only in the Shizuku shell/root service; never dismisses the keyguard. */
+/** Runs only in the Shizuku shell/root service; handles logical power and keyguard state. */
 @SuppressLint({"PrivateApi", "SoonBlockedPrivateApi", "BlockedPrivateApi"})
 final class LogicalDisplayPower {
     private Object power;
@@ -25,7 +25,11 @@ final class LogicalDisplayPower {
     boolean inUse() throws Exception {
         if (!interactive()) return false;
         if (window == null) window = service("window", "android.view.IWindowManager");
-        return !(boolean)Class.forName("android.view.IWindowManager")
+        return !locked();
+    }
+    boolean locked() throws Exception {
+        if (window == null) window = service("window", "android.view.IWindowManager");
+        return (boolean)Class.forName("android.view.IWindowManager")
             .getMethod("isKeyguardLocked").invoke(window);
     }
     void keepAwake() throws Exception {

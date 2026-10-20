@@ -15,7 +15,7 @@
 @property(nonatomic, strong) DMWirelessAudioBuffer *buffer;
 @property(nonatomic) uint64_t lastPTS;
 @property(nonatomic) NSTimeInterval lastDiagnostic, lastArrival, maxArrivalGap;
-@property(nonatomic) uint64_t maxPTSGap;
+@property(nonatomic) uint64_t maxPTSGap, diagnosticFrames;
 - (instancetype)initWithBufferMs:(NSUInteger)milliseconds;
 - (BOOL)appendPacket:(const uint8_t *)bytes length:(size_t)length;
 - (void)stop;
@@ -25,7 +25,7 @@
 - (instancetype)initWithBufferMs:(NSUInteger)milliseconds {
     if (!(self=[super init])) return nil;
     _engine=[AVAudioEngine new]; _buffer=[DMWirelessAudioBuffer new];
-    dm_audio_ring_init(&_buffer->ring,(unsigned)MIN(milliseconds,200));
+    dm_audio_ring_init(&_buffer->ring,(unsigned)MIN(milliseconds,DM_AUDIO_MAX_RESERVE_MS));
     DMWirelessAudioBuffer *buffer=_buffer;
     AVAudioFormat *format=[[AVAudioFormat alloc] initStandardFormatWithSampleRate:48000 channels:2];
     // Retain the ring through the block's lifetime, independently of the owner.
@@ -54,11 +54,13 @@
     if (_lastPTS) _maxPTSGap=MAX(_maxPTSGap,pts-_lastPTS);
     _lastArrival=now; _lastPTS=pts;
     dm_audio_ring_write(&_buffer->ring,bytes+8,(length-8)/4);
+    _diagnosticFrames+=(length-8)/4;
     if (now-_lastDiagnostic>5) {
-        _lastDiagnostic=now;
-        fprintf(stderr,"Audio jitter buffer: queuedMs=%llu underruns=%u trims=%u overflows=%u maxArrivalGapMs=%.1f maxCaptureGapMs=%.1f\n",
+        double frameRate=_lastDiagnostic ? _diagnosticFrames/(now-_lastDiagnostic) : 0;
+        _lastDiagnostic=now; _diagnosticFrames=0;
+        fprintf(stderr,"Audio jitter buffer: queuedMs=%llu underruns=%u trims=%u overflows=%u maxArrivalGapMs=%.1f maxCaptureGapMs=%.1f inputFramesPerSec=%.0f\n",
             (unsigned long long)((atomic_load(&_buffer->ring.written)-atomic_load(&_buffer->ring.read))/48),
-            atomic_load(&_buffer->ring.underruns),atomic_load(&_buffer->ring.trims),atomic_load(&_buffer->ring.overflows),_maxArrivalGap*1000,(double)_maxPTSGap/1000);
+            atomic_load(&_buffer->ring.underruns),atomic_load(&_buffer->ring.trims),atomic_load(&_buffer->ring.overflows),_maxArrivalGap*1000,(double)_maxPTSGap/1000,frameRate);
         _maxArrivalGap=0; _maxPTSGap=0;
     }
     return YES;

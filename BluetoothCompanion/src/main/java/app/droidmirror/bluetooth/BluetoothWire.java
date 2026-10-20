@@ -7,7 +7,7 @@ import java.nio.charset.StandardCharsets;
 public final class BluetoothWire {
     public static final byte[] MAGIC = "DMBT0006".getBytes(StandardCharsets.US_ASCII);
     public static final int VIDEO = 0, EVENT = 1, MAX_CHUNK = 16 * 1024, VIDEO_CHUNK = 1024;
-    public static final int PHONE_ON = 1, SESSION_ENDED = 2, LOCAL_USE_FAILED = 3, STREAM_STARTED = 4, CAPTURE_FAILED = 5, ALIVE = 6, MINIMIZE_WINDOW = 7, PHONE_IN_USE = 8;
+    public static final int PHONE_ON = 1, SESSION_ENDED = 2, LOCAL_USE_FAILED = 3, STREAM_STARTED = 4, CAPTURE_FAILED = 5, ALIVE = 6, MINIMIZE_WINDOW = 7, PHONE_IN_USE = 8, PIN_PAUSED = 9, PIN_FAILED = 10;
     // Initial/minimum Classic window; live sessions grow it from measured ACK
     // delivery. Every chunk still fits this minimum during transport changes.
     public static final int VIDEO_WINDOW_BYTES = 8 * 1024;
@@ -232,7 +232,7 @@ public final class BluetoothWire {
         sideRecord(2, bytes, length);
     }
     public void event(int event) throws IOException {
-        if (event < PHONE_ON || event > PHONE_IN_USE) throw new IOException("Unknown event");
+        if (event < PHONE_ON || event > PIN_FAILED) throw new IOException("Unknown event");
         sideRecord(EVENT, new byte[]{(byte)event}, 1);
     }
 }

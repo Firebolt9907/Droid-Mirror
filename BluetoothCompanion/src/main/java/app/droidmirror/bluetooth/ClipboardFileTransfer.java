@@ -12,7 +12,7 @@ import java.nio.file.Files;
 import java.util.UUID;
 import java.util.function.Consumer;
 
-/** Serialized on ClipboardSyncClient's worker. One bounded, stop-and-wait transfer per direction. */
+/** Serialized on ClipboardSyncClient's worker. One bounded, negotiated-window transfer per direction. */
 final class ClipboardFileTransfer {
     private final Context context;
     private final Consumer<JSONObject> events;
@@ -23,6 +23,7 @@ final class ClipboardFileTransfer {
     private int outgoingSize, sentOffset;
     private String incoming, incomingName, incomingToken;
     private int incomingSize;
+    private int incomingWindow, outgoingWindow, chunksSinceAck;
     private ByteArrayOutputStream bytes;
     private long sentAt, receivedAt;
 
@@ -83,7 +84,7 @@ final class ClipboardFileTransfer {
         if (snapshot.size() != size) return;
         outgoing = UUID.randomUUID().toString(); outgoingData = snapshot.toByteArray();
         outgoingSize = size; sentOffset = 0; sentAt = now;
-        events.accept(new JSONObject().put("type", "clipboardFileBegin").put("id", outgoing).put("name", name).put("size", size));
+        events.accept(new JSONObject().put("type", "clipboardFileBegin").put("id", outgoing).put("name", name).put("size", size).put("window", ClipboardFilePolicy.WINDOW));
     }
     void receive(JSONObject event, IClipboardBridge service) throws Exception {
         String type = event.optString("type"), id = event.optString("id");
@@ -101,8 +102,11 @@ final class ClipboardFileTransfer {
             }
             cancelOutgoing();
             incoming = id; incomingName = name; incomingSize = (int) size; incomingToken = token;
+            incomingWindow = Math.max(1, Math.min(event.optInt("window", 1), ClipboardFilePolicy.WINDOW));
+            chunksSinceAck = 0;
             bytes = new ByteArrayOutputStream(); receivedAt = SystemClock.elapsedRealtime();
-            if (size == 0) complete(service); else emit("clipboardFileAck", id, 0);
+            if (size == 0) complete(service);
+            else events.accept(new JSONObject().put("type", "clipboardFileAck").put("id", id).put("offset", 0).put("window", incomingWindow));
         } else if (type.equals("clipboardFileChunk") && id.equals(incoming)) {
             if (!incomingToken.equals(service.readToken()) || event.optInt("offset", -1) != bytes.size()) {
                 cancelIncoming(); return;
@@ -116,7 +120,9 @@ final class ClipboardFileTransfer {
                 cancelIncoming(); return;
             }
             bytes.write(chunk); receivedAt = SystemClock.elapsedRealtime();
-            if (bytes.size() == incomingSize) complete(service); else emit("clipboardFileAck", id, bytes.size());
+            chunksSinceAck++;
+            if (bytes.size() == incomingSize) complete(service);
+            else if (chunksSinceAck == incomingWindow) { chunksSinceAck = 0; emit("clipboardFileAck", id, bytes.size()); }
         } else if (type.equals("clipboardFileAck") && id.equals(outgoing)) {
             if (event.optInt("offset", -1) != sentOffset || !baseline.equals(service.readToken())) {
                 cancelOutgoing(); return;
@@ -124,11 +130,16 @@ final class ClipboardFileTransfer {
             if (sentOffset == outgoingSize) {
                 outgoing = null; outgoingData = null; return;
             }
-            int wanted = Math.min(ClipboardFilePolicy.CHUNK, outgoingSize - sentOffset);
-            byte[] chunk = java.util.Arrays.copyOfRange(outgoingData, sentOffset, sentOffset + wanted);
-            events.accept(new JSONObject().put("type", "clipboardFileChunk").put("id", id).put("offset", sentOffset)
-                .put("data", Base64.encodeToString(chunk, Base64.NO_WRAP).replace('+', '-').replace('/', '_')));
-            sentOffset += wanted; sentAt = SystemClock.elapsedRealtime();
+            if (sentOffset == 0) outgoingWindow = Math.max(1, Math.min(event.optInt("window", 1), ClipboardFilePolicy.WINDOW));
+            for (int i = 0; i < outgoingWindow; i++) {
+                int wanted = Math.min(ClipboardFilePolicy.CHUNK, outgoingSize - sentOffset);
+                byte[] chunk = java.util.Arrays.copyOfRange(outgoingData, sentOffset, sentOffset + wanted);
+                events.accept(new JSONObject().put("type", "clipboardFileChunk").put("id", id).put("offset", sentOffset)
+                    .put("data", Base64.encodeToString(chunk, Base64.NO_WRAP).replace('+', '-').replace('/', '_')));
+                sentOffset += wanted;
+                if (sentOffset == outgoingSize) break;
+            }
+            sentAt = SystemClock.elapsedRealtime();
         }
     }
     private void complete(IClipboardBridge service) throws Exception {

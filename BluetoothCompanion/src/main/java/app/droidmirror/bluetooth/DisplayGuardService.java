@@ -1,7 +1,10 @@
 package app.droidmirror.bluetooth;
 
+import com.genymobile.scrcpy.control.PinUnlock;
+
 import android.content.Context;
 import android.os.IBinder;
+import android.os.Process;
 import android.os.RemoteException;
 import android.os.ParcelFileDescriptor;
 import android.os.SystemClock;
@@ -11,11 +14,21 @@ import java.util.concurrent.TimeUnit;
 
 /** Shell daemon: display recovery, local-use detection and crash-surviving session audit. */
 public final class DisplayGuardService extends IDisplayGuard.Stub {
+    private static final int ROOT_UID = 0;
+    private static final int SHELL_UID = 2000;
+    private final Context context;
     private final com.genymobile.scrcpy.control.IdleUhidKeyboard keyboard = new com.genymobile.scrcpy.control.IdleUhidKeyboard();
     private final DisplayLease lease = new DisplayLease(new PhysicalDisplayPower(), SystemClock::elapsedRealtime, keyboard::destroy);
     private final LogicalDisplayPower logical = new LogicalDisplayPower();
     private final RemoteSession session = new RemoteSession(SystemClock::elapsedRealtime, this::ended);
     private final ScheduledExecutorService watchdog = Executors.newSingleThreadScheduledExecutor();
+    // Capture startup holds this service's monitor. Keep the physical panel guard
+    // independent so Android's asynchronous wake cannot expose PIN entry while
+    // that monitor is occupied by input injection or codec initialization.
+    private final ScheduledExecutorService startupDisplay = Executors.newSingleThreadScheduledExecutor();
+    private volatile IBinder startupOwner;
+    private volatile IBinder cancelledStartup;
+    private final java.util.concurrent.ExecutorService unlockInput = Executors.newSingleThreadExecutor();
     private IBinder owner;
     private IBinder.DeathRecipient death;
     private IStreamEvents observer;
@@ -29,7 +42,26 @@ public final class DisplayGuardService extends IDisplayGuard.Stub {
     private long lastAudioRecovery;
     private String computerName;
 
-    public DisplayGuardService() {
+    private void checkCaller() {
+        int callingUid = android.os.Binder.getCallingUid();
+        if (callingUid == Process.myUid() || callingUid == ROOT_UID || callingUid == SHELL_UID) {
+            return;
+        }
+        if (context != null && callingUid == context.getApplicationInfo().uid) {
+            return;
+        }
+        throw new SecurityException("Unauthorized caller UID: " + callingUid);
+    }
+
+    public DisplayGuardService() { this(null); }
+    public DisplayGuardService(Context context) {
+        this.context = context;
+        startupDisplay.scheduleWithFixedDelay(() -> {
+            IBinder token = startupOwner;
+            if (token == null) return;
+            try { lease.tick(); lease.keepDark(token); }
+            catch (Exception failure) { android.util.Log.w("DroidMirrorLease", "Startup panel guard could not reapply OFF"); }
+        }, 0, 20, TimeUnit.MILLISECONDS);
         watchdog.scheduleWithFixedDelay(() -> {
             synchronized (this) {
                 long now = SystemClock.elapsedRealtime();
@@ -58,11 +90,12 @@ public final class DisplayGuardService extends IDisplayGuard.Stub {
             synchronized (this) { session.finish(owner, RemoteSession.GUARD_STOP); keyboard.destroy(); closeCapture(); lease.recover(); }
         }, "DisplayRecovery"));
     }
-    public DisplayGuardService(Context context) { this(); }
     @Override public byte[] phoneAppearance() { return PhoneAppearance.read(); }
-    @Override public synchronized boolean startCapture(IBinder token, IStreamEvents events, ParcelFileDescriptor output, ParcelFileDescriptor controls, String computerName, boolean panelOff) {
+    @Override public synchronized boolean startCapture(IBinder token, IStreamEvents events, ParcelFileDescriptor output, ParcelFileDescriptor controls, String computerName, boolean panelOff, byte[] unlockPin) {
+        checkCaller();
         if (token == null || owner != null || capture != null || output == null || controls == null || lease.isRestoreNeeded()) {
             if (output != null) try { output.close(); } catch (java.io.IOException ignored) {}
+            if (unlockPin != null) java.util.Arrays.fill(unlockPin, (byte) 0);
             return false;
         }
         this.computerName = computerName;
@@ -75,6 +108,7 @@ public final class DisplayGuardService extends IDisplayGuard.Stub {
             captureError = "Could not check whether the phone is in use. Try again.";
         }
         if (!captureError.isEmpty()) {
+            if (unlockPin != null) java.util.Arrays.fill(unlockPin, (byte) 0);
             try { output.close(); } catch (java.io.IOException ignored) {}
             return false;
         }
@@ -91,33 +125,89 @@ public final class DisplayGuardService extends IDisplayGuard.Stub {
             // Own recovery before waking: encoder/transport startup must not leave the
             // physical lock screen visible while waiting for the first Mac frame.
             if (panelOff && !lease.acquire(token, 10000)) throw new IllegalStateException(lease.getLastError());
+            if (panelOff) startupOwner = token;
             if (!logical.interactive()) logical.wake();
             if (panelOff) lease.keepDark(token);
             Object generation = new Object(); captureGeneration = generation;
             captureStarted = SystemClock.elapsedRealtime(); captureError = "";
+            android.util.Log.i("DroidMirrorCapture", "Preparing privileged capture");
             capture = new PrivilegedCapture(output, controls, () -> watchdog.execute(() -> {
                 synchronized (DisplayGuardService.this) {
                     if (captureGeneration == generation) {
                         session.finish(token, RemoteSession.STOP); closeCapture(); capture = null; unlinkOwner();
                     }
                 }
-            }));
+            }), unlockPin != null);
+            if (unlockPin != null) {
+                byte[] pendingPin = unlockPin.clone();
+                try {
+                    unlockInput.execute(() -> completeUnlock(token, events, pendingPin, panelOff));
+                } catch (RuntimeException rejected) {
+                    java.util.Arrays.fill(pendingPin, (byte) 0); throw rejected;
+                }
+                // Header/configuration can reach the Mac decoder immediately.
+                // Pixel frames remain gated until completeUnlock confirms success.
+                return true;
+            }
             keyboard.create();
+            android.util.Log.i("DroidMirrorCapture", "Privileged capture startup returned");
             return true;
         } catch (Exception | LinkageError | AssertionError failure) {
             android.util.Log.e("DroidMirrorCapture", "Privileged capture startup failed", failure);
-            captureError = "Privileged capture unavailable (" + failure.getClass().getSimpleName() + ")";
-            try { output.close(); } catch (java.io.IOException ignored) {}
-            session.finish(token, RemoteSession.STOP); closeCapture(); unlinkOwner(); return false;
+            captureError = failure instanceof PinUnlock.Failure ? failure.getMessage()
+                : "Privileged capture unavailable (" + failure.getClass().getSimpleName() + ")";
+            try { output.close(); } catch (java.io.IOException ignored) {}\n            session.finish(token, RemoteSession.STOP); closeCapture(); unlinkOwner(); return false;
+        } finally { if (unlockPin == null || capture == null) startupOwner = null; if (unlockPin != null) java.util.Arrays.fill(unlockPin, (byte) 0); }
+    }
+    private void completeUnlock(IBinder token, IStreamEvents events, byte[] pin, boolean panelOff) {
+        synchronized (this) {
+            try {
+                if (owner != token || !session.owns(token) || capture == null || cancelledStartup == token) return;
+                PrivilegedCapture.initialize();
+                android.util.Log.i("DroidMirrorCapture", "Automatic unlock starting");
+                PinUnlock.unlock(pin, new PinUnlock.Device() {
+                    public boolean locked() throws Exception {
+                        if (panelOff && !lease.owns(token)) throw new IllegalStateException("Startup display lease expired");
+                        if (cancelledStartup == token || !token.isBinderAlive()) throw new RemoteException("Mirror startup cancelled");
+                        return logical.locked();
+                    }
+                    public void key(int code) throws Exception {
+                        if (panelOff) lease.keepDark(token);
+                        if (!com.genymobile.scrcpy.device.Device.pressReleaseKeycode(code, 0,
+                                com.genymobile.scrcpy.device.Device.INJECT_MODE_WAIT_FOR_FINISH))
+                            throw new IllegalStateException("Unlock input unavailable");
+                        if (panelOff) lease.keepDark(token);
+                    }
+                    public void sleep(long millis) { SystemClock.sleep(millis); }
+                    public long now() { return SystemClock.elapsedRealtime(); }
+                });
+                // Credential success is independent of codec/transport startup.
+                // An encoder failure must not keep a known-good PIN paused.
+                if (events != null) events.onUnlockConfirmed();
+                capture.unlockConfirmed();
+                android.util.Log.i("DroidMirrorCapture", "Automatic unlock confirmed; releasing fresh video");
+                keyboard.create();
+            } catch (Exception | LinkageError | AssertionError failure) {
+                android.util.Log.e("DroidMirrorCapture", "Automatic unlock startup failed", failure);
+                captureError = failure instanceof PinUnlock.Failure ? failure.getMessage()
+                    : "Automatic unlock failed; streaming can be retried with manual unlock.";
+                session.finish(token, RemoteSession.UNLOCK_FAILED);
+                closeCapture(); unlinkOwner();
+            } finally {
+                if (startupOwner == token) startupOwner = null;
+                java.util.Arrays.fill(pin, (byte) 0);
+            }
         }
     }
     @Override public synchronized boolean acquire(IBinder token, IStreamEvents events, boolean panelOff) {
+        checkCaller();
         if (owner != token || token == null || !session.owns(token)) return false;
         observer = events;
         if (panelOff && !lease.heartbeat(token)) return false;
         return session.heartbeat(token);
     }
     @Override public synchronized boolean startAudio(IBinder token, ParcelFileDescriptor output) {
+        checkCaller();
         if (audio != null && audio.isReleased()) audio = null;
         if (token == null || owner != token || !session.owns(token) || capture == null || audio != null
                 || android.os.Build.VERSION.SDK_INT < 31) {
@@ -131,11 +221,13 @@ public final class DisplayGuardService extends IDisplayGuard.Stub {
         }
     }
     @Override public synchronized void stopAudio(IBinder token) {
+        checkCaller();
         if (token == null || owner != token) return;
         if (audio != null) audio.close(); // Retain until release/volume restoration completes.
     }
     private void closeCapture() { stopAudio(owner); keyboard.destroy(); if (capture != null) { capture.close(); capture = null; } }
     @Override public synchronized boolean upgradeVideo(IBinder token, int maxSize, int fps, int bitRate) {
+        checkCaller();
         if (token == null || owner != token || !session.owns(token) || capture == null) return false;
         try {
             capture.upgradeVideo(new WirelessVideoProfile(maxSize, fps, bitRate));
@@ -146,6 +238,7 @@ public final class DisplayGuardService extends IDisplayGuard.Stub {
         }
     }
     @Override public synchronized boolean restoreBluetoothVideo(IBinder token) {
+        checkCaller();
         if (token==null || owner!=token || !session.owns(token) || capture==null) return false;
         try { capture.restoreBluetoothVideo(); return true; }
         catch (RuntimeException failed) {
@@ -158,21 +251,27 @@ public final class DisplayGuardService extends IDisplayGuard.Stub {
         if (!alive && owner == token) { closeCapture(); unlinkEndedOwner(); }
         return alive;
     }
-    @Override public synchronized boolean release(IBinder token) {
+    @Override public boolean release(IBinder token) {
+        if (startupOwner == token) cancelledStartup = token;
+        synchronized (this) {
         boolean audited = session.owns(token) ? session.finish(token, RemoteSession.STOP)
             : Boolean.TRUE.equals(audits.get(token));
         if (owner == token) { closeCapture(); unlinkOwner(); }
         return audited;
+        }
     }
     @Override public synchronized void localUse(IBinder token) {
+        checkCaller();
         session.finish(token, RemoteSession.LOCAL_USE); unlinkEndedOwner();
     }
     @Override public synchronized boolean restoreDisplay() {
+        checkCaller();
         session.finish(owner, RemoteSession.RECOVERY);
         keyboard.destroy();
         closeCapture(); boolean restored = lease.recover(); unlinkOwner(); return restored;
     }
     @Override public boolean grantSecureSettings() {
+        checkCaller();
         // Fixed package and permission: this is not an arbitrary privileged command API.
         int user = android.os.Binder.getCallingUid() / 100000;
         Process command = null;
@@ -226,11 +325,12 @@ public final class DisplayGuardService extends IDisplayGuard.Stub {
         owner = null; death = null; observer = null;
     }
     @Override public void destroy() {
+        checkCaller();
         synchronized (this) {
             session.finish(owner, RemoteSession.GUARD_STOP);
             keyboard.destroy();
             if (!lease.recover()) return;
-            closeCapture(); unlinkOwner(); watchdog.shutdown();
+            closeCapture(); unlinkOwner(); watchdog.shutdown(); startupDisplay.shutdown(); unlockInput.shutdown();
         }
         System.exit(0); // Do not hold this monitor while shutdown hooks acquire it.
     }

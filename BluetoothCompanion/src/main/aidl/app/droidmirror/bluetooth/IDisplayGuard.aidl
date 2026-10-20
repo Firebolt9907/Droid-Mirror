@@ -9,7 +9,7 @@ interface IDisplayGuard {
     boolean release(IBinder owner) = 3;
     boolean restoreDisplay() = 4;
     String getLastError() = 5;
-    boolean startCapture(IBinder owner, IStreamEvents observer, in ParcelFileDescriptor output, in ParcelFileDescriptor controls, String computerName, boolean panelOff) = 6;
+    boolean startCapture(IBinder owner, IStreamEvents observer, in ParcelFileDescriptor output, in ParcelFileDescriptor controls, String computerName, boolean panelOff, in byte[] unlockPin) = 6;
     void localUse(IBinder owner) = 7;
     boolean upgradeVideo(IBinder owner, int maxSize, int fps, int bitRate) = 8;
     boolean restoreBluetoothVideo(IBinder owner) = 9;

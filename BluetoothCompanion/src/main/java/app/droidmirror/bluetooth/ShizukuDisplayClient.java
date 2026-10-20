@@ -21,6 +21,7 @@ import rikka.shizuku.Shizuku;
 
 /** App-side lease client. Recovery itself is implemented outside this process. */
 final class ShizukuDisplayClient implements AutoCloseable {
+    private final Context context;
     private final IBinder owner = new Binder();
     private final ScheduledExecutorService heartbeats = Executors.newSingleThreadScheduledExecutor();
     private final Handler main = new Handler(Looper.getMainLooper());
@@ -33,6 +34,10 @@ final class ShizukuDisplayClient implements AutoCloseable {
     private volatile boolean registered;
     private final CompletableFuture<IDisplayGuard> ready = new CompletableFuture<>();
     private final IStreamEvents observer = new IStreamEvents.Stub() {
+        @Override public void onUnlockConfirmed() {
+            try { SavedUnlockPin.completed(context); }
+            catch (Exception failure) { status.accept("Could not update automatic unlock state. Save the PIN again on your phone."); }
+        }
         @Override public void onEnded(int cause, boolean lockedAndAwake) { ended.accept(cause, lockedAndAwake); }
     };
     private final Shizuku.UserServiceArgs args;
@@ -53,7 +58,7 @@ final class ShizukuDisplayClient implements AutoCloseable {
         return new Shizuku.UserServiceArgs(new ComponentName(context.getPackageName(), DisplayGuardService.class.getName()))
             // Bump when the embedded capture code changes: Shizuku daemons can
             // survive APK replacement and otherwise keep running the old code.
-            .daemon(true).processNameSuffix("display_guard").debuggable(false).version(49);
+            .daemon(true).processNameSuffix("display_guard").debuggable(false).version(52);
     }
     private final ServiceConnection connection = new ServiceConnection() {
         @Override public void onServiceConnected(ComponentName name, IBinder binder) {
@@ -73,6 +78,7 @@ final class ShizukuDisplayClient implements AutoCloseable {
     };
     ShizukuDisplayClient(Context context, boolean panelOff, Consumer<String> status,
                          BiConsumer<Integer, Boolean> ended, Consumer<Boolean> audit) {
+        this.context = context.getApplicationContext();
         this.status = status; this.panelOff = panelOff; this.ended = ended; this.audit = audit;
         args = arguments(context);
         if (!authorized()) { closed = true; auditKnown = true; heartbeats.shutdown();
@@ -87,7 +93,13 @@ final class ShizukuDisplayClient implements AutoCloseable {
     }
     void startVideo(ParcelFileDescriptor output, ParcelFileDescriptor controls, String computerName) throws Exception {
         IDisplayGuard remote = ready.get(10, TimeUnit.SECONDS);
-        if (closed || !remote.startCapture(owner, observer, output, controls, computerName, panelOff)) throw new IllegalStateException(remote.getLastError());
+        if (closed) throw new IllegalStateException("Mirror startup cancelled");
+        if (SavedUnlockPin.paused(context)) status.accept("Automatic PIN entry is cooling down for 15 seconds; streaming remains available for manual unlock.");
+        byte[] pin = SavedUnlockPin.beginAttempt(context);
+        try {
+            if (!remote.startCapture(owner, observer, output, controls, computerName, panelOff, pin))
+                throw new IllegalStateException(remote.getLastError());
+        } finally { if (pin != null) java.util.Arrays.fill(pin, (byte) 0); }
     }
     void localUse() {
         if (closed) return;

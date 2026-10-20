@@ -90,6 +90,48 @@ enum NotificationRuntime {
         }
         precondition(sent == fileData)
         sync.receive(["type": "clipboardFileAck", "id": sendID, "offset": sent.count])
+        // Regression: a 66 KiB screenshot takes three eight-chunk batches,
+        // rather than 22 application round trips. Exact bytes and final ACK matter.
+        let screenshot = Data((0..<(66 * 1024)).map { UInt8($0 % 251) })
+        try! screenshot.write(to: source)
+        for requestedWindow in [8, 999] {
+            copyFile()
+            let windowID = controller.sent.last!["id"] as! String
+            precondition(controller.sent.last!["window"] as? Int == 8)
+            var received = Data()
+            var batches = 0
+            while received.count < screenshot.count {
+                let before = controller.sent.count
+                sync.receive(["type": "clipboardFileAck", "id": windowID, "offset": received.count, "window": requestedWindow])
+                let chunks = Array(controller.sent.dropFirst(before))
+                precondition(chunks.count <= 8 && !chunks.isEmpty)
+                for chunk in chunks {
+                    precondition(chunk["offset"] as? Int == received.count)
+                    received.append(Data(base64Encoded: (chunk["data"] as! String).replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/"))!)
+                }
+                batches += 1
+            }
+            precondition(received == screenshot && batches == 3)
+            sync.receive(["type": "clipboardFileAck", "id": windowID, "offset": received.count])
+            precondition(sync.status == "Clipboard mirroring ready")
+        }
+        let windowReceiveID = UUID().uuidString
+        sync.receive(["type": "clipboardFileBegin", "id": windowReceiveID, "name": "screenshot.bin", "size": screenshot.count, "window": 8])
+        precondition(controller.sent.last!["window"] as? Int == 8)
+        let initialAcks = controller.sent.count
+        for offset in stride(from: 0, to: screenshot.count, by: ClipboardFilePolicy.chunk) {
+            let end = min(offset + ClipboardFilePolicy.chunk, screenshot.count)
+            sync.receive(["type": "clipboardFileChunk", "id": windowReceiveID, "offset": offset, "data": screenshot.subdata(in: offset..<end).base64EncodedString()])
+            precondition(controller.sent.count - initialAcks == (end == screenshot.count ? 3 : end / (8 * ClipboardFilePolicy.chunk)))
+        }
+        let screenshotURL = (board.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as! [URL])[0]
+        precondition(try! Data(contentsOf: screenshotURL) == screenshot)
+        // A partial/out-of-order batch acknowledgment must not advance the sender.
+        copyFile()
+        let badAckID = controller.sent.last!["id"] as! String
+        sync.receive(["type": "clipboardFileAck", "id": badAckID, "offset": 0, "window": 8])
+        sync.receive(["type": "clipboardFileAck", "id": badAckID, "offset": ClipboardFilePolicy.chunk])
+        precondition(controller.sent.last!["type"] as? String == "clipboardFileCancel")
         try! Data(repeating: 0, count: 5_000_000).write(to: source)
         let beforeLarge = controller.sent.count
         copyFile(); precondition(controller.sent.count == beforeLarge)

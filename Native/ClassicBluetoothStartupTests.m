@@ -588,6 +588,9 @@ int main(int argc, const char *argv[]) {
         [busyBridge receiveEvent:8];
         [busyBridge receiveEvent:8];
         assert(busyBridge.eventMask == 0x80); // Distinct, deduplicated startup rejection.
+        [busyBridge receiveEvent:9]; [busyBridge receiveEvent:9];
+        [busyBridge receiveEvent:10]; [busyBridge receiveEvent:10];
+        assert(busyBridge.eventMask == 0x380); // PIN reasons survive beyond the old 8-bit mask.
         TestActiveServiceRecovery();
         TestStalledCandidateRecovery();
         TestDelayedInputService();

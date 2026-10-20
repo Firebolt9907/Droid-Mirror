@@ -48,6 +48,7 @@ class BlePeripheral(
     private val connected = ConcurrentHashMap.newKeySet<android.bluetooth.BluetoothDevice>()
     private val subscribed = ConcurrentHashMap<android.bluetooth.BluetoothDevice, Boolean>()
     private val indicationInFlight = ConcurrentHashMap.newKeySet<android.bluetooth.BluetoothDevice>()
+    private val notificationMode = ConcurrentHashMap.newKeySet<android.bluetooth.BluetoothDevice>()
     private val pendingIndication = ConcurrentHashMap<android.bluetooth.BluetoothDevice, java.util.ArrayDeque<ByteArray>>()
     private val pendingMessages = ConcurrentHashMap<android.bluetooth.BluetoothDevice, BleOutboundQueue>()
     private val sessions = ConcurrentHashMap<android.bluetooth.BluetoothDevice, BleSecureSession>()
@@ -111,6 +112,8 @@ class BlePeripheral(
         characteristic = BluetoothGattCharacteristic(
             ENDPOINT_UUID,
             BluetoothGattCharacteristic.PROPERTY_WRITE or
+                BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE or
+                BluetoothGattCharacteristic.PROPERTY_NOTIFY or
                 BluetoothGattCharacteristic.PROPERTY_INDICATE,
             BluetoothGattCharacteristic.PERMISSION_READ or
                 BluetoothGattCharacteristic.PERMISSION_WRITE
@@ -168,6 +171,7 @@ class BlePeripheral(
         subscribed.clear()
         indicationInFlight.clear()
         pendingMessages.clear()
+        notificationMode.clear()
         pendingIndication.clear()
         sessions.clear(); fragments.clear(); mtu.clear()
     }
@@ -257,7 +261,7 @@ class BlePeripheral(
             frames.addAll(BleFragments.split(sealed, nextMessage++, (mtu[device] ?: 23) - 3))
         }
         val frame = frames.pollFirst() ?: return
-        characteristic?.let { sendUpdate(device, it, true, frame) }
+        characteristic?.let { sendUpdate(device, it, !notificationMode.contains(device), frame) }
     }
 
     @Synchronized
@@ -294,6 +298,7 @@ class BlePeripheral(
         if (mediaDevice == device) { mediaDevice = null; onMediaSubscription(false, ++mediaGeneration) }
         if (clipboardDevice == device) { clipboardDevice = null; onClipboardSubscription(false, ++clipboardGeneration, false) }
         if (taskDevice == device) { taskDevice = null; onTaskSubscription(false, ++taskGeneration) }
+        notificationMode.remove(device)
         subscribed.remove(device)
         indicationInFlight.remove(device)
         pendingIndication.remove(device)
@@ -309,6 +314,7 @@ class BlePeripheral(
         }
     }
     @Synchronized fun revokeTrust() {
+        notificationMode.clear()
         sessions.clear(); fragments.clear(); pendingIndication.clear(); pendingMessages.clear()
         revokeClients()
     }
@@ -331,6 +337,7 @@ class BlePeripheral(
                 revokeSession(device)
                 BleLinkMtu.disconnected(device.address)
                 connected -= device
+                notificationMode.remove(device)
                 subscribed.remove(device)
                 indicationInFlight.remove(device)
                 pendingIndication.remove(device)
@@ -533,7 +540,8 @@ class BlePeripheral(
         ) {
             // CoreBluetooth may read the CCC while discovering this service.
             // Leaving that ATT request unanswered stalls discovery until timeout.
-            val value = if (subscribed[device] == true) BluetoothGattDescriptor.ENABLE_INDICATION_VALUE
+            val value = if (notificationMode.contains(device)) BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+                else if (subscribed[device] == true) BluetoothGattDescriptor.ENABLE_INDICATION_VALUE
                 else BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE
             val status = when {
                 descriptor.uuid != CCC_UUID -> BluetoothGatt.GATT_REQUEST_NOT_SUPPORTED
@@ -556,15 +564,19 @@ class BlePeripheral(
         ) {
             val valid = descriptor.uuid == CCC_UUID && !preparedWrite && offset == 0 &&
                 (value.contentEquals(BluetoothGattDescriptor.ENABLE_INDICATION_VALUE) ||
+                 value.contentEquals(BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE) ||
                  value.contentEquals(BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE))
-            android.util.Log.i("DroidMirrorNotifications", "Notification subscription: valid=$valid enabled=${value.contentEquals(BluetoothGattDescriptor.ENABLE_INDICATION_VALUE)}")
+            android.util.Log.i("DroidMirrorNotifications", "Notification subscription: valid=$valid enabled=${!value.contentEquals(BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE)}")
             if (valid) {
                 synchronized(this@BlePeripheral) {
                     // Core Bluetooth can resubscribe without disconnecting the
                     // shared physical link. Its next hello belongs to a new
                     // authenticated session, not the old session's nonce state.
                     revokeSession(device)
-                    if (value.contentEquals(BluetoothGattDescriptor.ENABLE_INDICATION_VALUE)) subscribed[device] = true
+                    if (!value.contentEquals(BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE)) {
+                        subscribed[device] = true
+                        if (value.contentEquals(BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)) notificationMode.add(device)
+                    }
                 }
             }
             if (responseNeeded) server?.sendResponse(

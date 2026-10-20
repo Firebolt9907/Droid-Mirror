@@ -4,6 +4,7 @@ package app.droidmirror.bluetooth;
 public final class ClipboardFilePolicy {
     public static final int LIMIT = 5_000_000;
     public static final int CHUNK = 3072;
+    public static final int WINDOW = 8;
     public static boolean allowed(long size) { return size >= 0 && size < LIMIT; }
     public static boolean nameAllowed(String name) {
         return name != null && !name.isEmpty() && !name.equals(".") && !name.equals("..")

@@ -40,6 +40,9 @@ public class SurfaceEncoder implements AsyncProcessor {
     private final SurfaceCapture capture;
     private final Streamer streamer;
     private Runnable firstFrameListener;
+    private VideoStartGate startGate;
+
+    public void setStartGate(VideoStartGate gate) { startGate = gate; }
 
     public void setFirstFrameListener(Runnable listener) { firstFrameListener = listener; }
 
@@ -315,6 +318,15 @@ public class SurfaceEncoder implements AsyncProcessor {
                 // On EOS, there might be data or not, depending on bufferInfo.size
                 if (outputBufferId >= 0 && bufferInfo.size > 0) {
                     boolean isConfig = (bufferInfo.flags & MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0;
+                    if (startGate != null) {
+                        if (startGate.takeSyncRequest()) {
+                            Bundle sync = new Bundle();
+                            sync.putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0);
+                            codec.setParameters(sync);
+                        }
+                        if (!startGate.shouldSend(bufferInfo.presentationTimeUs, isConfig,
+                                (bufferInfo.flags & MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0)) continue;
+                    }
                     if (freshness != null) {
                         boolean keyframe = (bufferInfo.flags & MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0;
                         boolean send = freshness.shouldSend(bufferInfo.presentationTimeUs, System.nanoTime() / 1000, isConfig, keyframe);

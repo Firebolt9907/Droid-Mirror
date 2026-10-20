@@ -21,6 +21,12 @@ public final class AdbStreamSession implements AutoCloseable {
     public static final int ATTACH = IBinder.FIRST_CALL_TRANSACTION;
     public static final int DISCONNECT = ATTACH + 1;
     public static final int ENDED = ATTACH + 2;
+    public static final int PREPARE_UNLOCK = ATTACH + 3;
+    public static final int VERIFY_CALLER = ATTACH + 4;
+    private final com.genymobile.scrcpy.video.VideoStartGate videoGate = new com.genymobile.scrcpy.video.VideoStartGate();
+    public com.genymobile.scrcpy.video.VideoStartGate videoStartGate() { return videoGate; }
+    private volatile boolean preparationSucceeded;
+    private final java.util.concurrent.atomic.AtomicBoolean unlockRequested = new java.util.concurrent.atomic.AtomicBoolean();
     private final Handler main = new Handler(Looper.getMainLooper());
     private final CleanUp cleanUp;
     private boolean armed;
@@ -31,15 +37,46 @@ public final class AdbStreamSession implements AutoCloseable {
     private long lastActivity;
     private final Binder owner = new Binder() {
         @Override protected boolean onTransact(int code, Parcel data, Parcel reply, int flags) throws RemoteException {
-            if (code != ATTACH && code != DISCONNECT) return super.onTransact(code, data, reply, flags);
+            if (code != ATTACH && code != DISCONNECT && code != PREPARE_UNLOCK && code != VERIFY_CALLER) return super.onTransact(code, data, reply, flags);
             data.enforceInterface(DESCRIPTOR);
+            if (code == VERIFY_CALLER) {
+                IBinder verifier = data.readStrongBinder();
+                byte[] nonce = data.createByteArray();
+                if (verifier == null) throw new IllegalArgumentException("Verifier binder required");
+                Parcel req = Parcel.obtain();
+                Parcel rep = Parcel.obtain();
+                try {
+                    req.writeInterfaceToken(DESCRIPTOR);
+                    req.writeByteArray(nonce);
+                    verifier.transact(1, req, rep, 0);
+                    rep.readException();
+                } finally {
+                    req.recycle();
+                    rep.recycle();
+                }
+                if (reply != null) reply.writeNoException();
+                return true;
+            }
+            if (code == PREPARE_UNLOCK) {
+                byte[] pin = data.createByteArray();
+                boolean success = false;
+                try {
+                    if (!unlockRequested.compareAndSet(false, true)) throw new IllegalStateException("Unlock already attempted");
+                    if (pin != null) unlock(pin);
+                    success = true;
+                } catch (Exception error) { Ln.w("Automatic unlock failed; check the saved PIN in the Android app"); }
+                finally { if (pin != null) java.util.Arrays.fill(pin, (byte) 0); }
+                if (reply != null) { reply.writeNoException(); reply.writeInt(success ? 1 : 0); }
+                return true;
+            }
             if (code == ATTACH) {
                 IBinder callback = data.readStrongBinder();
+                preparationSucceeded = true; videoGate.open(System.nanoTime() / 1000);
                 main.post(() -> {
                     if (closed) signal(callback, ENDED);
                     else notification = callback;
                 });
-            } else main.post(() -> Looper.getMainLooper().quitSafely());
+            } else { main.post(() -> Looper.getMainLooper().quitSafely()); }
             return true;
         }
     };
@@ -63,8 +100,20 @@ public final class AdbStreamSession implements AutoCloseable {
         }
     };
 
-    public AdbStreamSession(CleanUp cleanUp) {
+    public AdbStreamSession(CleanUp cleanUp) throws java.io.IOException {
         this.cleanUp = cleanUp;
+        // The app returns the PIN only over phone-local Binder. Nothing travels on
+        // the Mac control channel, command line, environment or video stream.
+        if (announce(true)) {
+            // Configure the encoder/decoder while the app prepares credentials.
+            // Only codec metadata can pass until the successful ATTACH callback.
+            main.postDelayed(() -> {
+                if (!closed && !preparationSucceeded) {
+                    Ln.w("Automatic unlock preparation timed out; check the Android app");
+                    Looper.getMainLooper().quitSafely();
+                }
+            }, 8000);
+        } else videoGate.open(System.nanoTime() / 1000);
         main.post(tick);
     }
 
@@ -73,19 +122,43 @@ public final class AdbStreamSession implements AutoCloseable {
         main.post(() -> {
             if (closed || announced) return;
             announced = true;
-            Intent intent = new Intent().setComponent(new ComponentName("app.droidmirror.bluetooth",
-                    "app.droidmirror.bluetooth.AdbStreamService"));
-            Bundle extras = new Bundle();
-            extras.putBinder("owner", owner);
-            extras.putLong("startedElapsed", SystemClock.elapsedRealtime());
-            intent.putExtras(extras);
-            try {
-                if (ServiceManager.getActivityManager().startForegroundService(intent) == null) {
-                    Ln.w("Install the DroidMirror companion for the phone stream Live Activity");
-                }
-            } catch (ReflectiveOperationException | RuntimeException e) {
-                Ln.w("Phone stream Live Activity unavailable", e);
+            announce(false);
+        });
+    }
+
+    private boolean announce(boolean prepareUnlock) {
+        Intent intent = new Intent().setComponent(new ComponentName("app.droidmirror.bluetooth",
+                "app.droidmirror.bluetooth.AdbStreamService"));
+        Bundle extras = new Bundle();
+        extras.putBinder("owner", owner);
+        extras.putLong("startedElapsed", SystemClock.elapsedRealtime());
+        extras.putBoolean("prepareUnlock", prepareUnlock);
+        intent.putExtras(extras);
+        try {
+            boolean started = ServiceManager.getActivityManager().startForegroundService(intent) != null;
+            if (started) announced = true;
+            return started;
+        } catch (ReflectiveOperationException | RuntimeException error) {
+            Ln.w("Phone stream Live Activity unavailable", error); return false;
+        }
+    }
+
+    private static void unlock(byte[] pin) throws Exception {
+        if (!com.genymobile.scrcpy.control.PinUnlock.valid(pin)) throw new IllegalArgumentException("Invalid PIN");
+        Object window = service("window", "android.view.IWindowManager");
+        java.lang.reflect.Method locked = Class.forName("android.view.IWindowManager").getMethod("isKeyguardLocked");
+        if (!(boolean) locked.invoke(window)) return;
+        if (!Device.isScreenOn(0)) {
+            Device.pressReleaseKeycode(android.view.KeyEvent.KEYCODE_WAKEUP, 0, Device.INJECT_MODE_WAIT_FOR_FINISH);
+            SystemClock.sleep(150);
+        }
+        com.genymobile.scrcpy.control.PinUnlock.unlock(pin, new com.genymobile.scrcpy.control.PinUnlock.Device() {
+            public boolean locked() throws Exception { return (boolean) locked.invoke(window); }
+            public void key(int keycode) throws Exception {
+                if (!Device.pressReleaseKeycode(keycode, 0, Device.INJECT_MODE_WAIT_FOR_FINISH))\n                    throw new IllegalStateException("Unlock input unavailable");
             }
+            public void sleep(long millis) { SystemClock.sleep(millis); }
+            public long now() { return SystemClock.elapsedRealtime(); }
         });
     }
 

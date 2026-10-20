@@ -110,6 +110,31 @@ import CryptoKit
             let reply = try exchange(JSONSerialization.jsonObject(with: sealed) as! [String: Any])
             check(try client.open(reply)["text"] as? String == expected)
         }
+        // An entire negotiated clipboard window must fit the bounded queue,
+        // yield to control traffic, and retain valid encrypted sequence ordering.
+        let windowData = Data(repeating: 255, count: 3072).base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_")
+        let windowID = UUID().uuidString
+        for offset in stride(from: 0, to: 8 * 3072, by: 3072) {
+            check(scheduled.append(["type": "clipboardFileChunk", "id": windowID, "offset": offset, "data": windowData], deadline: 60))
+        }
+        check(scheduled.append(["type": "ping", "text": "window-control"], deadline: 60))
+        check(scheduled.next(now: 1)!.object["text"] as? String == "window-control")
+        for offset in stride(from: 0, to: 8 * 3072, by: 3072) {
+            let event = scheduled.next(now: 1)!.object
+            check(event["offset"] as? Int == offset)
+            let sealed = try client.seal(event)
+            // Use real fragment reassembly on each encrypted message before exchange.
+            var receiver = BLEFragments()
+            var assembled: Data?
+            for frame in BLEFragments.split(sealed, id: UInt32(offset + 1), maximum: 185) {
+                assembled = receiver.accept(frame)
+            }
+            check(assembled == sealed)
+            let reply = try exchange(JSONSerialization.jsonObject(with: assembled!) as! [String: Any])
+            check(try client.open(reply)["data"] as? String == windowData)
+        }
+        check(scheduled.count == 0)
         try input.fileHandleForWriting.close(); task.waitUntilExit(); precondition(task.terminationStatus == 0)
         print("PASS: Swift ↔ Android Kotlin mutual authentication, AES-GCM, tampering, replay, duplicate handshake, fragmentation")
     }

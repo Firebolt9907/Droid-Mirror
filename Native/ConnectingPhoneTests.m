@@ -135,6 +135,8 @@ int main(void) {
         // overlay has already been installed, then presents the first picture.
         SDL_Renderer *renderer = SDL_CreateRenderer(video, "metal");
         assert(renderer);
+        DroidMirrorVideoSurfaceReady();
+        assert(native.contentView.subviews.lastObject == overlay); // Empty Metal view never covers loading.
         assert(SDL_SetRenderDrawColor(renderer, 0, 0, 255, 255));
         assert(SDL_RenderClear(renderer));
         // High contrast detail makes the blur and center-preserving zoom visible.
@@ -145,7 +147,9 @@ int main(void) {
             assert(SDL_RenderFillRect(renderer, &square));
         }
         assert(SDL_RenderPresent(renderer));
-        assert(native.contentView.subviews.lastObject != overlay); // SDL inserted video above it.
+        DroidMirrorVideoSurfaceReady();
+        assert(native.contentView.subviews.lastObject == overlay); // Recheck lazy drawable insertion.
+        assert(![overlay.layer animationForKey:@"firstFrameReveal"]); // Warmup does not start entrance.
         DMFinishConnectingPhone();
 
         assert(native.contentView.subviews.lastObject == overlay);
@@ -212,6 +216,12 @@ int main(void) {
         assert(!reducedOverlay.superview && ![reducedOverlay.layer animationForKey:@"firstFrameReveal"]);
         assert(![videoLayer animationForKey:@"firstFrameZoom"] && ![videoLayer animationForKey:@"firstFrameBlur"]);
         assert(!videoLayer.filters.count);
+        reduceMotion = NO;
+        PresentState(statePath, @"Black frame fallback", YES);
+        NSView *blackOverlay = native.contentView.subviews.lastObject;
+        DMFinishConnectingPhoneWithoutAnimation();
+        assert(!blackOverlay.superview && ![blackOverlay.layer animationForKey:@"firstFrameReveal"]);
+        assert(![videoLayer animationForKey:@"firstFrameZoom"] && ![videoLayer animationForKey:@"firstFrameBlur"]);
         method_setImplementation(motionGetter, originalMotionGetter);
         unsetenv("DROIDMIRROR_SESSION_STATE");
         [NSFileManager.defaultManager removeItemAtPath:statePath error:nil];

@@ -18,6 +18,7 @@ final class ClassicBluetoothTransport {
     enum Event: String {
         case phoneOn = "PHONE_ON", sessionEnded = "SESSION_ENDED", phoneLocalUse = "PHONE_LOCAL_USE"
         case streamStarted = "STREAM_STARTED", captureFailed = "CAPTURE_FAILED", phoneInUse = "PHONE_IN_USE"
+        case pinPaused = "PIN_PAUSED", pinFailed = "PIN_FAILED"
         case wirelessActive = "WIFI_ACTIVE", bluetoothActive = "BLUETOOTH_ACTIVE", wirelessRecovering = "WIFI_RECOVERING"
     }
     private func pollEvents() {
@@ -191,6 +192,9 @@ final class ClassicBluetoothTransport {
                 guard token == generation else { throw CancellationError() }
                 let data = (try? Data(contentsOf: url)) ?? Data()
                 let text = String(decoding: data, as: UTF8.self)
+                if text.contains("EVENT PIN_FAILED") {
+                    throw RunnerError.failed(text)
+                }
                 if text.contains("EVENT PHONE_IN_USE") {
                     throw RunnerError.failed(PhoneUsePolicy.errorMessage)
                 }

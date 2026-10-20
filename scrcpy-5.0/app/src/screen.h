@@ -1,5 +1,6 @@
 #ifndef SC_SCREEN_H
 #define SC_SCREEN_H
+#include "startup_reveal.h"
 
 #include "common.h"
 
@@ -102,6 +103,7 @@ struct sc_screen {
     struct SDL_FRect rect;
     bool window_shown;
     bool reported_visible;
+    struct sc_startup_reveal startup_reveal;
     bool secure_black_frame;
     bool secure_request_pending;
     Uint64 secure_check_at;

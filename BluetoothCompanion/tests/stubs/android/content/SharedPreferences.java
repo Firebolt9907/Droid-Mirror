@@ -3,10 +3,12 @@ package android.content;
 public interface SharedPreferences {
     boolean getBoolean(String key, boolean fallback);
     String getString(String key, String fallback);
+    default boolean contains(String key) { return getString(key, null) != null; }
     Editor edit();
     interface Editor {
         Editor putBoolean(String key, boolean value);
         Editor putString(String key, String value);
+        default Editor clear() { throw new UnsupportedOperationException(); }
         boolean commit();
     }
 }

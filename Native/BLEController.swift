@@ -470,26 +470,43 @@ final class BLEController: NSObject, ObservableObject {
         }
         return id
     }
-    private func queue(_ value: Data) throws {
+    private func queue(_ value: Data, startWriting: Bool = true) throws {
         guard let phone, endpointCharacteristic != nil else { throw BLECryptoError.invalid }
         // Avoid ATT long/prepared writes: fragments fit a single negotiated PDU.
-        let maximum = min(phone.maximumWriteValueLength(for: .withResponse), phone.maximumWriteValueLength(for: .withoutResponse))
+        let writeType: CBCharacteristicWriteType = authenticated && endpointCharacteristic?.properties.contains(.writeWithoutResponse) == true ? .withoutResponse : .withResponse
+        let maximum = min(phone.maximumWriteValueLength(for: writeType), phone.maximumWriteValueLength(for: .withoutResponse))
         let frames = BLEFragments.split(value, id: messageID, maximum: maximum)
         guard !frames.isEmpty, writes.reduce(0, { $0 + $1.count }) + frames.reduce(0, { $0 + $1.count }) <= 262144 else { throw BLECryptoError.invalid }
-        messageID &+= 1; writes.append(contentsOf: frames); drain()
+        messageID &+= 1; writes.append(contentsOf: frames)
+        if startWriting { drain() }
     }
     private func drain() {
         guard !writing, let phone, let endpointCharacteristic else { return }
-        if writes.isEmpty {
-            guard authenticated, let session, let message = outbound.next(now: uptime) else { return }
-            do { try queue(session.seal(message.object)) }
-            catch { rebuildBLESession(phone) }
-            return
-        }
-        writing = true
-        writeStartedAt = uptime
-        phone.writeValue(writes.removeFirst(), for: endpointCharacteristic, type: .withResponse)
+        // Stream authenticated messages while Core Bluetooth has buffer space.
+        // Old companions and the authentication handshake retain ATT responses.
+        let streaming = authenticated && endpointCharacteristic.properties.contains(.writeWithoutResponse)
+        repeat {
+            if writes.isEmpty {
+                guard authenticated, let session, let message = outbound.next(now: uptime) else { return }
+                do { try queue(session.seal(message.object), startWriting: false) }
+                catch { rebuildBLESession(phone); return }
+            }
+            if streaming {
+                guard phone.canSendWriteWithoutResponse else {
+                    if writeStartedAt == nil { writeStartedAt = uptime }
+                    return
+                }
+                phone.writeValue(writes.removeFirst(), for: endpointCharacteristic, type: .withoutResponse)
+                writeStartedAt = nil
+            } else {
+                writing = true
+                writeStartedAt = uptime
+                phone.writeValue(writes.removeFirst(), for: endpointCharacteristic, type: .withResponse)
+                return
+            }
+        } while true
     }
+
     private func receive(_ value: Data) {
         guard let data = fragments.accept(value) else { return }
         assembledMessages += 1
@@ -652,6 +669,12 @@ extension BLEController: CBPeripheralDelegate {
         // cache after Android replaces its GATT server. Clear it before enabling
         // again so the new server receives an actual descriptor write.
         peripheral.setNotifyValue(!item.isNotifying, for: item)
+    }
+
+    func peripheralIsReady(toSendWriteWithoutResponse peripheral: CBPeripheral) {
+        guard phone?.identifier == peripheral.identifier, !stopped else { return }
+        writeStartedAt = nil
+        drain()
     }
 
     func peripheral(_ peripheral: CBPeripheral, didWriteValueFor characteristic: CBCharacteristic, error: Error?) {

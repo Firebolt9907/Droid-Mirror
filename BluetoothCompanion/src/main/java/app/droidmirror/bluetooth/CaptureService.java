@@ -266,7 +266,7 @@ public final class CaptureService extends Service {
             state.guard = new ShizukuDisplayClient(this, getSharedPreferences("ready", MODE_PRIVATE).getBoolean("panelOff", true), this::status,
                 (cause, awake) -> {
                     if (!state.stopped) {
-                        state.endEvent.signal(cause == RemoteSession.LOCAL_USE
+                        state.endEvent.signal(cause == RemoteSession.UNLOCK_FAILED ? BluetoothWire.PIN_FAILED : cause == RemoteSession.LOCAL_USE
                             ? (awake ? BluetoothWire.PHONE_ON : BluetoothWire.LOCAL_USE_FAILED) : BluetoothWire.SESSION_ENDED);
                         refreshNotification();
                     }
@@ -303,6 +303,7 @@ public final class CaptureService extends Service {
                 // Optional appearance must never prevent capture on unsupported OEMs.
                 try { wire.appearance(state.guard.phoneAppearance()); }
                 catch (Exception unavailable) { android.util.Log.d("DroidMirrorAppearance", "Appearance unavailable", unavailable); }
+                if (SavedUnlockPin.paused(this)) wire.event(BluetoothWire.PIN_PAUSED);
                 state.guard.startVideo(output, remoteControls, state.computerName);
                 if (state.wirelessUpgrade != null) state.wirelessUpgrade.captureReady();
             }

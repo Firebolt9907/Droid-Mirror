@@ -406,6 +406,12 @@ sc_screen_render(struct sc_screen *screen, bool update_content_rect) {
 
 end:
     sc_sdl_render_present(renderer);
+#ifdef __APPLE__
+    if (!screen->reported_visible) {
+        void (*cover)(void) = dlsym(RTLD_DEFAULT, "DroidMirrorVideoSurfaceReady");
+        if (cover) cover();
+    }
+#endif
 }
 
 static void
@@ -587,6 +593,7 @@ sc_screen_init(struct sc_screen *screen,
     screen->resize_pending = false;
     screen->window_shown = false;
     screen->reported_visible = false;
+    screen->startup_reveal = (struct sc_startup_reveal){0};
     screen->secure_black_frame = false;
     screen->secure_request_pending = false;
     screen->secure_check_at = 0;
@@ -704,6 +711,10 @@ sc_screen_init(struct sc_screen *screen,
         LOGE("Could not create renderer: %s", SDL_GetError());
         goto error_destroy_window;
     }
+#ifdef __APPLE__
+    void (*cover_startup)(void) = dlsym(RTLD_DEFAULT, "DroidMirrorVideoSurfaceReady");
+    if (cover_startup) cover_startup();
+#endif
 
 #ifdef SC_DISPLAY_FORCE_OPENGL_CORE_PROFILE
     screen->gl_context = NULL;
@@ -1228,8 +1239,14 @@ sc_screen_apply_frame(struct sc_screen *screen, bool can_resize) {
     sc_screen_render(screen, false);
 #ifdef __APPLE__
     if (!screen->reported_visible) {
-        void (*visible)(void) = (void (*)(void)) dlsym(RTLD_DEFAULT, "DroidMirrorFrameVisible");
-        if (visible) { visible(); screen->reported_visible = true; }
+        bool black = !screen->camera && sc_screen_is_secure_black_frame(frame);
+        enum sc_startup_reveal_action action = sc_startup_reveal_update(&screen->startup_reveal, SDL_GetTicks(), black);
+        if (action != SC_REVEAL_WAIT) {
+            const char *hook = action == SC_REVEAL_ANIMATE
+                ? "DroidMirrorFrameVisible" : "DroidMirrorFrameVisibleWithoutAnimation";
+            void (*visible)(void) = (void (*)(void)) dlsym(RTLD_DEFAULT, hook);
+            if (visible) { visible(); screen->reported_visible = true; }
+        }
     }
     Uint64 now = SDL_GetTicks();
     if (!screen->camera && screen->controller && now >= screen->secure_check_at) {

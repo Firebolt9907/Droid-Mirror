@@ -17,6 +17,7 @@ final class PrivilegedCapture implements AutoCloseable {
     private final ParcelFileDescriptor controls;
     private final Options bluetoothProfile;
     private boolean closed;
+    private final com.genymobile.scrcpy.video.VideoStartGate startGate;
     private static boolean initialized;
     static synchronized void initialize() throws Exception {
         if (!initialized) {
@@ -32,7 +33,7 @@ final class PrivilegedCapture implements AutoCloseable {
             initialized = true;
         }
     }
-    PrivilegedCapture(ParcelFileDescriptor output, ParcelFileDescriptor controls, Runnable ended) throws Exception {
+    PrivilegedCapture(ParcelFileDescriptor output, ParcelFileDescriptor controls, Runnable ended, boolean waitForUnlock) throws Exception {
         initialize();
         this.output = output; this.controls = controls;
         // Linux F_SETPIPE_SZ: keep the encoder from queuing seconds of old frames
@@ -59,6 +60,8 @@ final class PrivilegedCapture implements AutoCloseable {
         ScreenCapture screen = new ScreenCapture(controller, options);
         controller.setSurfaceCapture(screen);
         encoder = new SurfaceEncoder(screen, streamer, options);
+        startGate = waitForUnlock ? new com.genymobile.scrcpy.video.VideoStartGate() : null;
+        if (startGate != null) encoder.setStartGate(startGate);
         // Bound codec backlog before it becomes seconds of delayed interaction.
         encoder.setMaxFrameAgeUs(HevcCapturePolicy.BLUETOOTH_MAX_FRAME_AGE_US);
         // Keep recovery within the Classic budget. Wi-Fi uses its explicit profile.
@@ -66,6 +69,9 @@ final class PrivilegedCapture implements AutoCloseable {
         encoder.setMinAdaptiveBitRate(HevcCapturePolicy.MIN_ADAPTIVE_BIT_RATE);
         controller.start(fatal -> ended.run());
         encoder.start(fatal -> ended.run());
+    }
+    void unlockConfirmed() {
+        if (startGate != null) startGate.open(System.nanoTime() / 1000);
     }
     synchronized void upgradeVideo(WirelessVideoProfile profile) {
         if (closed) throw new IllegalStateException("Capture ended");

@@ -157,7 +157,10 @@ public final class Server {
                     surfaceCapture = new CameraCapture(options);
                 }
                 SurfaceEncoder surfaceEncoder = new SurfaceEncoder(surfaceCapture, videoStreamer, options);
-                if (session != null) surfaceEncoder.setFirstFrameListener(session::frameSent);
+                if (session != null) {
+                    surfaceEncoder.setStartGate(session.videoStartGate());
+                    surfaceEncoder.setFirstFrameListener(session::frameSent);
+                }
                 asyncProcessors.add(surfaceEncoder);
 
                 if (controller != null) {

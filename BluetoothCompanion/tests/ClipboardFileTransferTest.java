@@ -51,6 +51,45 @@ public final class ClipboardFileTransferTest {
             }
             check(Arrays.equals(sent.toByteArray(), bridge.source));
             files.receive(event("clipboardFileAck", id, sent.size()), bridge);
+            // 66 KiB regression: bounded windows cut application round trips to three.
+            for (int window : new int[]{8, 999}) {
+                bridge.source = new byte[66 * 1024];
+                for (int i = 0; i < bridge.source.length; i++) bridge.source[i] = (byte) (i % 251);
+                bridge.advertisedSize = bridge.source.length; bridge.token = UUID.randomUUID().toString();
+                files.poll(bridge);
+                id = events.getLast().getString("id");
+                check(events.getLast().getInt("window") == 8);
+                sent.reset();
+                int batches = 0;
+                while (sent.size() < bridge.source.length) {
+                    int before = events.size();
+                    files.receive(event("clipboardFileAck", id, sent.size()).put("window", window), bridge);
+                    check(events.size() - before <= 8 && events.size() > before);
+                    for (JSONObject chunk : events.subList(before, events.size())) {
+                        check(chunk.getInt("offset") == sent.size());
+                        sent.write(java.util.Base64.getUrlDecoder().decode(chunk.getString("data")));
+                    }
+                    batches++;
+                }
+                check(batches == 3 && Arrays.equals(sent.toByteArray(), bridge.source));
+                files.receive(event("clipboardFileAck", id, sent.size()), bridge);
+            }
+            id = UUID.randomUUID().toString();
+            files.receive(event("clipboardFileBegin", id, 0).put("name", "screenshot.bin").put("size", bridge.source.length).put("window", 8), bridge);
+            check(events.getLast().getInt("window") == 8);
+            int initialAcks = events.size();
+            for (int offset = 0; offset < bridge.source.length; offset += ClipboardFilePolicy.CHUNK) {
+                int end = Math.min(bridge.source.length, offset + ClipboardFilePolicy.CHUNK);
+                files.receive(event("clipboardFileChunk", id, offset).put("data", java.util.Base64.getEncoder().encodeToString(Arrays.copyOfRange(bridge.source, offset, end))), bridge);
+                check(events.size() - initialAcks == (end == bridge.source.length ? 3 : end / (8 * ClipboardFilePolicy.CHUNK)));
+            }
+            String screenshotPath = java.net.URI.create(bridge.written).getPath();
+            check(Arrays.equals(Files.readAllBytes(cache.resolve("clipboard-files").resolve(screenshotPath.substring(1))), bridge.source));
+            bridge.token = UUID.randomUUID().toString(); files.poll(bridge);
+            id = events.getLast().getString("id");
+            files.receive(event("clipboardFileAck", id, 0).put("window", 8), bridge);
+            files.receive(event("clipboardFileAck", id, ClipboardFilePolicy.CHUNK), bridge);
+            check(events.getLast().getString("type").equals("clipboardFileCancel"));
             int count = events.size();
             bridge.advertisedSize = 5_000_000; bridge.token = "too large"; files.poll(bridge);
             check(events.size() == count);

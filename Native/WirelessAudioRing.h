@@ -9,6 +9,8 @@
 #define DM_AUDIO_RATE 48000
 #define DM_AUDIO_CAPACITY 48000
 #define DM_AUDIO_FADE 240
+#define DM_AUDIO_MIN_RESERVE_MS 240
+#define DM_AUDIO_MAX_RESERVE_MS 360
 // One network producer, one audio-render consumer. No locks, allocation, dispatch
 // or device-completion callbacks on the real-time audio thread.
 typedef struct {
@@ -28,7 +30,8 @@ static inline void dm_audio_ring_init(DMAudioRing *ring, unsigned milliseconds) 
     atomic_init(&ring->underruns,0); atomic_init(&ring->trims,0); atomic_init(&ring->overflows,0);
     atomic_init(&ring->overflow,false);
     // A jitter reserve is necessary even when the video buffer is set to zero.
-    ring->target=(milliseconds<120 ? 120 : milliseconds>200 ? 200 : milliseconds)*48;
+    ring->target=(milliseconds<DM_AUDIO_MIN_RESERVE_MS ? DM_AUDIO_MIN_RESERVE_MS
+        : milliseconds>DM_AUDIO_MAX_RESERVE_MS ? DM_AUDIO_MAX_RESERVE_MS : milliseconds)*48;
 }
 static inline bool dm_audio_ring_write(DMAudioRing *ring, const uint8_t *pcm, size_t frames) {
     uint64_t write=atomic_load_explicit(&ring->written,memory_order_relaxed);
@@ -83,6 +86,10 @@ static inline bool dm_audio_ring_render(DMAudioRing *ring, float *left, float *r
         } else if (ring->playing) {
             ring->playing=false; ring->fraction=0; dm_audio_ring_fade(ring);
             atomic_fetch_add_explicit(&ring->underruns,1,memory_order_relaxed);
+            // Repeated delivery gaps must not cause the same small rebuffer
+            // forever. Grow only after real starvation, bounded to 360 ms.
+            unsigned increased=ring->target+60*48;
+            ring->target=increased>DM_AUDIO_MAX_RESERVE_MS*48 ? DM_AUDIO_MAX_RESERVE_MS*48 : increased;
         }
         if (ring->fade) {
             float amount=1.0f-(float)ring->fade/DM_AUDIO_FADE;
