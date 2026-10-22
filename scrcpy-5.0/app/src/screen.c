@@ -287,7 +287,7 @@ rotation_presentation(struct sc_screen *screen, const SDL_FRect *rect) {
 //
 // Set the update_content_rect flag if the window or content size may have
 // changed, so that the content rectangle is recomputed
-static void
+static bool
 sc_screen_render(struct sc_screen *screen, bool update_content_rect) {
     assert(screen->window_shown);
 
@@ -308,6 +308,7 @@ sc_screen_render(struct sc_screen *screen, bool update_content_rect) {
     SDL_SetRenderDrawColor(renderer, bg.r, bg.g, bg.b, 0);
     sc_sdl_render_clear(renderer);
 
+    bool ok = false;
     SDL_Texture *texture = screen->is_icon_active
                          ? screen->icon_tex
                          : sc_texture_get(&screen->tex);
@@ -342,7 +343,6 @@ sc_screen_render(struct sc_screen *screen, bool update_content_rect) {
         srcrect = &frame_rect;
     }
 
-    bool ok = false;
     if (screen->rotation.active) {
         struct sc_size size = sc_sdl_get_window_size(screen->window);
         screen->rotation.rect = (SDL_FRect){
@@ -405,13 +405,14 @@ sc_screen_render(struct sc_screen *screen, bool update_content_rect) {
     }
 
 end:
-    sc_sdl_render_present(renderer);
+    if (!sc_sdl_render_present(renderer)) ok = false;
 #ifdef __APPLE__
     if (!screen->reported_visible) {
         void (*cover)(void) = dlsym(RTLD_DEFAULT, "DroidMirrorVideoSurfaceReady");
         if (cover) cover();
     }
 #endif
+    return ok;
 }
 
 static void
@@ -594,6 +595,7 @@ sc_screen_init(struct sc_screen *screen,
     screen->window_shown = false;
     screen->reported_visible = false;
     screen->startup_reveal = (struct sc_startup_reveal){0};
+    screen->startup_content = false;
     screen->secure_black_frame = false;
     screen->secure_request_pending = false;
     screen->secure_check_at = 0;
@@ -757,7 +759,10 @@ sc_screen_init(struct sc_screen *screen,
     screen->is_icon_active = false;
     SDL_Surface *icon = sc_icon_load(SC_ICON_FILENAME_SCRCPY);
     if (icon) {
-        if (!SDL_SetWindowIcon(screen->window, icon)) {
+        // The persistent macOS viewer uses its bundled DroidMirror identity.
+        // SDL_SetWindowIcon also replaces the Dock icon on macOS.
+        if (!getenv("DROIDMIRROR_SESSION_COMMANDS")
+                && !SDL_SetWindowIcon(screen->window, icon)) {
             LOGW("Could not set window icon: %s", SDL_GetError());
         }
 
@@ -1083,10 +1088,29 @@ finish_rotation(struct sc_screen *screen) {
     rotation_presentation(screen, NULL);
 }
 
+#ifdef __APPLE__
+static void
+sc_screen_update_startup_reveal(struct sc_screen *screen) {
+    if (screen->reported_visible) return;
+    enum sc_startup_reveal_action action = sc_startup_reveal_update(
+        &screen->startup_reveal, SDL_GetTicks(), screen->startup_content);
+    if (action == SC_REVEAL_WAIT) return;
+    const char *hook = action == SC_REVEAL_ANIMATE
+        ? "DroidMirrorFrameVisible" : "DroidMirrorFrameVisibleWithoutAnimation";
+    void (*visible)(void) = (void (*)(void)) dlsym(RTLD_DEFAULT, hook);
+    if (visible) { visible(); screen->reported_visible = true; }
+}
+#endif
+
 void
 sc_screen_tick(struct sc_screen *screen) {
     if (screen->rotation.active && SDL_GetTicks() >= screen->rotation.next_tick)
         sc_screen_render(screen, false);
+#ifdef __APPLE__
+    // A static screen may send no further frames. Confirm the last presented
+    // content (or expire the black fallback) without waiting for another frame.
+    if (screen->startup_reveal.started) sc_screen_update_startup_reveal(screen);
+#endif
 }
 
 void
@@ -1170,19 +1194,20 @@ sc_screen_set_frame_size(struct sc_screen *screen, struct sc_size new_frame_size
 }
 
 #ifdef __APPLE__
-static bool
-sc_screen_is_secure_black_frame(const AVFrame *frame) {
+static enum sc_frame_content
+sc_screen_frame_content(const AVFrame *frame) {
     if (frame->format != AV_PIX_FMT_VIDEOTOOLBOX) {
-        return sc_frame_is_fully_black(frame);
+        return sc_frame_content(frame);
     }
-    // Read the shared IOSurface directly at most five times/second. Do not
+    // Read the shared IOSurface directly during startup confirmation, then
+    // at most five times/second for secure-window checks. Do not
     // download/copy hardware frames, which would defeat zero-copy rendering.
     CVPixelBufferRef buffer = (CVPixelBufferRef) frame->data[3];
-    if (!buffer || CVPixelBufferGetPlaneCount(buffer) != 2) return false;
+    if (!buffer || CVPixelBufferGetPlaneCount(buffer) != 2) return SC_FRAME_UNKNOWN;
     OSType format = CVPixelBufferGetPixelFormatType(buffer);
     if (format != kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
-            && format != kCVPixelFormatType_420YpCbCr8BiPlanarFullRange) return false;
-    if (CVPixelBufferLockBaseAddress(buffer, kCVPixelBufferLock_ReadOnly) != kCVReturnSuccess) return false;
+            && format != kCVPixelFormatType_420YpCbCr8BiPlanarFullRange) return SC_FRAME_UNKNOWN;
+    if (CVPixelBufferLockBaseAddress(buffer, kCVPixelBufferLock_ReadOnly) != kCVReturnSuccess) return SC_FRAME_UNKNOWN;
     AVFrame cpu = {0};
     cpu.width = frame->width;
     cpu.height = frame->height;
@@ -1193,9 +1218,14 @@ sc_screen_is_secure_black_frame(const AVFrame *frame) {
         cpu.data[plane] = CVPixelBufferGetBaseAddressOfPlane(buffer, plane);
         cpu.linesize[plane] = CVPixelBufferGetBytesPerRowOfPlane(buffer, plane);
     }
-    bool black = sc_frame_is_fully_black(&cpu);
+    enum sc_frame_content content = sc_frame_content(&cpu);
     CVPixelBufferUnlockBaseAddress(buffer, kCVPixelBufferLock_ReadOnly);
-    return black;
+    return content;
+}
+
+static bool
+sc_screen_is_secure_black_frame(const AVFrame *frame) {
+    return sc_screen_frame_content(frame) == SC_FRAME_BLACK;
 }
 #endif
 
@@ -1236,17 +1266,16 @@ sc_screen_apply_frame(struct sc_screen *screen, bool can_resize) {
         return false;
     }
 
-    sc_screen_render(screen, false);
+    bool presented = sc_screen_render(screen, false);
+    if (!presented) {
+        screen->startup_content = false;
+        screen->startup_reveal.confirming_content = false;
+        return false;
+    }
 #ifdef __APPLE__
     if (!screen->reported_visible) {
-        bool black = !screen->camera && sc_screen_is_secure_black_frame(frame);
-        enum sc_startup_reveal_action action = sc_startup_reveal_update(&screen->startup_reveal, SDL_GetTicks(), black);
-        if (action != SC_REVEAL_WAIT) {
-            const char *hook = action == SC_REVEAL_ANIMATE
-                ? "DroidMirrorFrameVisible" : "DroidMirrorFrameVisibleWithoutAnimation";
-            void (*visible)(void) = (void (*)(void)) dlsym(RTLD_DEFAULT, hook);
-            if (visible) { visible(); screen->reported_visible = true; }
-        }
+        screen->startup_content = sc_screen_frame_content(frame) == SC_FRAME_CONTENT;
+        sc_screen_update_startup_reveal(screen);
     }
     Uint64 now = SDL_GetTicks();
     if (!screen->camera && screen->controller && now >= screen->secure_check_at) {

@@ -27,6 +27,9 @@ struct ConnectionFailure {
         if has("event phone_in_use", "phone is in use") {
             return known("Phone in use", "Lock your Android phone, then connect again.")
         }
+        if has("pairing_code_mismatch", "pairing code is wrong") {
+            return known("Pairing code is wrong", "On your Android phone, select this Mac in DroidMirror and show its pairing code. Copy the full code into DroidMirror settings on your Mac, save it, then connect again.")
+        }
         if has("shizuku is not authorized", "shizuku permission denied", "authorize shizuku first", "grant shizuku permission") {
             return known("Authorize Shizuku", "Allow DroidMirror in Shizuku’s Authorized applications, then connect again.")
         }
@@ -56,6 +59,9 @@ struct ConnectionFailure {
         }
         if has("ble input disconnected", "bluetooth stream closed") {
             return known("Bluetooth disconnected", "Keep your phone nearby with Bluetooth and Mac connections enabled, then connect again.")
+        }
+        if has("invalid ble control or event stream") {
+            return known("Bluetooth session interrupted", "DroidMirror received an invalid Bluetooth control or event stream. Connect again to start a fresh session. If this continues, end mirroring, update both the Mac app and Android companion, then reconnect.")
         }
         if has("ble clock synchronization failed", "bluetooth input helper requires an updated app", "invalid bluetooth stream or video backlog exceeded") {
             return known("Update DroidMirror", "Update both the Android companion and Mac app, then connect again.")

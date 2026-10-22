@@ -26,6 +26,7 @@ classpath="$task_build:$classes:$stdlib:$json"
   "$root/Native/tests/android/util/Base64.java" \
   "$root/BluetoothCompanion/src/main/java/app/droidmirror/bluetooth/PairingKeys.java" \
   "$root/BluetoothCompanion/src/main/java/app/droidmirror/bluetooth/BlePairing.java" \
+  "$root/BluetoothCompanion/src/main/java/app/droidmirror/bluetooth/QRKeyTransfer.java" \
   "$root/BluetoothCompanion/tests/BackgroundBridgePreferencesTest.java" \
   "$root/BluetoothCompanion/tests/SharedPairingTest.java"
 "$task_java/bin/java" -cp "$task_build" BackgroundBridgePreferencesTest

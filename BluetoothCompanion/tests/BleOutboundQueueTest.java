@@ -20,6 +20,11 @@ public final class BleOutboundQueueTest {
         check(queue.next(1).equals("removed"));
         check(queue.append("expired", false, 0));
         check(queue.next(60000) == null && queue.getBytes() == 0);
+        check(queue.append("new0", false, 60001));
+        check(queue.append("new1", false, 60001));
+        check(queue.next(60002).equals("new0"));
+        check(queue.next(60002).equals("new1"));
+        check(queue.next(60002) == null && queue.getBytes() == 0);
         check(!queue.append("x".repeat(5801), false, 0));
         int count = 0;
         while (queue.append("x".repeat(4096), true, 0)) count++;

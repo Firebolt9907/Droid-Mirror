@@ -285,7 +285,10 @@ static void DMSetupKeyboardPassthrough(id self, SEL command) {
         NSWindow *mirrorWindow = sendObject(self, windowSelector);
         if ([mirrorWindow isKindOfClass:NSWindow.class]) {
             DMMirrorWindow = mirrorWindow;
-            DMFocusObserver = [[NSDistributedNotificationCenter defaultCenter]
+            // The persistent phone already owns focus notifications before video
+            // attaches. Keep this legacy route only for standalone viewers.
+            BOOL persistentPhone = getenv("DROIDMIRROR_SESSION_COMMANDS") != NULL;
+            if (!persistentPhone) DMFocusObserver = [[NSDistributedNotificationCenter defaultCenter]
                 addObserverForName:@"app.droidmirror.focusMirror"
                 object:NSProcessInfo.processInfo.environment[@"DROIDMIRROR_HOST_PID"] queue:NSOperationQueue.mainQueue
                 usingBlock:^(__unused NSNotification *notification) {
@@ -307,9 +310,13 @@ static void DMSetupKeyboardPassthrough(id self, SEL command) {
             // so the stream, rather than its child toolbar, receives focus.
             dispatch_async(dispatch_get_main_queue(), ^{
                 if (DMHostQuitRequested) return;
-                [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
-                [NSApp activateIgnoringOtherApps:YES];
-                [mirrorWindow makeKeyAndOrderFront:nil];
+                // Attaching video to an existing phone is a content update,
+                // not a new foreground application or focus request.
+                if (!persistentPhone) {
+                    [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
+                    [NSApp activateIgnoringOtherApps:YES];
+                    [mirrorWindow makeKeyAndOrderFront:nil];
+                }
                 DMReportMirrorVisible();
                 SEL screenSelector = NSSelectorFromString(@"screenView");
                 if ([self respondsToSelector:screenSelector]) {

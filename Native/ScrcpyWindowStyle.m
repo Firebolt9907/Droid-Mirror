@@ -64,6 +64,8 @@ static inline CGFloat DMScreenCornerRadius(CGFloat width) {
 @property(nonatomic) BOOL audioRequested;
 @property(nonatomic) BOOL audioPlaying;
 @property(nonatomic) BOOL audioFailed;
+@property(nonatomic) BOOL backgroundAudioOnly;
+@property(nonatomic, strong) NSStatusItem *audioStatusItem;
 @property(nonatomic, strong) NSButton *pinButtonControl;
 @property(nonatomic, strong) NSButton *sharpenButtonControl;
 @property(nonatomic, strong) NSButton *spatialButtonControl;
@@ -91,9 +93,11 @@ static inline CGFloat DMScreenCornerRadius(CGFloat width) {
 @property(nonatomic) CGFloat pendingScrollX;
 @property(nonatomic) CGFloat pendingScrollY;
 @property(nonatomic) BOOL swipeScheduled;
+@property(nonatomic) NSPoint pendingScrollPosition;
 @property(nonatomic) CGFloat pendingWheelX;
 @property(nonatomic) CGFloat pendingWheelY;
 @property(nonatomic) BOOL wheelScheduled;
+@property(nonatomic) NSPoint pendingWheelPosition;
 @property(nonatomic) NSUInteger wheelGeneration;
 @property(nonatomic) NSTimeInterval lastWheelCommand;
 @property(nonatomic) BOOL touchActive;
@@ -184,6 +188,7 @@ static inline CGFloat DMScreenCornerRadius(CGFloat width) {
 }
 
 - (void)dealloc {
+    [self clearBackgroundAudio];
     if (_audioStateObserver) [NSDistributedNotificationCenter.defaultCenter removeObserver:_audioStateObserver];
     [_window removeChildWindow:_audioWindow]; [_audioWindow orderOut:nil];
     if (_resizeObserver) [[NSNotificationCenter defaultCenter] removeObserver:_resizeObserver];
@@ -255,6 +260,7 @@ static inline CGFloat DMScreenCornerRadius(CGFloat width) {
 }
 
 - (void)showToolbar {
+    if (self.backgroundAudioOnly) { [self hideToolbar]; return; }
     [self refreshCameraCutoutPresence];
     if (self.sdlWindow && SDL_GetBooleanProperty(SDL_GetWindowProperties(self.sdlWindow), SC_ROTATION_PRESENTATION_PROP, false)) { [self hideToolbar]; return; }
     if (self.deviceHasCameraCutout) { [self hideToolbar]; return; }
@@ -515,11 +521,64 @@ static inline CGFloat DMScreenCornerRadius(CGFloat width) {
         queue:NSOperationQueue.mainQueue usingBlock:^(__unused NSNotification *note) {
             [weakSelf.backgroundTimeoutTimer invalidate];
             weakSelf.backgroundTimeoutTimer = nil;
+            if (weakSelf.backgroundAudioOnly) [weakSelf showPhoneFromAudio:nil];
         }];
 }
 
 - (void)suspendForBackgroundTimeout {
-    if (NSApp.active) return;
+    if (NSApp.active || !_sessionActive || _backgroundAudioOnly) return;
+    if (_bluetoothStream && _audioRequested && _audioHelperPID > 0) {
+        // Capture is owned by the authenticated video session. Retain that
+        // session and its sequence checks while dismissing its visible surface.
+        self.backgroundAudioOnly = YES;
+        self.audioStatusItem = [NSStatusBar.systemStatusBar statusItemWithLength:NSVariableStatusItemLength];
+        self.audioStatusItem.button.image = [NSImage imageWithSystemSymbolName:@"hifispeaker.fill"
+            accessibilityDescription:@"Phone audio is casting to this Mac"];
+        self.audioStatusItem.button.toolTip = @"Phone audio is casting to this Mac";
+        NSMenu *menu = [NSMenu new];
+        NSMenuItem *label = [menu addItemWithTitle:@"Phone audio → This Mac" action:NULL keyEquivalent:@""];
+        label.enabled = NO;
+        [menu addItem:NSMenuItem.separatorItem];
+        NSMenuItem *show = [menu addItemWithTitle:@"Show Phone" action:@selector(showPhoneFromAudio:) keyEquivalent:@""];
+        show.target = self;
+        NSMenuItem *stop = [menu addItemWithTitle:@"Stop Casting" action:@selector(stopBackgroundAudio:) keyEquivalent:@""];
+        stop.target = self;
+        self.audioStatusItem.menu = menu;
+        [self.pinPopover close];
+        [self.settingsPopover close];
+        [self hideToolbar];
+        [self.window orderOut:nil];
+        [self positionAudioButton];
+        return;
+    }
+    [self endInactiveSession];
+}
+
+- (void)clearBackgroundAudio {
+    self.backgroundAudioOnly = NO;
+    if (_audioStatusItem) [NSStatusBar.systemStatusBar removeStatusItem:_audioStatusItem];
+    self.audioStatusItem = nil;
+}
+
+- (void)showPhoneFromAudio:(id)sender {
+    [self clearBackgroundAudio];
+    [self.backgroundTimeoutTimer invalidate];
+    self.backgroundTimeoutTimer = nil;
+    [self.window deminiaturize:nil];
+    [NSApp activateIgnoringOtherApps:YES];
+    [self.window makeKeyAndOrderFront:nil];
+    [self showToolbar];
+    [self positionAudioButton];
+}
+
+- (void)stopBackgroundAudio:(id)sender {
+    if (!_backgroundAudioOnly) return;
+    [self togglePhoneAudio:sender];
+    [self clearBackgroundAudio];
+    [self endInactiveSession];
+}
+
+- (void)endInactiveSession {
     NSString *hostPID = NSProcessInfo.processInfo.environment[@"DROIDMIRROR_HOST_PID"];
     if (hostPID.length) {
         [[NSDistributedNotificationCenter defaultCenter]
@@ -667,7 +726,15 @@ static inline CGFloat DMScreenCornerRadius(CGFloat width) {
             return nil;
         }
 
+        NSPoint position = [selfRef.screenView convertPoint:event.locationInWindow fromView:nil];
+        if (!NSPointInRect(position, selfRef.screenView.bounds)) return event;
+        // Give ordinary wheel ticks a modest boost without changing trackpads.
+        if (DMIsMouseWheel(event.phase, event.hasPreciseScrollingDeltas, event.momentumPhase)) {
+            dx *= 1.25;
+            dy *= 1.25;
+        }
         if (selfRef.bluetoothStream && DMIsMouseWheel(event.phase, event.hasPreciseScrollingDeltas, event.momentumPhase)) {
+            if (!selfRef.wheelScheduled) selfRef.pendingWheelPosition = position;
             selfRef.pendingWheelX += dx; selfRef.pendingWheelY += dy;
             if (!selfRef.wheelScheduled) {
                 NSTimeInterval delay = MAX(0, selfRef.lastWheelCommand + 1.0/30.0 - NSProcessInfo.processInfo.systemUptime);
@@ -686,6 +753,7 @@ static inline CGFloat DMScreenCornerRadius(CGFloat width) {
         // Discrete mouse wheels have no gesture phase. Coalesce them into one
         // short two-dimensional swipe while preserving both axes.
         if (fabs(dx) < 0.01 && fabs(dy) < 0.01) return nil;
+        if (!selfRef.swipeScheduled) selfRef.pendingScrollPosition = position;
         selfRef.pendingScrollX += dx;
         selfRef.pendingScrollY += dy;
         if (!selfRef.swipeScheduled) {
@@ -739,7 +807,8 @@ static inline CGFloat DMScreenCornerRadius(CGFloat width) {
     event.wheel.timestamp=SDL_GetTicksNS(); event.wheel.windowID=SDL_GetWindowID(self.sdlWindow);
     event.wheel.which=SC_DROIDMIRROR_WHEEL_MOUSE_ID;
     event.wheel.x=dx; event.wheel.y=dy;
-    event.wheel.mouse_x=NSMidX(self.screenView.bounds); event.wheel.mouse_y=NSMidY(self.screenView.bounds);
+    event.wheel.mouse_x=self.pendingWheelPosition.x;
+    event.wheel.mouse_y=self.screenView.bounds.size.height-self.pendingWheelPosition.y;
     SDL_PushEvent(&event);
 }
 
@@ -808,8 +877,7 @@ static inline CGFloat DMScreenCornerRadius(CGFloat width) {
     self.swipeScheduled = NO;
     if (self.bluetoothStream) {
         if (fabs(dx) < 0.01 && fabs(dy) < 0.01) return;
-        NSRect bounds = self.screenView.bounds;
-        [self beginTrackpadTouchAt:NSMakePoint(NSMidX(bounds), NSMidY(bounds))];
+        [self beginTrackpadTouchAt:self.pendingScrollPosition];
         [self moveTrackpadTouchX:dx * 16 y:dy * 16];
         [self endTrackpadTouch];
         return;
@@ -818,10 +886,10 @@ static inline CGFloat DMScreenCornerRadius(CGFloat width) {
     NSInteger width = MAX(1, self.androidWidth), height = MAX(1, self.androidHeight);
     CGFloat scaleX = width / MAX(1, self.screenView.bounds.size.width);
     CGFloat scaleY = height / MAX(1, self.screenView.bounds.size.height);
-    NSInteger startX = width / 2;
-    NSInteger startY = height / 2;
-    NSInteger endX = MAX((NSInteger)(width * 0.06), MIN((NSInteger)(width * 0.94), startX + lround(dx * scaleX * 24)));
-    NSInteger endY = MAX((NSInteger)(height * 0.06), MIN((NSInteger)(height * 0.94), startY - lround(dy * scaleY * 24)));
+    NSInteger startX = MAX(1, MIN(width - 2, lround(self.pendingScrollPosition.x * scaleX)));
+    NSInteger startY = MAX(1, MIN(height - 2, lround((self.screenView.bounds.size.height - self.pendingScrollPosition.y) * scaleY)));
+    NSInteger endX = MAX(1, MIN(width - 2, startX + lround(dx * scaleX * 24)));
+    NSInteger endY = MAX(1, MIN(height - 2, startY - lround(dy * scaleY * 24)));
     NSString *command = [NSString stringWithFormat:@"input touchscreen swipe %ld %ld %ld %ld 100\n", (long)startX, (long)startY, (long)endX, (long)endY];
     [self.adbShellInput writeData:[command dataUsingEncoding:NSUTF8StringEncoding]];
     if ((fabs(self.pendingScrollX) > 0.01 || fabs(self.pendingScrollY) > 0.01) && !self.swipeScheduled) {
@@ -974,6 +1042,10 @@ static inline CGFloat DMScreenCornerRadius(CGFloat width) {
         : (self.audioFailed ? @"Retry phone audio over Wi-Fi" : @"Play phone audio over Wi-Fi");
     self.audioLabel.stringValue=self.audioButton.title;
     [self.audioButton setAccessibilityLabel:self.audioButton.title];
+    if (_backgroundAudioOnly && !_audioRequested) {
+        [self clearBackgroundAudio];
+        [self endInactiveSession];
+    }
     [self positionAudioButton];
 }
 - (void)togglePhoneAudio:(id)sender {
@@ -986,7 +1058,7 @@ static inline CGFloat DMScreenCornerRadius(CGFloat width) {
     for (NSView *view in self.window.contentView.subviews)
         if ([view.identifier isEqualToString:@"DroidMirrorConnecting"]) connecting=YES;
     BOOL rotating=self.sdlWindow && SDL_GetBooleanProperty(SDL_GetWindowProperties(self.sdlWindow),SC_ROTATION_PRESENTATION_PROP,false);
-    if (!_sessionActive || !_audioVisible || !self.window.visible || self.window.miniaturized || connecting || rotating || !NSApp.active) {
+    if (_backgroundAudioOnly || !_sessionActive || !_audioVisible || !self.window.visible || self.window.miniaturized || connecting || rotating || !NSApp.active) {
         [self.window removeChildWindow:_audioWindow]; [_audioWindow orderOut:nil]; return;
     }
     NSRect phone=self.window.frame;
@@ -1410,6 +1482,7 @@ void DroidMirrorSessionChrome(NSWindow *window, BOOL active) {
     controller.bluetoothStream = [NSProcessInfo.processInfo.environment[@"DROIDMIRROR_TRANSPORT"] isEqualToString:@"bluetooth-classic"];
     controller.sessionActive=active;
     if (!active) {
+        [controller clearBackgroundAudio];
         controller.audioVisible=NO; controller.audioRequested=NO; controller.audioHelperPID=0;
     }
     [controller positionAudioButton];

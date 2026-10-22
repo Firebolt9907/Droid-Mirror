@@ -21,8 +21,8 @@ struct MediaSnapshot {
               let playing = value["playing"] as? Bool,
               let duration = value["duration"] as? Double, duration.isFinite, duration >= 0,
               let position = value["position"] as? Double, position.isFinite, position >= 0,
-              let actions = value["actions"] as? [String], actions.count <= 5,
-              Set(actions).isSubset(of: ["play", "pause", "next", "previous", "seek"]) else { return nil }
+              let actions = value["actions"] as? [String], actions.count <= 8,
+              Set(actions).isSubset(of: ["play", "pause", "next", "previous", "seek", "shuffle", "repeat", "queue"]) else { return nil }
         self.id = id; self.title = title; self.artist = artist; self.album = album
         self.playing = playing; self.duration = duration; self.position = position
         self.actions = Set(actions); receivedAt = now
@@ -38,6 +38,12 @@ struct MediaSnapshot {
         if action == "seek" {
             guard let position = event["position"] as? Double, position.isFinite,
                   position >= 0, position <= 604800 else { return false }
+        }
+        if action == "shuffle", !(event["enabled"] is Bool) { return false }
+        if action == "repeat", !["off", "one", "all"].contains(event["mode"] as? String ?? "") { return false }
+        if action == "queue" {
+            guard let revision = event["queueRevision"] as? String, revision.utf8.count == 64,
+                  let id = event["queueItemId"] as? Int64, id >= 0 else { return false }
         }
         return true
     }

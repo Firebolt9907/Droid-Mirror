@@ -40,13 +40,25 @@ int main(void) {
             }
             NSRect start = NSMakeRect(100, 100, width, height);
             NSPoint delta = NSMakePoint(left ? -width / 2 : width / 2, bottom ? -height / 2 : height / 2);
-            NSRect result = DMCornerResizeFrame(start, delta, corner, NSMakeSize(80, 160), NSMakeSize(5000, 5000));
+            NSRect result = DMCornerResizeFrame(start, delta, corner, NSMakeSize(80, 160), NSMakeSize(5000, 5000), NO);
             assert(fabs(result.size.width / result.size.height - width / height) < 1e-10);
             assert(fabs(result.size.width - width * 1.5) < 1e-10);
             assert(fabs((left ? NSMaxX(result) : NSMinX(result)) - (left ? NSMaxX(start) : NSMinX(start))) < 1e-10);
             assert(fabs((bottom ? NSMaxY(result) : NSMinY(result)) - (bottom ? NSMaxY(start) : NSMinY(start))) < 1e-10);
-            result = DMCornerResizeFrame(start, NSMakePoint(left ? 10000 : -10000, bottom ? 10000 : -10000), corner, NSMakeSize(80, 160), NSZeroSize);
+            result = DMCornerResizeFrame(start, NSMakePoint(left ? 10000 : -10000, bottom ? 10000 : -10000), corner, NSMakeSize(80, 160), NSZeroSize, NO);
             assert(result.size.width >= 80 && result.size.height >= 160);
+            // Option-drag moves both edges, preserving the original center
+            // through enlargement, shrinking, and either size limit.
+            for (NSNumber *factor in @[@1, @(-.25), @(-100), @100]) {
+                CGFloat f = factor.doubleValue;
+                result = DMCornerResizeFrame(start, NSMakePoint(delta.x * f, delta.y * f), corner,
+                                             NSMakeSize(width / 2, height / 2), NSMakeSize(width * 3, height * 3), YES);
+                CGFloat expectedScale = MAX(.5, MIN(3, 1 + f));
+                assert(fabs(result.size.width - width * expectedScale) < 1e-9);
+                assert(fabs(result.size.height - height * expectedScale) < 1e-9);
+                assert(fabs(NSMidX(result) - NSMidX(start)) < 1e-9);
+                assert(fabs(NSMidY(result) - NSMidY(start)) < 1e-9);
+            }
         }
         assert(DMCornerAtPoint(NSMakePoint(width / 2, height / 2), size) == DMResizeCornerNone);
         assert(DMCornerAtPoint(NSMakePoint(1, height / 2), size) == DMResizeCornerNone);
@@ -56,6 +68,6 @@ int main(void) {
         assert(DMCornerAtPoint(NSMakePoint(width + 1, height - 5), size) == DMResizeCornerNone);
     }
     }
-    NSLog(@"PASS: generous corner targets, rounded and square phones, size invariance, fixed aspect ratio, opposite-corner anchors, minimum size and untouched sides/interior");
+    NSLog(@"PASS: corner targets, rounded and square phones, fixed aspect ratio, opposite-corner anchors, centered Option resizing, size limits and untouched sides/interior");
     return 0;
 }

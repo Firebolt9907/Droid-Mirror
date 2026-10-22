@@ -12,4 +12,8 @@ clang -fobjc-arc -fblocks -Wno-deprecated-declarations -framework Foundation -fr
 "$work/playback"
 clang -fobjc-arc -fblocks -I/opt/homebrew/include -L/opt/homebrew/lib \
     -lSDL3 -framework Cocoa -framework QuartzCore Native/WirelessAudioButtonTests.m -o "$work/button"
-"$work/button"
+button_output=$("$work/button")
+printf '%s\n' "$button_output"
+# AppKit can exit a standalone test process before returning from a UI call.
+# Require its completion marker as well as a successful exit status.
+[[ "$button_output" == *"timeout casting indicator, resume/stop, teardown and focus preservation passed"* ]]

@@ -14,6 +14,18 @@ phone-side smoothing. Physical wheel commands alone use local phone playback. Re
 The queue reassembles scrcpy messages across arbitrary TCP read boundaries and
 packs ready input envelopes into available ATT payload space. It does not wait
 for a full packet. Video ACK priority and one in-flight GATT operation remain.
+Updated companions deliver encrypted return packets through acknowledged BLE
+indications. A return read can otherwise remain outstanding in CoreBluetooth,
+holding input and video/lease acknowledgements behind it until the session ends.
+Indications keep that server-to-client transaction separate from input writes.
+Older companions retain alternating return reads and ready input writes. BLE work
+runs on a dedicated serial queue with interactive QoS.
+
+Background notification snapshots also use confirmed indications. An unconfirmed
+notification's completion callback can precede delivery, allowing fragment loops
+to fill the Bluetooth transmit queue and stall mirror GATT transactions. The
+notification endpoint therefore advertises indications, keeping each fragment
+pending until the Mac acknowledges it instead of filling the shared radio queue.
 
 | Activity | Rate / trigger | Goes to phone? |
 |---|---|---|
@@ -22,10 +34,10 @@ for a full packet. Video ACK priority and one in-flight GATT operation remain.
 | Mouse buttons and keyboard | Actual state changes; OS key repeat retained | BLE input writes |
 | Trackpad drag/scroll | Position updates use the same 60 Hz cap | BLE input writes |
 | Discrete mouse wheel scrolling | Direction/distance commands, at most 30 Hz; summed during backpressure | BLE writes; Android synthesizes touch movement locally every 16 ms |
-| Video ACK plus liveness | Every 250 ms, cumulative unsent ACKs coalesce | BLE, about 4 records/s; may share a write with input |
-| Control/event return reads | 500 ms idle target, plus immediate reads until empty | BLE requests, about 2/s idle; timer scheduling can lower this |
+| Video ACK plus liveness | Every 40 ms with moving video, 250 ms while idle; unsent ACKs coalesce | BLE, up to 25 records/s while moving and 4/s idle; may share a write with input |
+| Control/event returns | Encrypted indications when subscribed; no idle polling | Older companions use 500 ms idle reads, alternating with input |
 | Phone heartbeat echoes | At most once per second | Phone-to-Mac BLE replies |
-| Bridge socket servicing | Every 20 ms | Local sockets only unless data or an ACK is due |
+| Bridge input socket | Readiness callback as soon as data arrives; 20 ms housekeeping fallback | Local sockets only unless data or an ACK is due |
 | BLE watchdog | Every 200 ms | Local state checks; initiates a read only when due |
 | Device refresh | Every 3 s while not mirroring | Local bonded-device enumeration in Classic mode |
 | Toolbar placement / installation | Local timers | No Bluetooth messages |
@@ -55,6 +67,28 @@ There is no other 1000 Hz polling loop sending data to the phone in the audited
 Classic/BLE application path. OS Bluetooth scheduling and acknowledgements are
 outside these application rates.
 
+The control socket uses TCP_NODELAY for prompt small replies. Input readiness
+wakes the bridge without waiting for its video/housekeeping timer, removing up to
+one 20 ms polling interval from that stage. This is an application scheduling
+bound, not a measured end-to-end radio improvement. Regression tests forward
+socket input without any polling timer and interleave 100 authenticated input
+packets with a continuous return stream, checking sequence/order, single-operation
+ATT serialization, immediate reply draining when idle, and empty-read backoff.
+
+The input ATT watchdog allows four seconds for an outstanding read/write, below
+the phone's five-second peer lease. This tolerates slow startup completions, but
+extending the deadline alone does not repair a blocked return read. A delayed write
+stays in flight, newer cumulative video ACKs coalesce, and the next authenticated
+sequence is sent only after completion. Service recovery keeps its separate
+bounded rediscovery and authenticated sequence reconciliation.
+
+READY waits for the return subscription to complete. Indicated packets retain
+the same per-session encryption, strict receive sequence and recovery replay
+proofs as polled packets. Incoming indications do not reset the deadline of an
+outstanding input write. Regression coverage sends 100 cumulative ACKs while
+withholding all returns, checks that no read is issued, then verifies encrypted
+return delivery and duplicate rejection during an outstanding input write.
+
 Validation: a deterministic 1000 Hz input producer emitted 59 position records
 in one second; the test accepts 58–60 depending on interval rounding. Tests also
 cover newest-coordinate selection, immediate release flushing, key/pointer
@@ -81,3 +115,27 @@ summing and overflow, state-change barriers, fragmented transport, native C
 serialization and Android decoding, local frame pacing, reversal, long-scroll
 rebasing, cancellation and final release. Companion 0.10 requires the matching
 Mac build; its Shizuku service version is 28 so the persistent daemon refreshes.
+
+## Shared-link regression validation (2026-10-21)
+
+Unconfirmed background notifications reproduced Android L2CAP transmit congestion,
+return status 129 and stalled Mac ATT writes. Confirmed notifications alone passed
+an idle three-minute run but still failed during active control traffic. The final
+endpoint advertises write-with-response and indications only, bounding both
+background directions while preserving encrypted input and return sequences.
+
+A 180-second run using the renderer control socket completed 779 authenticated
+mirror writes, 17 Home key down/up pairs, and three notification receiver
+reconnections (at 30, 90 and 140 seconds). Both helper and renderer remained alive
+until the scheduled test stop. Matched phone/Mac diagnostics contained no ATT
+stalls, return failures or L2CAP congestion. This verifies the exercised workload;
+it is not an unlimited-duration or RF-interference guarantee. Transport, MTU,
+notification session and fragmented wire-event regressions passed as well.
+
+Launch testing also exposed a separate Classic channel lifecycle failure before
+BLE authentication. Each helper now requests its own Classic connection even
+when macOS reports the phone already connected, then waits for completion before
+opening L2CAP. Shutdown explicitly closes the compatibility peer's PSM, including
+pending opens. Startup regressions cover both paths. The installed build passed
+launch, normal quit and relaunch without restarting the phone or resetting its
+Bluetooth connection between sessions.

@@ -34,6 +34,7 @@ static const NSUInteger DMQueueLimit = 128 * 1024;
 - (id)classicPeer;
 - (void)setConnectL2CAPCallback:(void (^)(id, NSInteger))callback;
 - (void)openL2CAPChannel:(uint16_t)psm;
+- (void)closeL2CAPChannel:(uint16_t)psm;
 @end
 
 // Blocking handshake runs on a worker; the video/control run loop never waits for ADB.
@@ -119,6 +120,7 @@ static NSData *DMUpgradeProof(NSData *key, const char *direction, const uint8_t 
 @property(nonatomic) int client;
 @property(nonatomic) int controlListener;
 @property(nonatomic) int controlClient;
+@property(nonatomic, strong) dispatch_source_t controlReadSource;
 @property(nonatomic) uint16_t controlPort;
 @property(nonatomic) uint16_t videoPort;
 @property(nonatomic, strong) NSMutableData *controlPending;
@@ -482,6 +484,7 @@ static void DMWirelessLatency(void *context, uint64_t timestamp) {
 - (void)shutdownForTermination {
     if (_failing) return;
     _failing=YES;
+    if (_controlReadSource) { dispatch_source_cancel(_controlReadSource); _controlReadSource=nil; _controlClient=-1; }
     [self stopAudio]; _audioState=0; [self publishAudioState];
     fprintf(stderr,"Closing Bluetooth session before helper termination\n");
     [self stopPeer];
@@ -496,6 +499,7 @@ static void DMWirelessLatency(void *context, uint64_t timestamp) {
 - (void)fail:(NSString *)reason {
     if (_failing) return;
     _failing = YES;
+    if (_controlReadSource) { dispatch_source_cancel(_controlReadSource); _controlReadSource=nil; _controlClient=-1; }
     [self stopAudio]; _audioState=0; [self publishAudioState];
     fprintf(stderr, "%s\n", reason.UTF8String);
     if (_wifiSocket >= 0) close(_wifiSocket);
@@ -604,6 +608,17 @@ static void DMWirelessLatency(void *context, uint64_t timestamp) {
             _controlClient = peer; close(_controlListener); _controlListener = -1;
             fcntl(peer, F_SETFL, O_NONBLOCK);
             int yes = 1; setsockopt(peer, SOL_SOCKET, SO_NOSIGPIPE, &yes, sizeof(yes));
+            setsockopt(peer, IPPROTO_TCP, TCP_NODELAY, &yes, sizeof(yes));
+            // Wake on incoming keys/mouse instead of waiting for the 20 ms
+            // video/housekeeping timer. Keep all bridge state on the main queue.
+            _controlReadSource=dispatch_source_create(DISPATCH_SOURCE_TYPE_READ,peer,0,dispatch_get_main_queue());
+            dispatch_source_set_cancel_handler(_controlReadSource, ^{ close(peer); });
+            __weak DMClassicBridge *weakSelf=self;
+            dispatch_source_set_event_handler(_controlReadSource, ^{
+                DMClassicBridge *bridge=weakSelf;
+                if (bridge && !bridge.failing) [bridge pollControl];
+            });
+            dispatch_resume(_controlReadSource);
             uint8_t dummy = 0; [self receiveControl:&dummy length:1];
         }
     }
@@ -907,8 +922,12 @@ static void DMWirelessLatency(void *context, uint64_t timestamp) {
         if (self.outgoingSince && now - self.outgoingSince > 1.0) [self fail:@"Bluetooth input stalled"];
         if (self.controlSince && now - self.controlSince > 1.0) [self fail:@"Control response stalled"];
         if (self.pendingSince && now - self.pendingSince > 1.0) [self fail:@"Video bridge stalled for one second; reconnect"];
-        if (now - self.lastData > 15.0) [self fail:[NSString stringWithFormat:@"Bluetooth timed out while %@%@", self.connectionStage,
-            self.ble && !self.ble.ready ? [NSString stringWithFormat:@" (%@)", self.ble.connectionStage] : @""]];
+        if (now - self.lastData > 15.0) {
+            if (self.ble.pairingProofRejected && !self.ble.ready && !self.ble.recovering)
+                [self fail:@"PAIRING_CODE_MISMATCH: Pairing code is wrong. Copy the code for this Mac from the Android companion and save it again in DroidMirror settings."];
+            else [self fail:[NSString stringWithFormat:@"Bluetooth timed out while %@%@", self.connectionStage,
+                self.ble && !self.ble.ready ? [NSString stringWithFormat:@" (%@)", self.ble.connectionStage] : @""]];
+        }
         if (self.client >= 0) {
             char byte;
             ssize_t count = recv(self.client, &byte, 1, MSG_PEEK);
@@ -927,7 +946,8 @@ static void DMWirelessLatency(void *context, uint64_t timestamp) {
 - (void)connectClassicBaseband {
     self.connectionStage = @"connecting to the paired phone before opening L2CAP";
     self.lastData=NSDate.timeIntervalSinceReferenceDate;
-    if (self.device.isConnected) { [self openClassicChannel]; return; }
+    // A system-wide connection may belong to the background receiver. Establish
+    // this helper's Classic client before opening its channel even in that case.
     fprintf(stderr, "Connecting Classic baseband before opening L2CAP\n");
     IOReturn result=[self.device openConnection:self];
     if (result != kIOReturnSuccess) {
@@ -953,6 +973,13 @@ static void DMWirelessLatency(void *context, uint64_t timestamp) {
     [self.classicOutput open];
 }
 - (void)closeClassicStreams {
+    // Closing the streams alone does not close the compatibility peer's channel
+    // registration (including an open still awaiting its completion callback).
+    // Release our PSM explicitly so the next helper can open a fresh channel.
+    id peer=self.classicPeer;
+    self.classicPeer=nil;
+    if ([peer respondsToSelector:@selector(setConnectL2CAPCallback:)]) [peer setConnectL2CAPCallback:nil];
+    if ([peer respondsToSelector:@selector(closeL2CAPChannel:)]) [peer closeL2CAPChannel:self.psm];
     self.classicInput.delegate = nil; self.classicOutput.delegate = nil;
     [self.classicInput removeFromRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];
     [self.classicOutput removeFromRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];

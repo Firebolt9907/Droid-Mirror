@@ -59,6 +59,32 @@ enum BLETrust {
     static var identity: String? { key().map { SHA256.hash(data: $0).map { String(format: "%02x", $0) }.joined() } }
 }
 
+// This UUID reveals neither the pairing key nor permission to access data.
+// It is a discovery filter; every selected peer still authenticates normally.
+enum BLEDiscovery {
+    static func uuid(key: Data) -> UUID {
+        precondition(key.count == 32)
+        var bytes = Array(HMAC<SHA256>.authenticationCode(
+            for: Data("DroidMirror BLE discovery v1".utf8), using: SymmetricKey(data: key)).prefix(16))
+        bytes[6] = (bytes[6] & 0x0f) | 0x80
+        bytes[8] = (bytes[8] & 0x3f) | 0x80
+        return UUID(uuid: (bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+                           bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]))
+    }
+    private static let peers = UserDefaults(suiteName: "app.droidmirror.ble-peers")!
+    static func remembered(key: Data) -> UUID? {
+        peers.synchronize()
+        return peers.string(forKey: uuid(key: key).uuidString).flatMap(UUID.init(uuidString:))
+    }
+    static func remember(_ peer: UUID, key: Data) {
+        peers.set(peer.uuidString, forKey: uuid(key: key).uuidString)
+        peers.synchronize()
+    }
+    static func permits(_ peer: UUID, remembered: UUID?, advertised: [UUID], discovery: UUID) -> Bool {
+        peer == remembered || advertised.contains(discovery)
+    }
+}
+
 enum BLECryptoError: Error { case invalid, storage, replay }
 
 final class BLESecureSession {
@@ -99,7 +125,10 @@ final class BLESecureSession {
         let iv = nonce("DM2M", sent)
         let plain = try JSONSerialization.data(withJSONObject: object)
         let sealed = try AES.GCM.seal(plain, using: sendKey, nonce: AES.GCM.Nonce(data: iv), authenticating: iv)
-        return try JSONSerialization.data(withJSONObject: ["seq": sent, "box": sealed.combined!.base64EncodedString()])
+        // Base64 ciphertext contains '/'; JSON permits it literally. Avoid
+        // expanding those bytes on the BLE wire without changing the envelope.
+        return try JSONSerialization.data(withJSONObject: ["seq": sent, "box": sealed.combined!.base64EncodedString()],
+                                          options: [.withoutEscapingSlashes])
     }
     func open(_ envelope: [String: Any]) throws -> [String: Any] {
         guard let receiveKey, let value = envelope["seq"] as? NSNumber else { throw BLECryptoError.invalid }

@@ -24,6 +24,9 @@ import java.util.concurrent.ConcurrentHashMap
 class BlePeripheral(
     private val context: Context,
     private val endpoint: () -> AdbEndpoint?,
+    private val onWatchEvent: (JSONObject, () -> Boolean, (JSONObject) -> Boolean) -> Unit = { _, _, _ -> },
+    private val onPresence: (String, Boolean) -> Unit = { _, _ -> },
+    private val onPresenceReset: () -> Unit = {},
     private val onCommand: (String) -> Unit = {},
     private val onClipboardSubscription: (Boolean, Long, Boolean) -> Unit = { _, _, _ -> },
     private val onClipboardText: (String) -> Unit = {},
@@ -45,6 +48,7 @@ class BlePeripheral(
     private val adapter: BluetoothAdapter? get() = manager.adapter
     private var server: BluetoothGattServer? = null
     private var characteristic: BluetoothGattCharacteristic? = null
+    private val presencePeers = ConcurrentHashMap.newKeySet<android.bluetooth.BluetoothDevice>()
     private val connected = ConcurrentHashMap.newKeySet<android.bluetooth.BluetoothDevice>()
     private val subscribed = ConcurrentHashMap<android.bluetooth.BluetoothDevice, Boolean>()
     private val indicationInFlight = ConcurrentHashMap.newKeySet<android.bluetooth.BluetoothDevice>()
@@ -53,7 +57,6 @@ class BlePeripheral(
     private val pendingMessages = ConcurrentHashMap<android.bluetooth.BluetoothDevice, BleOutboundQueue>()
     private val sessions = ConcurrentHashMap<android.bluetooth.BluetoothDevice, BleSecureSession>()
     private val fragments = ConcurrentHashMap<android.bluetooth.BluetoothDevice, BleFragments>()
-    private val mtu = ConcurrentHashMap<android.bluetooth.BluetoothDevice, Int>()
     private var nextMessage = 1
     private var advertiser: android.bluetooth.le.BluetoothLeAdvertiser? = null
     private var advertiseCallback: AdvertiseCallback? = null
@@ -101,6 +104,9 @@ class BlePeripheral(
     @SuppressLint("MissingPermission")
     fun start(onStatus: (String) -> Unit) {
         stop()
+        val discovery = runCatching {
+            app.droidmirror.bluetooth.PairingKeys.discovery(requireNotNull(BleTrust.key(context)))
+        }.getOrNull() ?: return onStatus("Select and pair a Mac before enabling BLE")
         val bluetooth = adapter ?: return onStatus("Bluetooth is unavailable")
         val bleAdvertiser = bluetooth.bluetoothLeAdvertiser
             ?: return onStatus("BLE advertising is unavailable")
@@ -112,8 +118,8 @@ class BlePeripheral(
         characteristic = BluetoothGattCharacteristic(
             ENDPOINT_UUID,
             BluetoothGattCharacteristic.PROPERTY_WRITE or
-                BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE or
-                BluetoothGattCharacteristic.PROPERTY_NOTIFY or
+                // The completion callback for an unconfirmed notification can
+                // precede radio delivery and flood the shared mirror GATT link.
                 BluetoothGattCharacteristic.PROPERTY_INDICATE,
             BluetoothGattCharacteristic.PERMISSION_READ or
                 BluetoothGattCharacteristic.PERMISSION_WRITE
@@ -147,14 +153,16 @@ class BlePeripheral(
                 .build(),
             AdvertiseData.Builder()
                 .setIncludeDeviceName(false)
-                .addServiceUuid(ParcelUuid(SERVICE_UUID))
+                .addServiceUuid(ParcelUuid(discovery))
                 .build(),
             callback
         )
     }
 
     @SuppressLint("MissingPermission")
-    fun stop() {
+    @Synchronized fun stop() {
+        presencePeers.clear()
+        onPresenceReset()
         ++hotspotEpoch
         advertiseCallback?.let { advertiser?.stopAdvertising(it) }
         advertiseCallback = null
@@ -173,7 +181,7 @@ class BlePeripheral(
         pendingMessages.clear()
         notificationMode.clear()
         pendingIndication.clear()
-        sessions.clear(); fragments.clear(); mtu.clear()
+        sessions.clear(); fragments.clear()
     }
 
     @SuppressLint("MissingPermission")
@@ -227,7 +235,7 @@ class BlePeripheral(
         // ATT attributes are limited to 512 bytes even when the negotiated MTU
         // is 517. Larger indications can be truncated by the central, breaking
         // reassembly of image-bearing notification messages.
-        val frames = BleFragments.split(value, nextMessage++, (mtu[device] ?: 23) - 3)
+        val frames = BleFragments.split(value, nextMessage++, BleLinkMtu.get(device.address) - 3)
         if (queue.sumOf { it.size } + frames.sumOf { it.size } > 262144) {
             revokeSession(device); return
         }
@@ -258,7 +266,7 @@ class BlePeripheral(
             val json = pendingMessages[device]?.next(android.os.SystemClock.elapsedRealtime()) ?: return
             val session = sessions[device]?.takeIf { it.authenticated } ?: return
             val sealed = runCatching { session.seal(JSONObject(json)) }.getOrElse { revokeSession(device); return }
-            frames.addAll(BleFragments.split(sealed, nextMessage++, (mtu[device] ?: 23) - 3))
+            frames.addAll(BleFragments.split(sealed, nextMessage++, BleLinkMtu.get(device.address) - 3))
         }
         val frame = frames.pollFirst() ?: return
         characteristic?.let { sendUpdate(device, it, !notificationMode.contains(device), frame) }
@@ -314,6 +322,8 @@ class BlePeripheral(
         }
     }
     @Synchronized fun revokeTrust() {
+        presencePeers.clear()
+        onPresenceReset()
         notificationMode.clear()
         sessions.clear(); fragments.clear(); pendingIndication.clear(); pendingMessages.clear()
         revokeClients()
@@ -324,7 +334,7 @@ class BlePeripheral(
             device: android.bluetooth.BluetoothDevice,
             status: Int,
             newState: Int
-        ) {
+        ): Unit = synchronized(this@BlePeripheral) {
             if (newState == BluetoothProfile.STATE_CONNECTED) {
                 if (connected.size >= 4) { revokeSession(device); return }
                 connected += device
@@ -333,7 +343,8 @@ class BlePeripheral(
                         && sessions[device]?.authenticated != true) revokeSession(device)
                 }, 15000)
             }
-            else {
+            else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
+                if (presencePeers.remove(device)) onPresence(device.address, false)
                 revokeSession(device)
                 BleLinkMtu.disconnected(device.address)
                 connected -= device
@@ -342,8 +353,9 @@ class BlePeripheral(
                 indicationInFlight.remove(device)
                 pendingIndication.remove(device)
                 pendingMessages.remove(device)
-                sessions.remove(device); fragments.remove(device); mtu.remove(device)
+                sessions.remove(device); fragments.remove(device)
             }
+            Unit
         }
 
         override fun onNotificationSent(device: android.bluetooth.BluetoothDevice, status: Int) {
@@ -353,7 +365,6 @@ class BlePeripheral(
         }
 
         override fun onMtuChanged(device: android.bluetooth.BluetoothDevice, value: Int) {
-            mtu[device] = value.coerceIn(23, 517)
             BleLinkMtu.negotiated(device.address, value)
         }
 
@@ -378,6 +389,11 @@ class BlePeripheral(
             value: ByteArray
         ) {
             val valid = !preparedWrite && offset == 0 && subscribed[device] == true && value.size > 9 && value[0] == 0xd2.toByte()
+            // A service joining an existing physical link can miss its MTU
+            // callback. A non-prepared write proves the usable link capacity;
+            // share it with input instead of flooding this link with 20-byte
+            // fragments during every notification reauthentication/snapshot.
+            if (valid) BleLinkMtu.observedWrite(device.address, value.size)
             if (responseNeeded) server?.sendResponse(
                 device,
                 requestId,
@@ -401,13 +417,28 @@ class BlePeripheral(
                             }
                             objectValue.optString("type") == "finish" -> {
                                 session.finish(objectValue)
+                                presencePeers.add(device)
+                                onPresence(device.address, true)
                                 android.util.Log.i("DroidMirrorNotifications", "BLE notification session authenticated")
-                                enqueueSecure(device, session, JSONObject().put("type", "ready").put("sessionHealth", 1).put("clipboard", 1).put("clipboardFiles", 1).put("taskUrls", 1).put("linkSharing", 1).put("media", 1)
+                                enqueueSecure(device, session, JSONObject().put("type", "ready").put("watchCompanion", 1).put("sessionHealth", 1).put("clipboard", 1).put("clipboardFiles", 1).put("taskUrls", 1).put("linkSharing", 1).put("media", 1)
                                     .put("hotspot", if (Build.VERSION.SDK_INT >= 30) 2 else 0))
                             }
                             else -> {
                                 val command = session.open(objectValue)
                                 when (command.optString("type")) {
+                                    "watchMacState", "watchFindResult" -> {
+                                        // Watch commands may only route to the selected capture Mac and this exact BLE session.
+                                        if (device.address == context.getSharedPreferences("ready", Context.MODE_PRIVATE).getString("peer", "")) {
+                                            val valid = { synchronized(this@BlePeripheral) {
+                                                sessions[device] === session && session.authenticated &&
+                                                    device.address == context.getSharedPreferences("ready", Context.MODE_PRIVATE).getString("peer", "")
+                                            } }
+                                            onWatchEvent(command, valid, { value -> synchronized(this@BlePeripheral) {
+                                                if (valid()) runCatching { enqueueSecure(device, session, value) }.getOrElse { revokeSession(device); false }
+                                                else false
+                                            } })
+                                        }
+                                    }
                                     "hotspotStart", "hotspotStop" -> {
                                         val request = command.optString("request")
                                         require(request.matches(Regex("[A-Za-z0-9-]{1,64}")))
@@ -479,7 +510,7 @@ class BlePeripheral(
                                             onMediaSubscription(false, ++mediaGeneration)
                                         }
                                     }
-                                    "mediaState", "mediaCommand" -> {
+                                    "mediaState", "mediaQueue", "mediaCommand", "mediaArtworkRequest", "mediaArtworkChunk" -> {
                                         val generation = mediaGeneration
                                         if (mediaDevice == device) onMediaEvent(command) {
                                             synchronized(this@BlePeripheral) {
@@ -566,7 +597,7 @@ class BlePeripheral(
                 (value.contentEquals(BluetoothGattDescriptor.ENABLE_INDICATION_VALUE) ||
                  value.contentEquals(BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE) ||
                  value.contentEquals(BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE))
-            android.util.Log.i("DroidMirrorNotifications", "Notification subscription: valid=$valid enabled=${!value.contentEquals(BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE)}")
+            android.util.Log.i("DroidMirrorNotifications", "Notification subscription: valid=$valid enabled=${!value.contentEquals(BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE)} confirmed=${value.contentEquals(BluetoothGattDescriptor.ENABLE_INDICATION_VALUE)}")
             if (valid) {
                 synchronized(this@BlePeripheral) {
                     // Core Bluetooth can resubscribe without disconnecting the

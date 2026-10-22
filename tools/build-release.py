@@ -120,27 +120,32 @@ def main():
             parser.error(f'Mac install directory is not writable: {destination.parent}')
 
     print('Building Android release…', flush=True)
-    run(['./gradlew', '--no-daemon', 'assembleRelease'], cwd=ROOT / 'BluetoothCompanion', env=env)
-    release_dir = ROOT / 'BluetoothCompanion/build/outputs/apk/release'
-    metadata = json.loads((release_dir / 'output-metadata.json').read_text())
-    if len(metadata['elements']) != 1:
-        raise RuntimeError('Expected one universal release APK, but Gradle produced split APKs')
-    unsigned = release_dir / metadata['elements'][0]['outputFile']
-    if not unsigned.is_file():
-        raise RuntimeError(f'Expected unsigned release APK: {unsigned}')
+    run(['./gradlew', '--no-daemon', ':assembleRelease', ':wear:assembleRelease'], cwd=ROOT / 'BluetoothCompanion', env=env)
     outputs = ROOT / 'outputs'
     outputs.mkdir(exist_ok=True)
     apk = outputs / 'DroidMirror-Bluetooth-release.apk'
-    with tempfile.TemporaryDirectory(prefix='.android-release-', dir=outputs) as staging:
-        aligned, signed = (Path(staging) / name for name in ('aligned.apk', 'signed.apk'))
-        run([zipalign, '-P', '16', '-f', '4', unsigned, aligned], env=env)
-        run([apksigner, 'sign', '--ks', keystore, '--ks-key-alias', env['DROIDMIRROR_ANDROID_KEY_ALIAS'],
-             '--ks-pass', 'env:DROIDMIRROR_ANDROID_STORE_PASSWORD',
-             '--key-pass', 'env:DROIDMIRROR_ANDROID_KEY_PASSWORD', '--out', signed, aligned], env=env)
-        run([apksigner, 'verify', '--verbose', signed], env=env)
-        run([zipalign, '-c', '-P', '16', '4', signed], env=env)
-        signed.replace(apk)
-    apk.with_suffix('.apk.sha256').write_text(f'{hashlib.sha256(apk.read_bytes()).hexdigest()}  {apk.name}\n')
+    wear_apk = outputs / 'DroidMirror-WearOS-release.apk'
+    # Data Layer requires matching application IDs and signing certificates.
+    for release_dir, destination_apk in (
+            (ROOT / 'BluetoothCompanion/build/outputs/apk/release', apk),
+            (ROOT / 'BluetoothCompanion/wear/build/outputs/apk/release', wear_apk)):
+        metadata = json.loads((release_dir / 'output-metadata.json').read_text())
+        if len(metadata['elements']) != 1:
+            raise RuntimeError('Expected one universal release APK, but Gradle produced split APKs')
+        unsigned = release_dir / metadata['elements'][0]['outputFile']
+        if not unsigned.is_file():
+            raise RuntimeError(f'Expected unsigned release APK: {unsigned}')
+        with tempfile.TemporaryDirectory(prefix='.android-release-', dir=outputs) as staging:
+            aligned, signed = (Path(staging) / name for name in ('aligned.apk', 'signed.apk'))
+            run([zipalign, '-P', '16', '-f', '4', unsigned, aligned], env=env)
+            run([apksigner, 'sign', '--ks', keystore, '--ks-key-alias', env['DROIDMIRROR_ANDROID_KEY_ALIAS'],
+                 '--ks-pass', 'env:DROIDMIRROR_ANDROID_STORE_PASSWORD',
+                 '--key-pass', 'env:DROIDMIRROR_ANDROID_KEY_PASSWORD', '--out', signed, aligned], env=env)
+            run([apksigner, 'verify', '--verbose', signed], env=env)
+            run([zipalign, '-c', '-P', '16', '4', signed], env=env)
+            signed.replace(destination_apk)
+        destination_apk.with_suffix('.apk.sha256').write_text(
+            f'{hashlib.sha256(destination_apk.read_bytes()).hexdigest()}  {destination_apk.name}\n')
 
     print('Building macOS release…', flush=True)
     env['DROIDMIRROR_BUILD_CONFIGURATION'] = 'release'
@@ -148,7 +153,7 @@ def main():
     env['DROIDMIRROR_SKIP_MAC_INSTALL'] = '1'  # The release workflow installs after both builds pass.
     run(['/bin/zsh', ROOT / 'build-app.sh'], env=env)
     app = outputs / 'DroidMirror.app'
-    print(f'Release artifacts: {app}\n{apk}', flush=True)
+    print(f'Release artifacts: {app}\n{apk}\n{wear_apk}', flush=True)
     if args.build_only:
         return
     stop_mac_for_update(env)

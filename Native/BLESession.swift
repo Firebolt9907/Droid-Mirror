@@ -1,5 +1,35 @@
 import Foundation
 
+/// One authentication hello per subscription, even if Core Bluetooth repeats
+/// its notification-state callback while a disable/enable cycle is completing.
+struct BLENotificationSubscription {
+    enum Action { case none, disable, enable, authenticate }
+    private enum Phase { case idle, disabling, enabling, authenticating }
+    private var phase = Phase.idle
+
+    mutating func begin(alreadyNotifying: Bool) -> Action {
+        phase = alreadyNotifying ? .disabling : .enabling
+        return alreadyNotifying ? .disable : .enable
+    }
+    mutating func updated(notifying: Bool) -> Action {
+        switch phase {
+        case .idle: return .none
+        case .disabling:
+            guard !notifying else { return .none }
+            phase = .enabling
+            return .enable
+        case .enabling:
+            guard notifying else { return .none }
+            phase = .authenticating
+            return .authenticate
+        case .authenticating:
+            guard !notifying else { return .none }
+            phase = .enabling
+            return .enable
+        }
+    }
+}
+
 /// Core Bluetooth can retain multiple instances of one service UUID after a
 /// companion update. Try each instance once; UUID equality cannot identify it.
 struct BLEServiceCandidates<Candidate: AnyObject> {

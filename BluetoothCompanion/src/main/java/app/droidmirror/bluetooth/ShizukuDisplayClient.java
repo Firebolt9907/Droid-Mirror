@@ -29,6 +29,10 @@ final class ShizukuDisplayClient implements AutoCloseable {
     private final Consumer<Boolean> audit;
     private final BiConsumer<Integer, Boolean> ended;
     private final boolean panelOff;
+    private final boolean blackoutOverlay;
+    private volatile BlackoutMessage.State blackoutState;
+    private String blackoutComputerName;
+    private long nextBlackoutCheck;
     private volatile boolean auditKnown;
     private volatile boolean auditResult;
     private volatile boolean registered;
@@ -58,7 +62,7 @@ final class ShizukuDisplayClient implements AutoCloseable {
         return new Shizuku.UserServiceArgs(new ComponentName(context.getPackageName(), DisplayGuardService.class.getName()))
             // Bump when the embedded capture code changes: Shizuku daemons can
             // survive APK replacement and otherwise keep running the old code.
-            .daemon(true).processNameSuffix("display_guard").debuggable(false).version(52);
+            .daemon(true).processNameSuffix("display_guard").debuggable(false).version(61);
     }
     private final ServiceConnection connection = new ServiceConnection() {
         @Override public void onServiceConnected(ComponentName name, IBinder binder) {
@@ -79,7 +83,8 @@ final class ShizukuDisplayClient implements AutoCloseable {
     ShizukuDisplayClient(Context context, boolean panelOff, Consumer<String> status,
                          BiConsumer<Integer, Boolean> ended, Consumer<Boolean> audit) {
         this.context = context.getApplicationContext();
-        this.status = status; this.panelOff = panelOff; this.ended = ended; this.audit = audit;
+        this.blackoutOverlay = this.context.getSharedPreferences("ready", Context.MODE_PRIVATE).getBoolean("blackoutOverlay", false);
+        this.status = status; this.panelOff = panelOff && !blackoutOverlay; this.ended = ended; this.audit = audit;
         args = arguments(context);
         if (!authorized()) { closed = true; auditKnown = true; heartbeats.shutdown();
             ready.completeExceptionally(new IllegalStateException("Shizuku unavailable")); status.accept("Shizuku is not authorized; phone display stays on."); return; }
@@ -97,8 +102,11 @@ final class ShizukuDisplayClient implements AutoCloseable {
         if (SavedUnlockPin.paused(context)) status.accept("Automatic PIN entry is cooling down for 15 seconds; streaming remains available for manual unlock.");
         byte[] pin = SavedUnlockPin.beginAttempt(context);
         try {
-            if (!remote.startCapture(owner, observer, output, controls, computerName, panelOff, pin))
+            BlackoutMessage.State appearance = blackoutOverlay ? BlackoutMessage.read(context) : null;
+            if (!remote.startCapture(owner, observer, output, controls, computerName, panelOff, pin, blackoutOverlay, blackoutOverlay ? BlackoutMessage.create(appearance, computerName) : null))
                 throw new IllegalStateException(remote.getLastError());
+            blackoutComputerName = computerName;
+            blackoutState = appearance;
         } finally { if (pin != null) java.util.Arrays.fill(pin, (byte) 0); }
     }
     void localUse() {
@@ -155,7 +163,9 @@ final class ShizukuDisplayClient implements AutoCloseable {
                 peerDelayReported = true;
                 android.util.Log.w("DroidMirrorLease", "Peer heartbeat age=" + peerAge + "ms; Shizuku authorized=" + access);
                 for (java.util.Map.Entry<Thread, StackTraceElement[]> entry : Thread.getAllStackTraces().entrySet()) {
-                    if (!entry.getKey().getName().startsWith("Bluetooth")) continue;
+                    String name = entry.getKey().getName();
+                    if (!name.startsWith("Bluetooth") && !name.startsWith("Binder")
+                            && !name.startsWith("Ble") && !name.equals("main")) continue;
                     android.util.Log.w("DroidMirrorLease", entry.getKey().getName() + " " + entry.getKey().getState()
                         + " " + java.util.Arrays.toString(entry.getValue()));
                 }
@@ -174,13 +184,32 @@ final class ShizukuDisplayClient implements AutoCloseable {
                 String error = remote.getLastError();
                 status.accept(!error.isEmpty() ? "Display stays on: " + error : panelOff
                     ? "Streaming with phone panel off · Shizuku recovery active"
+                    : blackoutOverlay ? "Streaming with phone blackout overlay · press power to use phone"
                     : "Streaming · Shizuku local-use monitor active");
             } else if (armed && !remote.heartbeat(owner)) {
                 status.accept("Screen-off lease ended; phone display restored or recovery is retrying."); close();
             }
+            refreshBlackout(remote);
         } catch (RemoteException | RuntimeException error) {
             android.util.Log.e("DroidMirrorLease", "Session heartbeat failed", error);
             status.accept("Display guard unavailable; the shell watchdog must restore the panel."); close();
+        }
+    }
+    private void refreshBlackout(IDisplayGuard remote) throws RemoteException {
+        if (closed || !armed || blackoutState == null || SystemClock.elapsedRealtime() < nextBlackoutCheck) return;
+        nextBlackoutCheck = SystemClock.elapsedRealtime() + 1000;
+        try {
+            BlackoutMessage.State appearance = BlackoutMessage.read(context);
+            if (!appearance.matches(blackoutState)) {
+                byte[] message = BlackoutMessage.create(appearance, blackoutComputerName);
+                if (closed) return;
+                if (remote.updateBlackout(owner, message)) blackoutState = appearance;
+                else nextBlackoutCheck = SystemClock.elapsedRealtime() + 30000;
+            }
+        } catch (RuntimeException failure) {
+            // An informational clock refresh must not terminate a healthy mirror.
+            nextBlackoutCheck = SystemClock.elapsedRealtime() + 30000;
+            android.util.Log.w("DroidMirrorBlackout", "AOD refresh deferred", failure);
         }
     }
     @Override public synchronized void close() {

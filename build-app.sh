@@ -45,14 +45,18 @@ mkdir -p "$APP/Contents/Library/LaunchAgents"
 cp "$ROOT/Resources/app.droidmirror.background.plist" "$APP/Contents/Library/LaunchAgents/"
 cargo build --locked --release --manifest-path "$ROOT/PeerTransport/Cargo.toml"
 cp "$ROOT/PeerTransport/target/release/libdroidmirror_peer.dylib" "$APP/Contents/Frameworks/libdroidmirror_peer.dylib"
+# The private Music queue adapter runs in a bounded child process, never in the UI.
+/usr/bin/clang "${C_FLAGS[@]}" -dynamiclib -fobjc-arc -fblocks -mmacosx-version-min=14.0 \
+  -framework Foundation "$ROOT/Native/MusicQueueHelper.m" \
+  -o "$APP/Contents/Helpers/libDroidMirrorMusicQueue.dylib"
 # The host and background receiver share the same pairing implementation.
-BLE_SOURCES=(Sources/DroidMirror/NotificationAppPreferences.swift Native/BrowserURL.swift Native/LinkSharing.swift Native/MediaSyncState.swift Native/AppleMusicSync.swift Native/MediaPlaybackSync.swift Native/PhoneHotspot.swift Native/TaskContinuation.swift Native/ClipboardSync.swift Native/NotificationRuntime.swift Native/NotificationPresentationPolicy.swift Native/NotificationDismissal.swift Native/NotificationActions.swift Native/NotificationConversationState.swift
+BLE_SOURCES=(Sources/DroidMirror/NotificationAppPreferences.swift Native/BrowserURL.swift Native/LinkSharing.swift Native/MediaSyncState.swift Native/AppleMusicQueue.swift Native/MusicCatalogArtwork.swift Native/AppleMusicSync.swift Native/MediaPlaybackSync.swift Native/WearCompanionState.swift Native/WearCompanion.swift Native/PhoneHotspot.swift Native/TaskContinuation.swift Native/ClipboardSync.swift Native/NotificationRuntime.swift Native/NotificationPresentationPolicy.swift Native/NotificationDismissal.swift Native/NotificationActions.swift Native/NotificationConversationState.swift
   Native/NotificationIconAttachment.swift Native/NotificationCommunicationContent.swift Native/BLESession.swift Native/BLEController.swift Native/BLEIntegration.swift
   Native/BLEMenu.swift Native/DiscoveryNotifications.swift Native/BLESecurity.swift
-  Native/AndroidNotificationBridge.swift)
+  Native/PresenceRadioServer.swift Native/AndroidNotificationBridge.swift)
 xcrun swiftc "${SWIFT_FLAGS[@]}" -module-cache-path /private/tmp/droidmirror-swift-module-cache \
   -emit-library -module-name DroidMirrorBLE -target arm64-apple-macosx14.0 \
-  -framework AppKit -framework CoreBluetooth -framework UserNotifications -framework Security \
+  -framework AppKit -framework IOBluetooth -framework CoreBluetooth -framework UserNotifications -framework Security \
   "${BLE_SOURCES[@]}" -o "$APP/Contents/Frameworks/libDroidMirrorBLE.dylib"
 BIN_DIR="$(swift build -c "$CONFIGURATION" --disable-sandbox --scratch-path /tmp/droidmirror-app-build --show-bin-path)"
 cp "$BIN_DIR/DroidMirror" "$APP/Contents/MacOS/DroidMirrorHost"
@@ -65,7 +69,7 @@ RECEIVER="$APP/Contents/Helpers/DroidMirror Notifications.app/Contents"
 mkdir -p "$RECEIVER/MacOS" "$RECEIVER/Resources"
 cp "$ROOT/Resources/NotificationsInfo.plist" "$RECEIVER/Info.plist"
 xcrun swiftc "${SWIFT_FLAGS[@]}" -module-cache-path /private/tmp/droidmirror-swift-module-cache \
-  -target arm64-apple-macosx14.0 -framework AppKit -framework CoreBluetooth \
+  -target arm64-apple-macosx14.0 -framework AppKit -framework IOBluetooth -framework CoreBluetooth \
   -framework UserNotifications -framework Security "${BLE_SOURCES[@]}" \
   Native/NotificationReceiver.swift -o "$RECEIVER/MacOS/DroidMirrorNotifications"
 # A native Share extension receives web links from Safari and other apps.
@@ -77,6 +81,12 @@ xcrun swiftc "${SWIFT_FLAGS[@]}" -module-cache-path /private/tmp/droidmirror-swi
   -framework AppKit -framework UniformTypeIdentifiers Native/BrowserURL.swift \
   Native/ShareExtension/ShareViewController.swift -o "$SHARE/MacOS/DroidMirrorShare"
 cp "$ROOT/Resources/Info.plist" "$APP/Contents/Info.plist"
+# Share the existing DroidMirror artwork across the host, viewer and receiver.
+ICONSET="$BUILD_STAGE/DroidMirror.iconset"
+xcrun swift -module-cache-path /private/tmp/droidmirror-swift-module-cache \
+  "$ROOT/Native/RenderNotificationIcon.swift" "$ICONSET"
+iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/DroidMirror.icns"
+cp "$APP/Contents/Resources/DroidMirror.icns" "$RECEIVER/Resources/DroidMirror.icns"
 /usr/bin/clang "${C_FLAGS[@]}" -dynamiclib -fobjc-arc -fblocks -mmacosx-version-min=14.0 \
   -I/opt/homebrew/include -L/opt/homebrew/lib -lSDL3 \
   -framework CoreImage -framework Cocoa -framework QuartzCore \
@@ -127,9 +137,11 @@ RENDERER="$APP/Contents/Helpers/DroidMirror Renderer.app/Contents"
 mkdir -p "$RENDERER/MacOS" "$RENDERER/Resources"
 cp "$ROOT/scrcpy-5.0/build/app/scrcpy" "$RENDERER/MacOS/DroidMirrorRenderer"
 cp "$ROOT/Resources/RendererInfo.plist" "$RENDERER/Info.plist"
-# The video engine is a private app helper, with DroidMirror identity and no Dock tile.
+# The viewer owns the public Dock tile, using the same identity as its host.
+cp "$APP/Contents/Resources/DroidMirror.icns" "$RENDERER/Resources/DroidMirror.icns"
 rm -f "$APP/Contents/Helpers/scrcpy"
-cp "$ROOT/scrcpy-5.0/app/data/scrcpy.png" "$RENDERER/Resources/scrcpy.png"
+# scrcpy also uses this asset for audio-only sessions.
+cp "$ICONSET/icon_256x256@2x.png" "$RENDERER/Resources/scrcpy.png"
 cp "$ROOT/scrcpy-5.0/app/data/disconnected.png" "$RENDERER/Resources/disconnected.png"
 chmod +x "$APP/Contents/MacOS/DroidMirror"
 sh "$ROOT/Native/sign-droidmirror.sh" "$APP"
@@ -137,8 +149,9 @@ python3 "$ROOT/tools/app-bundle.py" check "$APP"
 
 # Catch any app reopened during compilation before replacing phone components.
 "$UPDATE_MAC" prepare "$UPDATE_STATE"
-# Update a connected phone in place, then resume its saved background bridge.
-# Set ANDROID_SERIAL to select a phone, or skip for a Mac-only build.
+# Update the phone in place and attempt the optional Wear OS install on connected watches.
+# ANDROID_SERIAL selects a phone; DROIDMIRROR_WATCH_SERIAL optionally selects one watch.
+# DROIDMIRROR_SKIP_ANDROID_INSTALL skips both; DROIDMIRROR_SKIP_WATCH_INSTALL skips only watches.
 if [[ "${DROIDMIRROR_SKIP_ANDROID_INSTALL:-0}" != 1 ]]; then
   export ANDROID_HOME="${ANDROID_HOME:-$HOME/Library/Android/sdk}"
   ADB="$ANDROID_HOME/platform-tools/adb"
@@ -146,40 +159,8 @@ if [[ "${DROIDMIRROR_SKIP_ANDROID_INSTALL:-0}" != 1 ]]; then
   if [[ -z "$ADB" ]]; then
     echo "Skipping Android install: adb unavailable; set ANDROID_HOME to your SDK."
   else
-    DEVICES=()
-    DEVICE_LIST="$("$ADB" devices)"
-    while read -r SERIAL DEVICE_STATE REST; do
-      if [[ "$DEVICE_STATE" == device ]]; then DEVICES+=("$SERIAL"); fi
-    done <<< "$DEVICE_LIST"
-    SERIAL="${ANDROID_SERIAL:-}"
-    if [[ -n "$SERIAL" && ${DEVICES[(Ie)$SERIAL]} == 0 ]]; then
-      echo "Android device $SERIAL is unavailable or unauthorized." >&2
-      exit 1
-    fi
-    if [[ -z "$SERIAL" && ${#DEVICES} -gt 1 ]]; then
-      echo "Multiple Android devices connected; set ANDROID_SERIAL." >&2
-      exit 1
-    fi
-    if [[ -z "$SERIAL" && ${#DEVICES} == 1 ]]; then SERIAL="$DEVICES[1]"; fi
-    if [[ -z "$SERIAL" ]]; then
-      echo "Skipping Android install: no authorized phone connected."
-    else
-      export JAVA_HOME="${JAVA_HOME:-$(/usr/libexec/java_home -v 21)}"
-      (cd "$ROOT/BluetoothCompanion" && ./gradlew --no-daemon assembleDebug)
-      "$ADB" -s "$SERIAL" install -r "$ROOT/BluetoothCompanion/build/outputs/apk/debug/DroidMirrorBluetooth-debug.apk"
-      START_RESULT="$("$ADB" -s "$SERIAL" shell am start -W \
-        -a app.droidmirror.bluetooth.action.START_READY \
-        -n app.droidmirror.bluetooth/.SilentStartActivity -f 0x10000000 2>&1)"
-      echo "$START_RESULT"
-      if [[ "$START_RESULT" == *"Error:"* || "$START_RESULT" == *"Status: timeout"* ]]; then
-        echo "Android bridge startup failed." >&2
-        exit 1
-      fi
-      "$ADB" -s "$SERIAL" shell am broadcast \
-        -a app.droidmirror.bluetooth.action.START_READY \
-        -n app.droidmirror.bluetooth/.AutomationReceiver -f 0x20
-      echo "Bridge startup requested. If NOT_CONFIGURED or PERMISSION_REQUIRED appears, complete setup in the Android app."
-    fi
+    export JAVA_HOME="${JAVA_HOME:-$(/usr/libexec/java_home -v 21)}"
+    python3 "$ROOT/tools/install-android-debug.py" --adb "$ADB"
   fi
 fi
 python3 "$ROOT/tools/app-bundle.py" publish "$APP" "$FINAL_APP"

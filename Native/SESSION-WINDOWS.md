@@ -12,6 +12,11 @@ controller. The viewer explicitly finishes AppKit launch even when the injected
 menu layer creates NSApp before SDL. This lets macOS recognize launch completion,
 menu ownership and normal Dock/AppleEvent handling. Background status updates
 change the existing phone surface without activating it over another app.
+The host sends explicit focus requests straight to the viewer without first
+activating its accessory application. Attaching video does not activate or raise
+the persistent viewer again, including when Settings has focus. Host, viewer and
+notification receiver share the DroidMirror bundle icon; stream startup leaves
+the viewer's Dock icon alone instead of replacing it with scrcpy's icon.
 The video engine remains in an isolated helper process; it is not loaded into the
 Swift host process.
 

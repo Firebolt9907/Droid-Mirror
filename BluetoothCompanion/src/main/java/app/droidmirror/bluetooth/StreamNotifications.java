@@ -28,6 +28,7 @@ final class StreamNotifications {
     }
 
     static Notification streaming(Context context, String token, long started, boolean dismissed) {
+        WearSessionAccess.streaming(context, token);
         context.getSystemService(NotificationManager.class).createNotificationChannel(
             new NotificationChannel(CHANNEL, "Phone Mirroring", NotificationManager.IMPORTANCE_LOW));
         Intent details = new Intent(context, StreamDetailsActivity.class)
@@ -72,6 +73,8 @@ final class StreamNotifications {
     }
 
     static void ended(Context context, String token) {
+        WearSessionAccess.ended(token);
+        app.droidmirror.bluetooth.bridge.WearPhoneBridge.refresh(context);
         action(context, MINIMIZE, token).cancel();
         action(context, DISCONNECT, token).cancel();
         action(context, DISMISSED, token).cancel();

@@ -6,15 +6,17 @@
 #include <libavutil/frame.h>
 #include <libavutil/pixfmt.h>
 
+enum sc_frame_content { SC_FRAME_UNKNOWN, SC_FRAME_BLACK, SC_FRAME_CONTENT };
+
 // Detect a candidate black page (not proof of secure content), allowing only a narrow, centered bottom navigation pill.
 // Accept planar YUV420 or the NV12 planes used by VideoToolbox.
-static inline bool
-sc_frame_is_fully_black(const AVFrame *frame) {
+static inline enum sc_frame_content
+sc_frame_content(const AVFrame *frame) {
     if (!frame || frame->width <= 0 || frame->height <= 0
             || (frame->format != AV_PIX_FMT_YUV420P
                 && frame->format != AV_PIX_FMT_YUVJ420P
                 && frame->format != AV_PIX_FMT_NV12)) {
-        return false;
+        return SC_FRAME_UNKNOWN;
     }
     bool full_range = frame->color_range == AVCOL_RANGE_JPEG
                       || frame->format == AV_PIX_FMT_YUVJ420P;
@@ -26,8 +28,9 @@ sc_frame_is_fully_black(const AVFrame *frame) {
     int navigation_top = frame->height - frame->height * 3 / 100;
     size_t navigation_limit = (size_t)frame->width * frame->height / 200;
     bool nv12 = frame->format == AV_PIX_FMT_NV12;
+    for (int plane = 0; plane < (nv12 ? 2 : 3); ++plane)
+        if (!frame->data[plane] || !frame->linesize[plane]) return SC_FRAME_UNKNOWN;
     for (int plane = 0; plane < (nv12 ? 2 : 3); ++plane) {
-        if (!frame->data[plane] || !frame->linesize[plane]) return false;
         int width = plane ? (frame->width + 1) / 2 : frame->width;
         if (nv12 && plane) width *= 2; // Interleaved U/V bytes.
         int height = plane ? (frame->height + 1) / 2 : frame->height;
@@ -42,12 +45,17 @@ sc_frame_is_fully_black(const AVFrame *frame) {
                             && ++navigation_pixels <= navigation_limit) {
                         continue;
                     }
-                    return false;
+                    return SC_FRAME_CONTENT;
                 }
             }
         }
     }
-    return true;
+    return SC_FRAME_BLACK;
+}
+
+static inline bool
+sc_frame_is_fully_black(const AVFrame *frame) {
+    return sc_frame_content(frame) == SC_FRAME_BLACK;
 }
 
 #endif

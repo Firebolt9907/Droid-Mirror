@@ -140,7 +140,7 @@ event_loop(struct scrcpy *s, bool has_screen) {
         }
 #endif
         bool hosted = getenv("DROIDMIRROR_SESSION_COMMANDS") != NULL;
-        if (has_screen && s->screen.rotation.active) sc_screen_tick(&s->screen);
+        if (has_screen) sc_screen_tick(&s->screen);
         bool rotating = has_screen && s->screen.rotation.active;
         int wait_ms = rotating ? sc_rotation_wait_ms(SDL_GetTicks(), s->screen.rotation.next_tick) : 50;
         if (!((hosted || rotating) ? SDL_WaitEventTimeout(&event, wait_ms) : SDL_WaitEvent(&event))) {

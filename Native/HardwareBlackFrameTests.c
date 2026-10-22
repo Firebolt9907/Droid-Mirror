@@ -3,6 +3,8 @@
 #include "../scrcpy-5.0/app/src/screen.c"
 
 int main(void) {
+    AVFrame invalid = {0}; invalid.format = AV_PIX_FMT_VIDEOTOOLBOX;
+    assert(sc_screen_frame_content(&invalid) == SC_FRAME_UNKNOWN);
     CVPixelBufferRef buffer = NULL;
     assert(CVPixelBufferCreate(NULL, 100, 200, kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
                               NULL, &buffer) == kCVReturnSuccess);
@@ -22,6 +24,7 @@ int main(void) {
     y[100 * y_stride + 50] = 235;
     CVPixelBufferUnlockBaseAddress(buffer, 0);
     assert(!sc_screen_is_secure_black_frame(&frame));
+    assert(sc_screen_frame_content(&frame) == SC_FRAME_CONTENT);
     CVPixelBufferRelease(buffer);
     puts("PASS: black-screen candidate detector reads VideoToolbox pixel buffers and preserves navigation-pill exceptions");
 }

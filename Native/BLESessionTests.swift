@@ -2,6 +2,21 @@ import Foundation
 
 @main struct BLESessionTests {
     static func main() throws {
+        var subscription = BLENotificationSubscription()
+        precondition(subscription.updated(notifying: true) == .none)
+        precondition(subscription.begin(alreadyNotifying: true) == .disable)
+        precondition(subscription.updated(notifying: true) == .none) // Late cached callback.
+        precondition(subscription.updated(notifying: false) == .enable)
+        precondition(subscription.updated(notifying: false) == .none) // Duplicate disable completion.
+        precondition(subscription.updated(notifying: true) == .authenticate)
+        for _ in 0..<10 { precondition(subscription.updated(notifying: true) == .none) }
+        // A real loss of subscription requires a fresh handshake exactly once.
+        precondition(subscription.updated(notifying: false) == .enable)
+        precondition(subscription.updated(notifying: true) == .authenticate)
+        precondition(subscription.begin(alreadyNotifying: false) == .enable)
+        precondition(subscription.updated(notifying: true) == .authenticate)
+        precondition(subscription.updated(notifying: true) == .none)
+
         final class Service { let uuid = "same-service" }
         let stale = Service(), live = Service()
         var candidates = BLEServiceCandidates<Service>()
@@ -66,6 +81,13 @@ import Foundation
         var accepted = 0
         while queue.append(["data": String(repeating: "x", count: 4096)], deadline: 30) { accepted += 1 }
         precondition(accepted > 0 && queue.bytes <= BLEOutboundQueue.limit)
+        // Expired bulk work must free all reservations before a reconnect/new
+        // command; saturation must not leak capacity or poison FIFO ordering.
+        precondition(queue.next(now: 30) == nil && queue.count == 0 && queue.bytes == 0)
+        precondition(queue.append(["type": "mediaCommand", "i": 100], deadline: 40))
+        precondition(queue.append(["type": "mediaCommand", "i": 101], deadline: 40))
+        precondition(queue.next(now: 31)!.object["i"] as? Int == 100)
+        precondition(queue.next(now: 31)!.object["i"] as? Int == 101)
         queue.reset()
         precondition(queue.count == 0 && queue.bytes == 0)
         print("PASS: duplicate service recovery, request correlation, deadlines, reset, bounded queues, control latency and bulk fairness")

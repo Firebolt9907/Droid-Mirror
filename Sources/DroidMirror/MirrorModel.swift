@@ -81,6 +81,31 @@ final class MirrorModel: ObservableObject {
         }
     }
 
+    @Published private(set) var isSavingQRPairing = false
+    private var qrPairingPresented = false
+
+    func beginQRPairing() -> Bool {
+        guard !isStarting, !isMirroring, !isPairingBluetooth else { return false }
+        isPairingBluetooth = true
+        qrPairingPresented = true
+        return true
+    }
+    func endQRPairing() {
+        qrPairingPresented = false
+        if !isSavingQRPairing { isPairingBluetooth = false }
+    }
+    func saveQRPairing(_ key: Data, address: String) async throws {
+        guard isPairingBluetooth, !isStarting, !isMirroring else { throw RunnerError.failed("Pairing is unavailable during a mirror session.") }
+        isSavingQRPairing = true
+        defer {
+            isSavingQRPairing = false
+            if !qrPairingPresented { isPairingBluetooth = false }
+        }
+        try await ClassicBluetoothTransport.pair(address: address, code: key.base64EncodedString())
+        savedPairingDeviceID = address
+        status = "Pairing key saved securely from Android."
+    }
+
     private var connectionCancelled = false
     private var stoppedForInactivity = false
     private var startTask: Task<Void, Never>?

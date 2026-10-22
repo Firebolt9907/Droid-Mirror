@@ -279,3 +279,5 @@ The mirror itself is scrcpy's hardware-accelerated window. DroidMirror deliberat
 ## ADB scrcpy profile
 
 The ADB launch profile uses a borderless 430×860 window, H.264 at 12 Mbps, 1920 px maximum size, 60 fps, zero video buffering, 30 ms audio buffering, SDK mouse/keyboard input, screen-off mirroring, stay-awake, and macOS Command remapped to Android Control when chorded with another key (standalone Command presses are not forwarded).
+
+Wear OS companion: [privacy stop, battery glance and Find my Mac](Native/WEAR-OS.md).

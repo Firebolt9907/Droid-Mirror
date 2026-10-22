@@ -32,6 +32,7 @@ final class BLEController: NSObject, ObservableObject {
     private var rejectedPeers = [UUID: Date]()
     private(set) var supportsClipboard = false
     private(set) var supportsClipboardFiles = false
+    private(set) var supportsWearCompanion = false
     private(set) var supportsMedia = false
     private(set) var supportsTaskURLs = false
     private(set) var supportsHotspot = false
@@ -51,6 +52,7 @@ final class BLEController: NSObject, ObservableObject {
     private var central: CBCentralManager!
     private var phone: CBPeripheral?
     private var endpointCharacteristic: CBCharacteristic?
+    private var notificationSubscription = BLENotificationSubscription()
     private var serviceCandidates = BLEServiceCandidates<CBService>()
     private var adbTaskRunning = false
     private var connectedEndpoint: String?
@@ -63,6 +65,7 @@ final class BLEController: NSObject, ObservableObject {
     private var pendingRequestStartedAt: Date?
     private var nextRequestID: UInt64 = 1
     private static let savedIPKey = "DroidMirror.BLE.host"
+    private var presenceRadio: PresenceRadioServer?
     private var stopped = false
 
     override init() {
@@ -72,19 +75,21 @@ final class BLEController: NSObject, ObservableObject {
         if wantsADB { adbStatus = "Waiting for Android endpoint…" }
         super.init()
         if !tailscaleIP.isEmpty { NotificationRuntime.preferences.set(tailscaleIP, forKey: Self.savedIPKey) }
+        presenceRadio = PresenceRadioServer()
         central = CBCentralManager(delegate: self, queue: nil)
         startHealthMonitor()
         startEndpointMonitor()
     }
 
     deinit {
+        presenceRadio?.stop()
         healthTimer?.cancel()
         endpointTimer?.cancel()
     }
 
     func scan() {
         guard !stopped else { return }
-        guard BLETrust.key() != nil else { status = "Choose DroidMirror → Pair Bluetooth… to pair mirroring and notifications"; return }
+        guard let key = BLETrust.key() else { status = "Choose DroidMirror → Pair Bluetooth… to pair mirroring and notifications"; return }
         guard central.state == .poweredOn else {
             status = "Bluetooth is not ready"
             return
@@ -94,14 +99,16 @@ final class BLEController: NSObject, ObservableObject {
         // not advertise again, so scanning alone can wait forever.
         let candidates = central.retrieveConnectedPeripherals(withServices: [Self.serviceID])
             + central.retrieveConnectedPeripherals(withServices: [Self.inputServiceID])
+        let remembered = BLEDiscovery.remembered(key: key)
         for peripheral in candidates {
+            guard peripheral.identifier == remembered else { continue }
             if let until = rejectedPeers[peripheral.identifier], until > Date() { continue }
             connect(peripheral)
             return
         }
         guard !central.isScanning else { return }
         status = "Scanning for Android…"
-        central.scanForPeripherals(withServices: [Self.serviceID])
+        central.scanForPeripherals(withServices: [CBUUID(nsuuid: BLEDiscovery.uuid(key: key))])
     }
 
     private func connect(_ peripheral: CBPeripheral) {
@@ -378,6 +385,7 @@ final class BLEController: NSObject, ObservableObject {
     }
 
     func stop() {
+        presenceRadio?.stop(); presenceRadio = nil
         stopped = true
         resetSecurity()
         healthTimer?.cancel()
@@ -435,7 +443,7 @@ final class BLEController: NSObject, ObservableObject {
 
     private func resetSecurity() {
         let hadSession = session != nil
-        supportsLinkSharing = false; supportsMedia = false; supportsClipboard = false
+        supportsWearCompanion = false; supportsLinkSharing = false; supportsMedia = false; supportsClipboard = false
         supportsClipboardFiles = false; supportsTaskURLs = false; supportsHotspot = false
         supportsSessionHealth = false; heartbeatPending = false
         session = nil; fragments = BLEFragments(); writes.removeAll(); outbound.reset()
@@ -453,6 +461,11 @@ final class BLEController: NSObject, ObservableObject {
               outbound.append(object, deadline: deadline) else { return false }
         drain()
         return true
+    }
+
+    /// Short-lived watch status must not sit behind queued clipboard traffic for a minute.
+    @discardableResult func sendCompanion(_ object: [String: Any]) -> Bool {
+        enqueue(object, deadline: uptime + 5)
     }
 
     /// Replies are correlated by UUID and type. No automatic retry of side effects.
@@ -521,9 +534,11 @@ final class BLEController: NSObject, ObservableObject {
             requests.receive(plain, now: uptime)
             switch plain["type"] as? String {
             case "ready":
+                if let phone, let key = BLETrust.key() { BLEDiscovery.remember(phone.identifier, key: key) }
                 supportsSessionHealth = plain["sessionHealth"] as? Int == 1
                 supportsClipboard = plain["clipboard"] as? Int == 1
                 supportsClipboardFiles = plain["clipboardFiles"] as? Int == 1
+                supportsWearCompanion = plain["watchCompanion"] as? Int == 1
                 supportsMedia = plain["media"] as? Int == 1
                 supportsTaskURLs = plain["taskUrls"] as? Int == 1
                 supportsHotspot = (plain["hotspot"] as? Int ?? 0) >= 2
@@ -532,7 +547,7 @@ final class BLEController: NSObject, ObservableObject {
                 if wantsADB || !supportsSessionHealth { requestEndpoint() }
                 send(["type": "subscribe"]); onAuthenticated?()
             case "pong": break
-            case "shareLink", "openLinkResult", "mediaState", "mediaCommand", "mediaStatus", "notification", "removed", "actionResult", "dismissResult", "minimizeMirror", "clipboard", "clipboardStatus", "clipboardResult", "clipboardFileBegin", "clipboardFileChunk", "clipboardFileAck", "clipboardFileCancel", "taskContinuation", "hotspotResult": onEvent?(plain)
+            case "watchPhoneBattery", "watchFindMac", "shareLink", "openLinkResult", "mediaState", "mediaCommand", "mediaArtworkRequest", "mediaArtworkChunk", "mediaStatus", "notification", "removed", "actionResult", "dismissResult", "minimizeMirror", "clipboard", "clipboardStatus", "clipboardResult", "clipboardFileBegin", "clipboardFileChunk", "clipboardFileAck", "clipboardFileCancel", "taskContinuation", "hotspotResult": onEvent?(plain)
             default: accept(try JSONSerialization.data(withJSONObject: plain))
             }
         } catch {
@@ -570,7 +585,11 @@ extension BLEController: CBCentralManagerDelegate {
         advertisementData: [String: Any],
         rssi RSSI: NSNumber
     ) {
-        guard phone == nil else { return }
+        guard !stopped, phone == nil, let key = BLETrust.key() else { return }
+        let advertised = (advertisementData[CBAdvertisementDataServiceUUIDsKey] as? [CBUUID] ?? [])
+            .compactMap { UUID(uuidString: $0.uuidString) }
+        guard BLEDiscovery.permits(peripheral.identifier, remembered: BLEDiscovery.remembered(key: key),
+                                   advertised: advertised, discovery: BLEDiscovery.uuid(key: key)) else { return }
         if let until = rejectedPeers[peripheral.identifier], until > Date() { return }
         connect(peripheral)
     }
@@ -668,7 +687,8 @@ extension BLEController: CBPeripheralDelegate {
         // A surviving physical link can retain Core Bluetooth's subscription
         // cache after Android replaces its GATT server. Clear it before enabling
         // again so the new server receives an actual descriptor write.
-        peripheral.setNotifyValue(!item.isNotifying, for: item)
+        let action = notificationSubscription.begin(alreadyNotifying: item.isNotifying)
+        peripheral.setNotifyValue(action == .enable, for: item)
     }
 
     func peripheralIsReady(toSendWriteWithoutResponse peripheral: CBPeripheral) {
@@ -697,11 +717,14 @@ extension BLEController: CBPeripheralDelegate {
     ) {
         guard phone?.identifier == peripheral.identifier, characteristic === endpointCharacteristic, !stopped else { return }
         if let error { status = error.localizedDescription; rebuildBLESession(peripheral); return }
-        guard characteristic.isNotifying else {
+        let action = notificationSubscription.updated(notifying: characteristic.isNotifying)
+        if action == .enable {
             peripheral.setNotifyValue(true, for: characteristic)
             return
         }
+        guard action == .authenticate else { return }
         do {
+            resetSecurity()
             status = "Authenticating notification connection…"
             guard let key = BLETrust.key() else { throw BLECryptoError.invalid }
             session = try BLESecureSession(key: key, nonce: BLETrust.random())

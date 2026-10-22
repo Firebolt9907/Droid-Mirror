@@ -63,7 +63,10 @@ fail without exposing its entry frames. The next connection must stream normally
 for manual unlock while automatic entry cools down across app restarts. Reconnecting after 15 seconds
 can try the PIN again.
 The Mac keeps the loading view over transient fully black frames and starts the
-entrance animation on content. The loading overlay stays above SDL’s newly created Metal surface during warmup,
+entrance animation only after inspectable nonblack content has remained on the video surface
+for 150 ms. A black or uninspectable frame resets that confirmation period, so a
+startup flash cannot consume the animation. Static content is confirmed by the
+render loop even if no new frames arrive. The loading overlay stays above SDL’s newly created Metal surface during warmup,
 preventing empty-drawable flashes. A genuinely black/protected app receives a bounded
 1.5-second fallback without the entrance animation.
 

@@ -5,6 +5,7 @@
   <key>CFBundleIdentifier</key><string>app.droidmirror.renderer</string>
   <key>CFBundleName</key><string>DroidMirror</string>
   <key>CFBundleDisplayName</key><string>DroidMirror</string>
+  <key>CFBundleIconFile</key><string>DroidMirror.icns</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>LSUIElement</key><false/>
   <key>NSHighResolutionCapable</key><true/>

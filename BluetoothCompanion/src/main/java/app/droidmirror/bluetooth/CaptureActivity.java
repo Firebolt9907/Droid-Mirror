@@ -136,7 +136,10 @@ public final class CaptureActivity extends Activity {
     }
 
     private void pairingPage() {
-        card("1. Save your private code on the Mac", "On your Mac, open DroidMirror → Set Up Phone… and choose this phone. At Pair DroidMirror, enter the code shown here. This long private code is separate from the short system Bluetooth code.");
+        card("1. Save your private code on the Mac", "On your Mac, open DroidMirror → Set Up Phone… and choose this phone. At Pair DroidMirror, choose Pair with QR code and scan it here, or enter the code manually. This long private code is separate from the short system Bluetooth code.");
+        page.addView(button("Scan Mac QR code", () -> {
+            if (selectMac()) startActivity(new Intent(this, QRPairingActivity.class).putExtra("peer", chosenPeer));
+        }));
         page.addView(button("Show pairing code", this::showCode));
         card("2. Keep the connection ready", "Enable the background bridge below. It lets your Mac start mirroring when needed. Your Mac will verify the private code on its first connection.");
         page.addView(button("Enable background bridge", this::enableBridge));
@@ -216,11 +219,22 @@ public final class CaptureActivity extends Activity {
         options.addView(button("Allow notification forwarding (optional)", () -> open(new Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))));
         if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED)
             options.addView(button("Allow DroidMirror status notifications", () -> requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, 3)));
-        options.addView(button("Notifications and wireless ADB (optional)", () -> open(new Intent(this, app.droidmirror.bluetooth.bridge.BridgeSettingsActivity.class))));
+        options.addView(button("Notification forwarding setup and background features", () -> open(new Intent(this, app.droidmirror.bluetooth.bridge.BridgeSettingsActivity.class))));
         screenOff = new CheckBox(this); screenOff.setText("Turn phone display off while mirroring");
         screenOff.setChecked(getSharedPreferences("ready", MODE_PRIVATE).getBoolean("panelOff", true));
         screenOff.setOnCheckedChangeListener((v, checked) -> getSharedPreferences("ready", MODE_PRIVATE).edit().putBoolean("panelOff", checked).apply());
         options.addView(screenOff);
+        CheckBox blackout = new CheckBox(this);
+        blackout.setText("Black out phone with mirroring message (optional)");
+        blackout.setChecked(getSharedPreferences("ready", MODE_PRIVATE).getBoolean("blackoutOverlay", false));
+        blackout.setEnabled(ShizukuDisplayClient.authorized() && Build.VERSION.SDK_INT >= 31);
+        screenOff.setEnabled(ShizukuDisplayClient.authorized() && !blackout.isChecked());
+        blackout.setOnCheckedChangeListener((v, checked) -> {
+            getSharedPreferences("ready", MODE_PRIVATE).edit().putBoolean("blackoutOverlay", checked).apply();
+            screenOff.setEnabled(ShizukuDisplayClient.authorized() && !checked);
+        });
+        options.addView(blackout);
+        options.addView(text("Applies to your next mirror session. The black overlay replaces panel-off mode and shows a grey mirroring message while your Mac shows the phone content. Press the power button to end mirroring and return to the lock screen. Requires Android 12 or later and Shizuku. The display remains powered on. Physical touchscreen input is blocked while Mac controls remain available.", 15, false));
         options.addView(button("Automatic unlock / saved PIN (optional)", () -> open(new Intent(this, UnlockPinActivity.class))));
         options.addView(button("Restore phone display", () -> ShizukuDisplayClient.restoreDisplay(this, value -> runOnUiThread(() -> status.setText(value)))));
         options.addView(button("Stop background bridge", () -> {
@@ -249,7 +263,7 @@ public final class CaptureActivity extends Activity {
             + (bridge ? "Bridge: " + runtime.getStatus() : BackgroundBridgePreferences.enabled(this) ? "Bridge enabled · waiting for service" : "Enable the background bridge"));
         next.setEnabled(step == 0 ? selected : step == 1 ? authorized
             : step == 2 ? bluetooth && selected && authorized && bridge && keySaved && saved.equals(chosenPeer) : true);
-        if (screenOff != null) screenOff.setEnabled(authorized);
+        if (screenOff != null) screenOff.setEnabled(authorized && !getSharedPreferences("ready", MODE_PRIVATE).getBoolean("blackoutOverlay", false));
     }
 
     private boolean hasBluetoothPermissions() {

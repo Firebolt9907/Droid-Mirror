@@ -34,10 +34,15 @@ int main(void) {
     assert(sc_frame_is_fully_black(&frame));
     frame.format = AV_PIX_FMT_RGB24;
     assert(!sc_frame_is_fully_black(&frame));
+    assert(sc_frame_content(&frame) == SC_FRAME_UNKNOWN);
     frame.format = AV_PIX_FMT_YUV420P;
     frame.data[2] = NULL;
     assert(!sc_frame_is_fully_black(&frame));
     assert(!sc_frame_is_fully_black(NULL));
+    assert(sc_frame_content(NULL) == SC_FRAME_UNKNOWN);
+    y[0] = 235;
+    assert(sc_frame_content(&frame) == SC_FRAME_UNKNOWN); // Missing plane is not confirmed content.
+    y[0] = 0;
     unsigned char uv[8 * 2];
     memset(uv, 255, sizeof(uv));
     for (int row = 0; row < 2; ++row) memset(uv + row * 8, 128, 6);

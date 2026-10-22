@@ -6,12 +6,15 @@ final class MediaPlaybackSync {
     static let enabledKey = "DroidMirror.media.enabled"
     weak var controller: BLEController?
     private let music: AppleMusicAccess
+    private let artwork = MediaArtworkTransfer()
+    private var phoneArtwork: NSImage?
     private var phone: MediaSnapshot?
     private var timer: Timer?
     private var targets = [(MPRemoteCommand, Any)]()
     private var published = false
     private var subscribed = false
     private var phoneStatus = ""
+    private var sentQueueRevision = ""
     private var epoch = 0
     private(set) var status = "Media syncing off"
     private var musicPlaying: Bool { music.snapshot.map { $0.fresh() && $0.playing } ?? false }
@@ -34,7 +37,18 @@ final class MediaPlaybackSync {
     func receive(_ event: [String: Any]) {
         guard enabled, subscribed, controller?.authenticated == true else { return }
         switch event["type"] as? String {
-        case "mediaState": phone = MediaSnapshot(event); render()
+        case "mediaState":
+            phone = MediaSnapshot(event)
+            artwork.observe(phone == nil ? [:] : event)
+            phoneArtwork = phone == nil ? nil : MediaArtwork.decode(artwork.completed ?? (event["artwork"] as? String))
+            requestArtwork()
+            render()
+        case "mediaArtworkRequest":
+            if music.snapshot?.fresh() == true, let reply = artwork.reply(event) { controller?.send(reply) }
+        case "mediaArtworkChunk":
+            guard phone?.fresh() == true, artwork.receive(event) else { return }
+            phoneArtwork = MediaArtwork.decode(artwork.completed)
+            requestArtwork(); render()
         case "mediaCommand": music.command(event)
         case "mediaStatus": phoneStatus = event["message"] as? String ?? "Phone media unavailable"
         default: break
@@ -51,20 +65,32 @@ final class MediaPlaybackSync {
         music.poll { [weak self] value in
             guard let self, self.epoch == generation, self.enabled, self.subscribed,
                   self.controller?.authenticated == true else { return }
-            var event = value; event["type"] = "mediaState"
-            self.controller?.send(event)
+            var event = self.artwork.prepare(value); event["type"] = "mediaState"
+            let queue = event.removeValue(forKey: "_queue") as? [String: Any]
+            if self.controller?.send(event) == true {
+                if let queue, let revision = queue["revision"] as? String {
+                    if revision != self.sentQueueRevision, self.controller?.send(queue) == true { self.sentQueueRevision = revision }
+                } else { self.sentQueueRevision = "" }
+            }
             self.status = self.phoneStatus.isEmpty ? self.music.status : self.phoneStatus + " · " + self.music.status
             self.render()
         }
     }
+    private func requestArtwork() {
+        if let request = artwork.request() { controller?.send(request) }
+    }
     private func render() {
         guard let phone, phone.fresh(), !musicPlaying else { unpublish(); return }
         if !published { installCommands(); published = true }
-        MPNowPlayingInfoCenter.default().nowPlayingInfo = [
+        var info: [String: Any] = [
             MPMediaItemPropertyTitle: phone.title, MPMediaItemPropertyArtist: phone.artist,
             MPMediaItemPropertyAlbumTitle: phone.album, MPMediaItemPropertyPlaybackDuration: phone.duration,
             MPNowPlayingInfoPropertyElapsedPlaybackTime: phone.elapsed(),
             MPNowPlayingInfoPropertyPlaybackRate: phone.playing ? 1.0 : 0.0]
+        if let image = phoneArtwork {
+            info[MPMediaItemPropertyArtwork] = MPMediaItemArtwork(boundsSize: image.size) { _ in image }
+        }
+        MPNowPlayingInfoCenter.default().nowPlayingInfo = info
         MPNowPlayingInfoCenter.default().playbackState = phone.playing ? .playing : .paused
         let center = MPRemoteCommandCenter.shared()
         center.playCommand.isEnabled = phone.actions.contains("play")
@@ -104,7 +130,7 @@ final class MediaPlaybackSync {
         published = false
     }
     func clear() {
-        epoch += 1; subscribed = false; phoneStatus = ""; phone = nil; music.clear(); unpublish()
+        epoch += 1; sentQueueRevision = ""; subscribed = false; phoneStatus = ""; phone = nil; phoneArtwork = nil; artwork.clear(); music.clear(); unpublish()
     }
     func stop() {
         controller?.send(["type": "mediaSubscribe", "enabled": false])

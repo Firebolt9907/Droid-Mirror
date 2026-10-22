@@ -42,7 +42,12 @@ final class PeerVideoTransport implements AutoCloseable {
 
     private synchronized String addresses() { return handle == 0 ? "" : nativeAddresses(handle); }
 
-    void attach(BluetoothWire wire) { this.wire = wire; }
+    synchronized void attach(BluetoothWire wire) {
+        this.wire = wire;
+        // Publish immediately after BLE authentication instead of waiting for
+        // the idle one-second interface refresh. Capture starts independently.
+        notifyAll();
+    }
 
     private void publishAddresses() {
         String previous = "";
@@ -84,7 +89,11 @@ final class PeerVideoTransport implements AutoCloseable {
                         android.util.Log.i("DroidMirrorIroh", "Shared " + records.size() + " direct IP candidates over authenticated BLE");
                     }
                 }
-                Thread.sleep(1000);
+                synchronized (this) {
+                    // If attach raced this iteration, process the new session
+                    // now rather than losing its wakeup just before wait().
+                    if (!closed && this.wire == wire) wait(1000);
+                }
             }
         } catch (InterruptedException stopped) { Thread.currentThread().interrupt(); }
     }

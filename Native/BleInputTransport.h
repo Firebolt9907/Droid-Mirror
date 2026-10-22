@@ -8,6 +8,7 @@
 @property(nonatomic, weak) id<DMBleInputDelegate> delegate;
 @property(atomic, readonly) BOOL ready;
 @property(atomic, readonly) BOOL recovering;
+@property(atomic, readonly) BOOL pairingProofRejected;
 @property(atomic, copy, readonly) NSString *connectionStage;
 - (instancetype)initWithPairingKey:(NSData *)key;
 - (BOOL)send:(NSData *)bytes;

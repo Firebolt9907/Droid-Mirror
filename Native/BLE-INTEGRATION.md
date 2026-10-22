@@ -254,14 +254,20 @@ include queue time. Requests are not retried across sessions: callers must decid
 whether retrying an operation is safe. Link sharing uses this API; existing
 notification and hotspot policies keep their feature-specific correlation.
 
-Updated Android endpoints advertise write-without-response and notification support,
-while retaining write-with-response and indications for older clients. After mutual
-authentication, the Mac streams writes while `canSendWriteWithoutResponse` is true
-and resumes in `peripheralIsReady(toSendWriteWithoutResponse:)`. Handshake writes
-and older endpoints retain ATT responses. Android honors the selected CCC mode and
-waits for `onNotificationSent` before sending another notification/indication.
-Application replies, file byte-offset acknowledgments, encryption and directional
-sequence checks still determine success; streaming writes alone do not.
+The Android notification endpoint advertises acknowledged writes and confirmed
+indications. Both directions wait for the peer's ATT acknowledgement instead of
+filling the shared Bluetooth transmit queue with unconfirmed fragments. The Mac
+keeps its capability-based streaming path for other endpoints, but this companion
+does not advertise write-without-response or notification mode. Handshake and
+application authentication, file byte-offset acknowledgments, encryption and
+directional sequence checks remain unchanged. ATT completion alone still does
+not mean application success.
+
+Android waits for `onNotificationSent` before sending the next indication.
+An unconfirmed notification's callback can precede radio delivery; a large
+snapshot can therefore congest the physical link shared with mirror input and
+video ACKs. Confirmed indications provide receiver backpressure. Background
+commands use the matching write-with-response path for the reverse direction.
 
 Both peers bound outbound queues and schedule plaintext messages before sealing.
 Health probes/replies take priority over waiting messages.
@@ -290,3 +296,31 @@ bash Native/test-integrated-ble.sh
 
 Physical-device checks remain necessary for a locked phone, Bluetooth off/on,
 companion update/restart, and simultaneous mirroring/file/control traffic.
+
+## Paired-device BLE discovery
+
+Both Android BLE advertisers now advertise a pairing-specific 128-bit UUID rather
+than the generic GATT service UUID. It is the first 16 bytes of
+HMAC-SHA256(notificationKey, ASCII `DroidMirror BLE discovery v1`), with UUID
+version 8 and RFC variant bits. Input derives notificationKey from its existing
+master pairing code. GATT service/characteristic UUIDs and authentication stay
+unchanged. The discovery UUID is public metadata, not a credential; a copied
+advertisement still cannot pass authentication. It is stable for a pairing and
+therefore is not intended to provide anti-tracking privacy.
+
+Mac discovery accepts that UUID, or a previously authenticated Core Bluetooth
+peripheral UUID saved under that discovery UUID in the shared
+`app.droidmirror.ble-peers` preferences suite. Generic service matches and unknown
+system-connected peripherals never trigger connections. Pairing-key changes use
+a different scope; failed handshakes never save a peripheral identity. A changed
+BLE privacy identity can be rediscovered through the pairing-specific UUID.
+
+Update both Mac and Android together; there is deliberately no automatic fallback
+to probing generic advertisements from older companions. The existing Pair Mac /
+Save pairing code actions provision the discovery key along with authentication.
+Stop active mirror sessions gracefully before updating either component, then
+restart the Android background bridge. Saved pairing codes can be retained.
+
+This avoids unrelated connection attempts and handshakes. It does not eliminate
+scanning while the paired phone is absent, so battery savings are workload-dependent
+and have not been measured on hardware.

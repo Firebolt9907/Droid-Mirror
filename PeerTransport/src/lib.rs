@@ -18,7 +18,7 @@ use std::{
 };
 use tokio::{
     io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf},
-    sync::oneshot,
+    sync::{oneshot, watch},
 };
 use zeroize::Zeroize;
 
@@ -158,11 +158,49 @@ fn paired(conn: &Connection, expected: EndpointId) -> bool {
     false
 }
 
+// BLE hints commonly arrive after the first multicast dial has started. Keep
+// the same local consumer and deadline, but immediately redial with new hints.
+// A failed discovery attempt must also stay alive for those authenticated hints.
+async fn connect_direct(
+    ep: &Endpoint,
+    peer: EndpointId,
+    hints: &RwLock<Vec<SocketAddr>>,
+    mut changed: watch::Receiver<u64>,
+    alpn: &'static [u8],
+) -> Result<Connection> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        changed.borrow_and_update();
+        let mut address = EndpointAddr::new(peer);
+        for hint in hints.read().expect("address hints poisoned").iter() {
+            address = address.with_ip_addr(*hint);
+        }
+        tokio::select! {
+            result = tokio::time::timeout_at(deadline, ep.connect(address, alpn)) => {
+                match result {
+                    Ok(Ok(conn)) => return Ok(conn),
+                    Ok(Err(error)) => {
+                        tokio::time::timeout_at(deadline, changed.changed()).await
+                            .context("direct IP discovery timed out")?
+                            .context("address publisher stopped")?;
+                        diagnostic(&format!("Retrying direct IP with updated BLE hints after {error}"));
+                    }
+                    Err(error) => return Err(error.into()),
+                }
+            }
+            result = changed.changed() => {
+                result.context("address publisher stopped")?;
+            }
+        }
+    }
+}
+
 async fn desktop(
     ep: Endpoint,
     peer: EndpointId,
     listener: TcpListener,
     hints: Arc<RwLock<Vec<SocketAddr>>>,
+    hint_updates: watch::Receiver<u64>,
     alpn: &'static [u8],
 ) -> Result<()> {
     listener.set_nonblocking(true)?;
@@ -172,12 +210,8 @@ async fn desktop(
         let (socket, _) = listener.accept().await?;
         socket.set_nodelay(true)?;
         // One local consumer and one QUIC stream at a time; no unbounded task spawning.
-        let mut address = EndpointAddr::new(peer);
-        for hint in hints.read().expect("address hints poisoned").iter() {
-            address = address.with_ip_addr(*hint);
-        }
-        match tokio::time::timeout(Duration::from_secs(5), ep.connect(address, alpn)).await {
-            Ok(Ok(conn)) => {
+        match connect_direct(&ep, peer, &hints, hint_updates.clone(), alpn).await {
+            Ok(conn) => {
                 if let Some(path) = conn.paths().iter().find(|path| path.is_selected()) {
                     diagnostic(&format!(
                         "Paired QUIC connection established over direct IP: {:?}",
@@ -269,6 +303,7 @@ pub struct Bridge {
     audio_port: u16,
     local: Arc<RwLock<Option<Endpoint>>>,
     remote: Arc<RwLock<Vec<SocketAddr>>>,
+    hint_updates: watch::Sender<u64>,
     stop: Option<oneshot::Sender<()>>,
     worker: Option<thread::JoinHandle<()>>,
 }
@@ -314,6 +349,7 @@ fn start(mut key: [u8; 32], is_phone: bool) -> Result<(Bridge, u16)> {
         .build()?;
     let local = Arc::new(RwLock::new(None));
     let remote = Arc::new(RwLock::new(Vec::new()));
+    let (hint_updates, updates) = watch::channel(0);
     let worker_local = local.clone();
     let worker_remote = remote.clone();
     let (stop, stopped) = oneshot::channel();
@@ -329,8 +365,8 @@ fn start(mut key: [u8; 32], is_phone: bool) -> Result<(Bridge, u16)> {
                     if let Some(listener) = listener {
                         let audio_listener = audio_listener.context("audio listener missing")?;
                         tokio::try_join!(
-                            desktop(ep.clone(), peer, listener, worker_remote.clone(), ALPN),
-                            desktop(ep, peer, audio_listener, worker_remote, AUDIO_ALPN)
+                            desktop(ep.clone(), peer, listener, worker_remote.clone(), updates.clone(), ALPN),
+                            desktop(ep, peer, audio_listener, worker_remote, updates, AUDIO_ALPN)
                         )?;
                         Ok(())
                     }
@@ -351,6 +387,7 @@ fn start(mut key: [u8; 32], is_phone: bool) -> Result<(Bridge, u16)> {
             audio_port,
             local,
             remote,
+            hint_updates,
             stop: Some(stop),
             worker: Some(worker),
         },
@@ -397,7 +434,12 @@ pub unsafe extern "C" fn dm_peer_audio_port(bridge: *const Bridge) -> u16 {
 fn add_hint(bridge: &Bridge, family: u8, bytes: &[u8], port: u16) -> bool {
     let mut hints = bridge.remote.write().expect("address hints poisoned");
     if family == 0 {
-        hints.clear();
+        if !hints.is_empty() {
+            hints.clear();
+            bridge
+                .hint_updates
+                .send_modify(|version| *version = version.wrapping_add(1));
+        }
         return true;
     }
     if port == 0 {
@@ -420,6 +462,9 @@ fn add_hint(bridge: &Bridge, family: u8, bytes: &[u8], port: u16) -> bool {
     let address = SocketAddr::new(ip, port);
     if !hints.contains(&address) && hints.len() < 32 {
         hints.push(address);
+        bridge
+            .hint_updates
+            .send_modify(|version| *version = version.wrapping_add(1));
     }
     true
 }
@@ -662,6 +707,52 @@ mod tests {
             drop(bridge);
             conn.close(0u32.into(), b"done");
             server.close().await;
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn late_ble_hints_wake_an_in_flight_dial_without_reopening_the_local_stream() {
+        tokio::time::timeout(Duration::from_secs(4), async {
+            let key = [91; 32];
+            // No multicast or public lookup: only the later BLE-equivalent hint
+            // can connect these endpoints.
+            let server = Endpoint::builder(presets::Minimal)
+                .secret_key(identity(&key, b"phone"))
+                .alpns(vec![ALPN.to_vec()])
+                .bind()
+                .await
+                .unwrap();
+            let client = Endpoint::builder(presets::Minimal)
+                .secret_key(identity(&key, b"mac"))
+                .bind()
+                .await
+                .unwrap();
+            let hints = Arc::new(RwLock::new(vec!["192.0.2.1:12345".parse().unwrap()]));
+            let (updates, receiver) = watch::channel(0);
+            let dial_hints = hints.clone();
+            let dial_client = client.clone();
+            let peer = server.id();
+            let dial = tokio::spawn(async move {
+                connect_direct(&dial_client, peer, &dial_hints, receiver, ALPN).await
+            });
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            assert!(!dial.is_finished());
+            let shared_at = std::time::Instant::now();
+            *hints.write().unwrap() = server.addr().ip_addrs().copied().collect();
+            updates.send_modify(|version| *version += 1);
+            let incoming = server.accept().await.unwrap().await.unwrap();
+            let outgoing = dial.await.unwrap().unwrap();
+            assert!(
+                shared_at.elapsed() < Duration::from_secs(2),
+                "late hints must not wait for the old five-second dial"
+            );
+            assert!(paired(&incoming, identity(&key, b"mac").public()));
+            assert_eq!(outgoing.remote_id(), peer);
+            outgoing.close(0u32.into(), b"done");
+            server.close().await;
+            client.close().await;
         })
         .await
         .unwrap();

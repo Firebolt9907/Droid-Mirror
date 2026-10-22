@@ -104,6 +104,7 @@ struct sc_screen {
     bool window_shown;
     bool reported_visible;
     struct sc_startup_reveal startup_reveal;
+    bool startup_content;
     bool secure_black_frame;
     bool secure_request_pending;
     Uint64 secure_check_at;

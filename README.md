@@ -62,9 +62,13 @@ Shizuku normally needs to be started again after restarting a non-rooted phone.
 
 ### Pair the two DroidMirror apps
 
-1. In DroidMirror on your phone, tap **Show pairing code**.
-2. Enter and save that code in the Mac's DroidMirror setup guide. This is a separate, private DroidMirror code—not the system Bluetooth pairing code. Keep it private.
+1. Select the phone in the Mac's DroidMirror setup guide and choose **Pair with QR code…**. On Android, select that Mac and tap **Scan Mac QR code**.
+2. Wait for both devices to confirm the key was saved. This transfers the existing private key without changing it. With older versions, tap **Show pairing code** on Android and enter and save it on the Mac instead. This private code is separate from the system Bluetooth pairing code; keep it private.
 3. On the phone, tap **Enable background bridge**. This keeps the phone ready for connections from your Mac.
+
+Automatic BLE discovery is restricted to your DroidMirror pairing. Use matching,
+updated Mac and Android apps; older generic BLE advertisements are ignored. Stop
+any active mirror before updating, then restart the phone's background bridge.
 
 ### Start your first mirror
 
@@ -81,6 +85,8 @@ Keep Bluetooth enabled and the Android background bridge running. Lock your phon
 After restarting your phone, unlock it once and start Shizuku again if needed. If DroidMirror isn't ready, open it on the phone and enable the background bridge again.
 
 Notification forwarding and other extras are optional. You can finish the first mirror before setting them up.
+
+For a black phone screen with a grey mirroring message, open **Optional features and recovery** on Android and enable **Black out phone with mirroring message (optional)**. It is off by default, requires Android 12 or later and Shizuku, and takes effect on your next mirror session. It replaces panel-off mode while enabled. Press the power button to end mirroring and return to the phone’s lock screen. The display stays powered on. Physical touchscreen input is blocked while Mac controls remain available. See [blackout overlay details and validation](Native/BLACKOUT-OVERLAY.md).
 
 ### Phone audio over Wi-Fi
 
@@ -110,3 +116,7 @@ If Android says the update conflicts with the installed app, the apps may use di
 - **Video is slow:** check that both devices are on the same Wi-Fi network and leave the connection mode on Automatic. Bluetooth-only video uses lower quality.
 
 For source builds, connection details, and advanced features, see the [technical README](README-TECHNICAL.md).
+
+### Mac left-behind alerts (experimental)
+
+On Android, open **Notifications and wireless ADB (optional)** and enable **Mac left-behind alerts (experimental)**. Keep the background bridge enabled and DroidMirror running on your paired Mac. The phone can notify you after at least 45 seconds of Bluetooth separation when recent movement is detected. Allow DroidMirror notifications. Mac sleep or disabling Mac Bluetooth can cause false alerts; closed-lid reliability needs device testing. See [behavior and limitations](Native/LEFT-BEHIND.md).

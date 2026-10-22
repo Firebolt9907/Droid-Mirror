@@ -32,6 +32,14 @@ public final class WheelScrollTest {
         scroll.add(0,-100,0);scroll.tick(16);scroll.cancel();int moves=trace.moves;scroll.tick(1000);
         require(trace.ups==1 && trace.moves==moves && !trace.down);
         scroll.add(0,0,1100); require(!scroll.isActive());
+        for (int[] anchor : new int[][] {{1,1},{462,1054},{51,817}}) {
+            trace=new Trace(); scroll=new WheelScroll(464,1056,anchor[0],anchor[1],trace);
+            scroll.add(anchor[0]==1 ? -40 : 40,anchor[1]==1 ? -40 : 40,0);
+            require(trace.x==anchor[0] && trace.y==anchor[1]);
+            settle(scroll,16);
+            require(trace.ups==trace.downs && Math.abs(Math.abs(trace.distanceX)-40)<=1
+                    && Math.abs(Math.abs(trace.distanceY)-40)<=1);
+        }
         System.out.println("Wheel scroll: local frame pacing, summed distance, reversal, rebasing, idle release and cancellation passed");
     }
 }

@@ -155,7 +155,8 @@ public final class AdbStreamSession implements AutoCloseable {
         com.genymobile.scrcpy.control.PinUnlock.unlock(pin, new com.genymobile.scrcpy.control.PinUnlock.Device() {
             public boolean locked() throws Exception { return (boolean) locked.invoke(window); }
             public void key(int keycode) throws Exception {
-                if (!Device.pressReleaseKeycode(keycode, 0, Device.INJECT_MODE_WAIT_FOR_FINISH))\n                    throw new IllegalStateException("Unlock input unavailable");
+                if (!Device.pressReleaseKeycode(keycode, 0, Device.INJECT_MODE_WAIT_FOR_FINISH))
+                    throw new IllegalStateException("Unlock input unavailable");
             }
             public void sleep(long millis) { SystemClock.sleep(millis); }
             public long now() { return SystemClock.elapsedRealtime(); }

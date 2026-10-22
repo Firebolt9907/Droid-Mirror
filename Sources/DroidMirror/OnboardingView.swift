@@ -166,9 +166,10 @@ struct OnboardingView: View {
 
     private var pairingStep: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("On your phone, tap Show pairing code, then enable the background bridge. Enter that code below for \(model.selectedDevice?.displayName ?? "your selected phone").")
+            Text("Pair \(model.selectedDevice?.displayName ?? "your selected phone") by showing a QR code here and tapping Scan Mac QR code on Android. You can also tap Show pairing code on Android and enter it below.")
             Text("This is the long private code from DroidMirror, separate from the short system Bluetooth code. Keep it private.")
                 .font(.callout).foregroundStyle(.secondary)
+            QRPairingButton()
             SecureField("Private DroidMirror pairing code", text: $model.bluetoothPairingCode)
                 .textFieldStyle(.roundedBorder).disabled(busy)
             HStack {

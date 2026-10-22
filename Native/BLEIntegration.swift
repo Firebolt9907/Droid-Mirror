@@ -22,6 +22,9 @@ public func refreshDroidMirrorBLEMenu() {
 func shareDroidMirrorLink(_ url: URL) { integration?.shareLink(url) }
 
 private final class BLEIntegration: NSObject {
+    private let wear = WearCompanion()
+    private var batteryItem: NSMenuItem?
+    private var remoteBatteryStatus = "Phone battery unavailable"
     private let links = LinkSharing()
     func shareLink(_ url: URL) { if NotificationRuntime.background { links.share(url) } }
     private var mirrorTarget = MirrorWindowCommandTarget()
@@ -64,7 +67,7 @@ private final class BLEIntegration: NSObject {
         if NotificationRuntime.background && NotificationRuntime.preferences.bool(forKey: enabledKey) { start() }
         let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
             guard let self else { return }
-            if NotificationRuntime.background { self.links.tick(); self.publishStatus() }
+            if NotificationRuntime.background { self.links.tick(); self.wear.tick(); self.publishStatus() }
             else { self.refreshMenu() }
         }
         self.timer = timer
@@ -84,6 +87,7 @@ private final class BLEIntegration: NSObject {
         menuObservers.append(distributed.addObserver(forName: Notification.Name("app.droidmirror.receiverStatus"), object: nil, queue: .main) {
             [weak self] event in
             guard !NotificationRuntime.background, let self else { return }
+            self.remoteBatteryStatus = event.userInfo?["battery"] as? String ?? self.remoteBatteryStatus
             self.remoteMediaStatus = event.userInfo?["media"] as? String ?? self.remoteMediaStatus
             self.remoteClipboardStatus = event.userInfo?["clipboard"] as? String ?? self.remoteClipboardStatus
             self.remoteStatus = event.userInfo?["status"] as? String ?? self.remoteStatus
@@ -94,6 +98,8 @@ private final class BLEIntegration: NSObject {
             [weak self] _ in
             guard NotificationRuntime.background, let self else { return }
             BLETrust.invalidate()
+            self.wear.clear()
+            self.wear.controller = nil
             self.media?.clear()
             self.media?.controller = nil
             self.hotspot?.controller = nil
@@ -131,6 +137,7 @@ private final class BLEIntegration: NSObject {
             "status": controller?.status ?? "Bluetooth receiver disabled",
             "bleDiagnostics": controller?.diagnostics ?? "disabled",
             "notifications": phoneNotifications?.diagnostics ?? "unavailable",
+            "battery": wear.batteryStatus,
             "media": media?.status ?? "Media syncing off",
             "clipboard": clipboard?.status ?? "Clipboard mirroring off",
             "endpoint": controller?.adbStatus ?? "Wireless ADB off"])
@@ -140,13 +147,16 @@ private final class BLEIntegration: NSObject {
         let bridge = BLEController()
         controller = bridge
         links.controller = bridge
+        wear.controller = bridge
         phoneNotifications?.controller = bridge
         media?.controller = bridge
         clipboard?.controller = bridge
         taskContinuation?.controller = bridge
         hotspot?.controller = bridge
         bridge.onEvent = { [weak self] event in
-            if ["shareLink", "openLinkResult"].contains(event["type"] as? String ?? "") {
+            if (event["type"] as? String)?.hasPrefix("watch") == true {
+                self?.wear.receive(event)
+            } else if ["shareLink", "openLinkResult"].contains(event["type"] as? String ?? "") {
                 self?.links.receive(event)
             } else if (event["type"] as? String)?.hasPrefix("media") == true {
                 self?.media?.receive(event)
@@ -170,6 +180,7 @@ private final class BLEIntegration: NSObject {
             }
         }
         bridge.onDisconnected = { [weak self] in
+            self?.wear.clear()
             self?.media?.clear()
             self?.clipboard?.disconnected()
             self?.taskContinuation?.clear()
@@ -177,6 +188,7 @@ private final class BLEIntegration: NSObject {
             self?.links.disconnected()
         }
         bridge.onAuthenticated = { [weak self] in
+            self?.wear.connected()
             self?.phoneNotifications?.flush()
             self?.media?.connected()
             self?.clipboard?.connected()
@@ -192,6 +204,7 @@ private final class BLEIntegration: NSObject {
     func stop() {
         stopped = true
         links.cancel()
+        wear.clear()
         menuObservers.forEach { NotificationCenter.default.removeObserver($0) }
         menuObservers.forEach { DistributedNotificationCenter.default().removeObserver($0) }
         menuObservers.removeAll()
@@ -242,6 +255,8 @@ private final class BLEIntegration: NSObject {
         sub.addItem(.separator())
         let status = NSMenuItem(title: "Starting Bluetooth…", action: nil, keyEquivalent: "")
         let endpoint = NSMenuItem(title: "Wireless ADB off", action: nil, keyEquivalent: "")
+        let battery = NSMenuItem(title: remoteBatteryStatus, action: nil, keyEquivalent: "")
+        sub.addItem(battery); batteryItem = battery
         sub.addItem(status)
         sub.addItem(endpoint)
         root.submenu = sub
@@ -260,6 +275,7 @@ private final class BLEIntegration: NSObject {
     }
 
     private func updateMenu() {
+        batteryItem?.title = remoteBatteryStatus
         adbItem?.state = NotificationRuntime.preferences.bool(forKey: BLEController.automaticADBKey) ? .on : .off
         mediaItem?.state = NotificationRuntime.preferences.bool(forKey: MediaPlaybackSync.enabledKey) ? .on : .off
         mediaStatusItem?.title = remoteMediaStatus
@@ -283,6 +299,7 @@ private final class BLEIntegration: NSObject {
             start()
         } else {
             links.cancel()
+            wear.clear()
             media?.clear()
             taskContinuation?.clear()
             controller?.stop()

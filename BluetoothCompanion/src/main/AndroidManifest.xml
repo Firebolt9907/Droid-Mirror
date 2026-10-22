@@ -3,6 +3,9 @@
     <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
     <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <uses-permission android:name="android.permission.BLUETOOTH_SCAN" android:usesPermissionFlags="neverForLocation" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" android:maxSdkVersion="30" />
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
     <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
@@ -29,6 +32,16 @@
     <application android:label="DroidMirror" android:theme="@android:style/Theme.Material.Light.NoActionBar" android:allowBackup="false">
         <provider android:name=".ClipboardFileProvider" android:authorities="${applicationId}.clipboard.files"
             android:exported="false" android:grantUriPermissions="true" />
+        <service android:name=".bridge.MacMediaRouteProvider" android:exported="true"
+            android:enabled="@bool/mac_media_route_enabled">
+            <intent-filter><action android:name="android.media.MediaRoute2ProviderService" /></intent-filter>
+        </service>
+        <service android:name=".bridge.WearPhoneListenerService" android:exported="true">
+            <intent-filter>
+                <action android:name="com.google.android.gms.wearable.MESSAGE_RECEIVED" />
+                <data android:scheme="wear" android:host="*" android:pathPrefix="/droidmirror/watch/" />
+            </intent-filter>
+        </service>
         <receiver android:name=".bridge.MediaControlReceiver" android:exported="false" />
         <activity android:name=".bridge.BridgeSettingsActivity" android:exported="false" />
         <service android:name=".bridge.PhoneNotifications" android:exported="true"
@@ -50,6 +63,7 @@
             </intent-filter>
         </activity>
         <activity android:name=".UnlockPinActivity" android:exported="false" android:excludeFromRecents="true" />
+        <activity android:name=".QRPairingActivity" android:exported="false" />
         <activity android:name=".CaptureActivity" android:exported="true">
             <intent-filter><action android:name="android.intent.action.MAIN" /><category android:name="android.intent.category.LAUNCHER" /></intent-filter>
         </activity>

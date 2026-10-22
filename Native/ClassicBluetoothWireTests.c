@@ -96,6 +96,21 @@ int main(int argc, char **argv) {
     ble[12]=32;ble[7]='4';
     DMClassicWire test;dm_classic_wire_init(&test);Output received={0};
     assert(!dm_classic_wire_feed_ble(&test,ble,13,video,event,control_video,setup,&received));
+    // Unlock failures are authenticated BLE events, not malformed streams.
+    for (uint8_t value=9; value<=11; ++value) {
+        uint8_t unlock[]={'D','M','B','T','0','0','0','5',1,0,0,0,1,value};
+        for (size_t chunk=1;chunk<=sizeof(unlock);++chunk) {
+            DMClassicWire state; dm_classic_wire_init(&state); Output out={0};
+            bool valid=true;
+            for (size_t offset=0;offset<sizeof(unlock) && valid;offset+=chunk) {
+                size_t count=sizeof(unlock)-offset; if(count>chunk)count=chunk;
+                valid=dm_classic_wire_feed_ble(&state,unlock+offset,count,video,event,control_video,setup,&out);
+            }
+            assert(valid==(value<=10));
+            assert(out.event_count==(value<=10 ? 1 : 0));
+            if (valid) assert(out.events[0]==value && dm_classic_wire_complete(&state));
+        }
+    }
     const uint8_t stream[] = {'D','M','B','T','0','0','0','3', 0,0,0,0,3, 0,42,43,
                             1,0,0,0,1,4, 0,0,0,0,2,44,45, 1,0,0,0,1,1};
     for (size_t chunk = 1; chunk <= sizeof(stream); chunk++) {

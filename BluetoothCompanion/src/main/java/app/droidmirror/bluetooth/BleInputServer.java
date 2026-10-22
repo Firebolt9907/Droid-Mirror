@@ -23,6 +23,7 @@ final class BleInputServer implements AutoCloseable {
     static final UUID RESUME = UUID.fromString("c356a44e-6f2b-4da9-85e5-397991b8a616");
     static final UUID REPLAY = UUID.fromString("c356a44e-6f2b-4da9-85e5-397991b8a617");
     static final UUID KEY = UUID.fromString("c356a44e-6f2b-4da9-85e5-397991b8a614");
+    private static final UUID CCC = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb");
     private final String selectedPeer;
     private final byte[] sessionNonce;
     private final BleInputCrypto returning;
@@ -31,7 +32,9 @@ final class BleInputServer implements AutoCloseable {
     private byte[] pendingReturn;
     private byte[] lastReadReturn = new byte[0];
     private CountDownLatch returnRead;
+    private boolean returnIndicationInFlight;
     private BluetoothGattCharacteristic output;
+    private volatile BluetoothDevice indicationPeer;
     private final ArrayBlockingQueue<ReturnRecord> replies = new ArrayBlockingQueue<>(32);
     private static final class ReturnRecord {
         final byte[] bytes;
@@ -40,6 +43,7 @@ final class BleInputServer implements AutoCloseable {
     }
     private final Context context;
     private final BleInputCrypto crypto;
+    private final java.util.UUID discovery;
     private final Runnable failed;
     private final ArrayBlockingQueue<byte[]> records = new ArrayBlockingQueue<>(64);
     private final CountDownLatch first = new CountDownLatch(1);
@@ -71,6 +75,7 @@ final class BleInputServer implements AutoCloseable {
         this.context = context; this.failed = failed;
         this.sessionNonce = key.clone(); this.selectedPeer = selectedPeer;
         byte[] pairing = BlePairing.key(context, selectedPeer);
+        this.discovery = PairingKeys.discovery(PairingKeys.notifications(pairing));
         byte[] label = "DroidMirror BLE session v1".getBytes(java.nio.charset.StandardCharsets.US_ASCII);
         byte[] salt = java.nio.ByteBuffer.allocate(label.length + key.length).put(label).put(key).array();
         byte[] session = BleInputCrypto.hmac(pairing, salt); Arrays.fill(pairing, (byte)0);
@@ -105,16 +110,37 @@ final class BleInputServer implements AutoCloseable {
                     byte[] packet = returning.seal(Arrays.copyOfRange(record.bytes, offset, Math.min(record.bytes.length, offset + payload)));
                     CountDownLatch sent = new CountDownLatch(1);
                     synchronized (returnLock) { pendingReturn = packet; returnRead = sent; }
+                    // An ATT read can remain outstanding on macOS and prevent
+                    // input/lease writes from reaching Android. Indications use
+                    // the server-to-client transaction lane instead. Keep reads
+                    // available for older Macs that never subscribe.
+                    indicateReturn();
                     // Allow the Mac's bounded service rediscovery and same-session proof.
-                    if (!sent.await(6, TimeUnit.SECONDS) || closed.get()) throw new IOException("BLE return read stalled");
+                    if (!sent.await(6, TimeUnit.SECONDS) || closed.get()) throw new IOException("BLE return delivery stalled");
 
                 }
                 record.sent.complete(null); record = null;
-                if (report) android.util.Log.i("DroidMirrorBleInput", "Return record read completed");
+                if (report) android.util.Log.i("DroidMirrorBleInput", "Return record delivered");
             }
         } catch (Exception error) {
             if (record != null) record.sent.completeExceptionally(error);
             if (!closed.get()) fail();
+        }
+    }
+    private void indicateReturn() throws IOException {
+        synchronized (returnLock) {
+            if (pendingReturn == null || returnIndicationInFlight || authenticatedPeer == null
+                    || !authenticatedPeer.equals(indicationPeer)) return;
+            returnIndicationInFlight = true;
+            boolean queued;
+            if (Build.VERSION.SDK_INT >= 33) {
+                queued = server.notifyCharacteristicChanged(authenticatedPeer, output, true, pendingReturn)
+                    == BluetoothStatusCodes.SUCCESS;
+            } else {
+                output.setValue(pendingReturn);
+                queued = server.notifyCharacteristicChanged(authenticatedPeer, output, true);
+            }
+            if (!queued) { returnIndicationInFlight = false; throw new IOException("BLE return indication unavailable"); }
         }
     }
     boolean awaitInput() throws InterruptedException { return first.await(15, TimeUnit.SECONDS) && !closed.get(); }
@@ -134,7 +160,7 @@ final class BleInputServer implements AutoCloseable {
             try {
                 AdvertiseSettings settings = new AdvertiseSettings.Builder().setConnectable(true)
                     .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_LOW_LATENCY).build();
-                AdvertiseData data = new AdvertiseData.Builder().addServiceUuid(new ParcelUuid(SERVICE)).build();
+                AdvertiseData data = new AdvertiseData.Builder().addServiceUuid(new ParcelUuid(discovery)).build();
                 advertiser.startAdvertising(settings, data, advertising);
             } catch (RuntimeException error) { fail(); }
         }
@@ -154,6 +180,47 @@ final class BleInputServer implements AutoCloseable {
         @Override public void onPhyUpdate(BluetoothDevice device, int tx, int rx, int status) {
             if (selected(device)) android.util.Log.i("DroidMirrorBleInput", "BLE PHY tx=" + tx + " rx=" + rx + " status=" + status);
         }
+        @Override public void onDescriptorWriteRequest(BluetoothDevice device, int request, BluetoothGattDescriptor descriptor,
+                boolean prepared, boolean response, int offset, byte[] value) {
+            if (closed.get()) return;
+            int result = BluetoothGatt.GATT_FAILURE;
+            if (selected(device) && !prepared && offset == 0 && CCC.equals(descriptor.getUuid())
+                    && descriptor.getCharacteristic() == output) {
+                if (Arrays.equals(value, BluetoothGattDescriptor.ENABLE_INDICATION_VALUE)) {
+                    indicationPeer = device; result = BluetoothGatt.GATT_SUCCESS;
+                } else if (Arrays.equals(value, BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE)) {
+                    indicationPeer = null; result = BluetoothGatt.GATT_SUCCESS;
+                }
+            }
+            if (response) server.sendResponse(device, request, result, 0, null);
+            // Recovery can subscribe while the sender is waiting with the next
+            // packet staged for legacy reads. Resume that exact ciphertext.
+            if (result == BluetoothGatt.GATT_SUCCESS) {
+                try { indicateReturn(); } catch (IOException error) { fail(); }
+            }
+        }
+        @Override public void onDescriptorReadRequest(BluetoothDevice device, int request, int offset, BluetoothGattDescriptor descriptor) {
+            if (closed.get()) return;
+            boolean valid = selected(device) && offset == 0 && CCC.equals(descriptor.getUuid())
+                && descriptor.getCharacteristic() == output;
+            server.sendResponse(device, request, valid ? BluetoothGatt.GATT_SUCCESS : BluetoothGatt.GATT_FAILURE, 0,
+                valid ? (device.equals(indicationPeer) ? BluetoothGattDescriptor.ENABLE_INDICATION_VALUE
+                    : BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE) : null);
+        }
+        @Override public void onNotificationSent(BluetoothDevice device, int status) {
+            if (closed.get() || !device.equals(authenticatedPeer)) return;
+            synchronized (returnLock) {
+                if (status != BluetoothGatt.GATT_SUCCESS) {
+                    android.util.Log.w("DroidMirrorBleInput", "Return indication failed: status=" + status);
+                    fail(); return;
+                }
+                if (returnIndicationInFlight && returnRead != null && pendingReturn != null) {
+                    returnIndicationInFlight = false;
+                    lastReadReturn = pendingReturn;
+                    pendingReturn = null; returnRead.countDown(); returnRead = null;
+                }
+            }
+        }
         @Override public void onCharacteristicReadRequest(BluetoothDevice device, int request, int offset, BluetoothGattCharacteristic characteristic) {
             if (closed.get()) return;
             try {
@@ -172,6 +239,9 @@ final class BleInputServer implements AutoCloseable {
                 }
                 if (OUTPUT.equals(characteristic.getUuid()) && offset == 0 && device.equals(authenticatedPeer)) {
                     synchronized (returnLock) {
+                        if (device.equals(indicationPeer) || returnIndicationInFlight) {
+                            server.sendResponse(device, request, BluetoothGatt.GATT_READ_NOT_PERMITTED, 0, null); return;
+                        }
                         lastReadReturn=pendingReturn == null ? new byte[0] : pendingReturn;
                         server.sendResponse(device, request, BluetoothGatt.GATT_SUCCESS, 0, lastReadReturn);
                         if (pendingReturn != null) { pendingReturn = null; returnRead.countDown(); returnRead = null; }
@@ -211,10 +281,15 @@ final class BleInputServer implements AutoCloseable {
                 }
                 if (!prepared && offset == 0 && PROOF.equals(characteristic.getUuid()) && value.length==16
                         && (challenges.size()<8 || challenges.containsKey(device.getAddress()))) {
+                    // Stop new pushes while the Mac authenticates replacement
+                    // attributes and reconciles the last delivered sequence.
+                    indicationPeer = null;
                     challenges.put(device.getAddress(),value.clone());result=BluetoothGatt.GATT_SUCCESS;
                 } else if (!prepared && offset == 0 && INPUT.equals(characteristic.getUuid())
                         && (authenticatedPeer == null || authenticatedPeer.equals(device))) {
                     byte[] plain = crypto.open(value);
+                    if ((context.getApplicationInfo().flags & android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0) android.util.Log.d("DroidMirrorBleInput", "Authenticated input sequence="
+                        + java.nio.ByteBuffer.wrap(value).getLong() + " request=" + request + " response=" + response);
                     boolean newPeer = authenticatedPeer == null;
                     authenticatedPeer = device;
                     BleLinkMtu.observedWrite(device.getAddress(), value.length);
@@ -237,7 +312,11 @@ final class BleInputServer implements AutoCloseable {
                 try { server.cancelConnection(device); } catch (RuntimeException ignored) {}
             }
             if (response && !closed.get()) {
-                try { server.sendResponse(device, request, result, 0, null); } catch (RuntimeException error) { fail(); }
+                try {
+                    boolean sent = server.sendResponse(device, request, result, 0, null);
+                    if ((context.getApplicationInfo().flags & android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0) android.util.Log.d("DroidMirrorBleInput", "ATT response request=" + request + " queued=" + sent + " status=" + result);
+                    if (!sent) fail();
+                } catch (RuntimeException error) { fail(); }
             }
         }
     };
@@ -264,7 +343,9 @@ final class BleInputServer implements AutoCloseable {
             BluetoothGattCharacteristic.PROPERTY_READ, BluetoothGattCharacteristic.PERMISSION_READ));
         service.addCharacteristic(new BluetoothGattCharacteristic(REPLAY,
             BluetoothGattCharacteristic.PROPERTY_READ, BluetoothGattCharacteristic.PERMISSION_READ));
-        output = new BluetoothGattCharacteristic(OUTPUT, BluetoothGattCharacteristic.PROPERTY_READ, BluetoothGattCharacteristic.PERMISSION_READ);
+        output = new BluetoothGattCharacteristic(OUTPUT, BluetoothGattCharacteristic.PROPERTY_READ
+            | BluetoothGattCharacteristic.PROPERTY_INDICATE, BluetoothGattCharacteristic.PERMISSION_READ);
+        output.addDescriptor(new BluetoothGattDescriptor(CCC, BluetoothGattDescriptor.PERMISSION_READ | BluetoothGattDescriptor.PERMISSION_WRITE));
         service.addCharacteristic(output);
         new Thread(this::sendReplies, "BleControlReplies").start();
         if (!server.addService(service)) throw new IOException("BLE input service unavailable");
@@ -272,6 +353,7 @@ final class BleInputServer implements AutoCloseable {
     @Override public void close() {
         if (!closed.compareAndSet(false, true)) return;
         first.countDown(); records.clear(); challenges.clear(); Arrays.fill(sessionNonce, (byte)0);
+        indicationPeer = null;
         synchronized (returnLock) { if (returnRead != null) returnRead.countDown(); pendingReturn = null; lastReadReturn = new byte[0]; }
         ReturnRecord pending;
         while ((pending = replies.poll()) != null) pending.sent.completeExceptionally(new IOException("BLE closed"));

@@ -22,6 +22,7 @@ static NSString *const DMInputProof=@"c356a44e-6f2b-4da9-85e5-397991b8a612";
 @property(nonatomic) NSTimeInterval discoveryDeadline;
 @property(nonatomic, strong) NSData *sessionNonce;
 @property(atomic) BOOL recovering;
+@property(atomic, readwrite) BOOL pairingProofRejected;
 @property(nonatomic) NSTimeInterval recoveryDeadline;
 @property(nonatomic) BOOL recoveryDiscoveryStarted;
 @property(nonatomic) BOOL recoveryNeedsReturn;
@@ -42,6 +43,9 @@ static NSString *const DMInputProof=@"c356a44e-6f2b-4da9-85e5-397991b8a612";
 @property(nonatomic) uint64_t receiveSequence;
 @property(nonatomic) BOOL proofVerified;
 @property(nonatomic) BOOL readPending;
+@property(nonatomic) BOOL returnIndications;
+@property(nonatomic) BOOL awaitingReturnSubscription;
+@property(nonatomic) BOOL inputTurn;
 @property(nonatomic) BOOL writePending;
 @property(nonatomic) BOOL motionWakePending;
 @property(nonatomic) NSTimeInterval nextRead;
@@ -62,7 +66,8 @@ static NSString *const DMInputProof=@"c356a44e-6f2b-4da9-85e5-397991b8a612";
     _connectionStage=@"initializing BLE";
     _pairingKey=[key copy]; _sequence=1; _receiveSequence=1;
     _pending=[DMBleInputQueue new]; _rejected=[NSMutableSet set];
-    _queue=dispatch_queue_create("app.droidmirror.ble-control",DISPATCH_QUEUE_SERIAL);
+    _queue=dispatch_queue_create("app.droidmirror.ble-control",
+        dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL,QOS_CLASS_USER_INTERACTIVE,0));
     _manager=[[CBCentralManager alloc] initWithDelegate:self queue:_queue];
     __weak DMBleInputTransport *weakSelf=self;
     _watchdog=dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER,0,0,_queue);
@@ -74,20 +79,61 @@ static NSString *const DMInputProof=@"c356a44e-6f2b-4da9-85e5-397991b8a612";
         [strongSelf retryDiscoveryAtTime:NSDate.timeIntervalSinceReferenceDate];
         [strongSelf recoverInputServiceAtTime:NSDate.timeIntervalSinceReferenceDate];
         if (strongSelf.ready) [strongSelf drain];
-        if (!strongSelf.recovering && (strongSelf.pending.hasWork || strongSelf.writePending || strongSelf.readPending) && NSDate.timeIntervalSinceReferenceDate-strongSelf.progress > 2.0)
-            [strongSelf reportFailure:[NSString stringWithFormat:@"BLE operation stalled (write=%d read=%d queued=%lu).",
-                strongSelf.writePending,strongSelf.readPending,(unsigned long)strongSelf.pending.pendingBytes]];
+        [strongSelf checkOperationProgressAtTime:NSDate.timeIntervalSinceReferenceDate];
     });
     dispatch_resume(_watchdog);
     return self;
+}
+- (void)checkOperationProgressAtTime:(NSTimeInterval)now {
+    if (self.closed || self.recovering) return;
+    // Encoder startup and shared-radio scheduling can delay an ATT completion
+    // after Android has already accepted the authenticated heartbeat.
+    // Stay bounded below Android's five-second peer lease; never resend an
+    // ambiguous write or reset its authenticated sequence to mask a slow reply.
+    if ((self.pending.hasWork || self.writePending || self.readPending) && now-self.progress > 4.0)
+        [self reportFailure:[NSString stringWithFormat:@"BLE operation stalled (write=%d read=%d queued=%lu).",
+            self.writePending,self.readPending,(unsigned long)self.pending.pendingBytes]];
 }
 - (void)setStage:(NSString *)stage {
     self.connectionStage=stage;
     fprintf(stderr,"BLE setup: %s\n",stage.UTF8String);
 }
+// Share authenticated peripheral identities with the background receiver, scoped
+// to the derived discovery UUID so changing pairing codes never trusts old peers.
+- (NSUUID *)discoveryUUID {
+    if (self.pairingKey.length != 32) return nil;
+    uint8_t notification[32], bytes[16];
+    dm_ble_notification_pairing_key(self.pairingKey.bytes, notification);
+    dm_ble_discovery_uuid(notification, bytes);
+    memset(notification, 0, sizeof(notification));
+    return [[NSUUID alloc] initWithUUIDBytes:bytes];
+}
+- (NSUserDefaults *)peerPreferences {
+    return [[NSUserDefaults alloc] initWithSuiteName:@"app.droidmirror.ble-peers"];
+}
+- (NSUUID *)rememberedPeer {
+    NSUserDefaults *preferences=[self peerPreferences];
+    [preferences synchronize];
+    NSString *scope=self.discoveryUUID.UUIDString;
+    return scope ? [[NSUUID alloc] initWithUUIDString:[preferences stringForKey:scope]] : nil;
+}
+- (void)rememberAuthenticatedPeer:(NSUUID *)peer {
+    if (!self.discoveryUUID) return;
+    NSUserDefaults *preferences=[self peerPreferences];
+    [preferences setObject:peer.UUIDString forKey:self.discoveryUUID.UUIDString];
+    [preferences synchronize];
+}
+- (BOOL)permitsPeer:(CBPeripheral *)peer advertisement:(NSDictionary *)advertisement {
+    NSUUID *discovery=self.discoveryUUID;
+    if (!discovery) return NO;
+    return [peer.identifier isEqual:self.rememberedPeer] ||
+        [advertisement[CBAdvertisementDataServiceUUIDsKey] containsObject:[CBUUID UUIDWithNSUUID:discovery]];
+}
 - (void)scan {
     if (self.closed || _peripheral || _manager.state != CBManagerStatePoweredOn) return;
-    [self setStage:@"scanning for the phone's BLE service"];
+    NSUUID *discovery=self.discoveryUUID;
+    if (!discovery) return;
+    [self setStage:@"looking for the paired phone's BLE service"];
     // Another app/helper can keep the physical BLE link open between sessions.
     // Such a phone may not advertise again; discovery alone never finds it.
     // The merged notification bridge can own the existing phone link before
@@ -95,12 +141,13 @@ static NSString *const DMInputProof=@"c356a44e-6f2b-4da9-85e5-397991b8a612";
     NSArray *services = @[[CBUUID UUIDWithString:DMInputService],
         [CBUUID UUIDWithString:@"7e57b000-9a6b-4c5d-8e7f-102030405060"]];
     for (CBPeripheral *peer in [_manager retrieveConnectedPeripheralsWithServices:services]) {
+        if (![self permitsPeer:peer advertisement:@{}]) continue;
         if ([_rejected containsObject:peer.identifier] ||
                 ([peer.identifier isEqual:self.deferredCandidate] && NSDate.timeIntervalSinceReferenceDate < self.candidateRetryAfter)) continue;
         [self centralManager:_manager didDiscoverPeripheral:peer advertisementData:@{} RSSI:@0];
         return;
     }
-    [_manager scanForPeripheralsWithServices:@[[CBUUID UUIDWithString:DMInputService]] options:nil];
+    [_manager scanForPeripheralsWithServices:@[[CBUUID UUIDWithNSUUID:discovery]] options:nil];
 }
 - (void)centralManagerDidUpdateState:(CBCentralManager *)central {
     if (self.closed) return;
@@ -110,7 +157,8 @@ static NSString *const DMInputProof=@"c356a44e-6f2b-4da9-85e5-397991b8a612";
 }
 - (void)centralManager:(CBCentralManager *)central didDiscoverPeripheral:(CBPeripheral *)peripheral
         advertisementData:(NSDictionary *)advertisement RSSI:(NSNumber *)rssi {
-    if (self.closed || _peripheral || [_rejected containsObject:peripheral.identifier] ||
+    if (self.closed || _peripheral || ![self permitsPeer:peripheral advertisement:advertisement] ||
+            [_rejected containsObject:peripheral.identifier] ||
             ([peripheral.identifier isEqual:self.deferredCandidate] && NSDate.timeIntervalSinceReferenceDate < self.candidateRetryAfter)) return;
     [self setStage:@"connecting to a BLE service candidate"];
     _peripheral=peripheral; peripheral.delegate=self;
@@ -155,6 +203,7 @@ static NSString *const DMInputProof=@"c356a44e-6f2b-4da9-85e5-397991b8a612";
     self.input=nil; self.proof=nil; self.returning=nil; self.clockCharacteristic=nil;
     self.challenge=nil; self.proofVerified=NO; self.recoveryStateVerified=NO;
     self.resumeCharacteristic=nil; self.replayCharacteristic=nil;
+    self.returnIndications=NO; self.awaitingReturnSubscription=NO;
     [self setStage:@"discovering BLE services"];
     [self.peripheral discoverServices:@[[CBUUID UUIDWithString:DMInputService]]];
 }
@@ -188,7 +237,7 @@ static NSString *const DMInputProof=@"c356a44e-6f2b-4da9-85e5-397991b8a612";
         }
         // CoreBluetooth may discard an outstanding ATT completion on invalidation.
         // Reconcile its outcome using fresh, authenticated phone-side state.
-        self.recoveryNeedsReturn |= self.readPending;
+        self.recoveryNeedsReturn |= self.readPending || self.returnIndications;
         self.readPending=NO; self.writePending=NO;
         [self recoverInputServiceAtTime:NSDate.timeIntervalSinceReferenceDate];
         return;
@@ -270,6 +319,9 @@ static NSString *const DMInputProof=@"c356a44e-6f2b-4da9-85e5-397991b8a612";
     [peripheral readValueForCharacteristic:key];
 }
 - (void)peripheral:(CBPeripheral *)peripheral didWriteValueForCharacteristic:(CBCharacteristic *)characteristic error:(NSError *)error {
+    if (getenv("DROIDMIRROR_BLE_DEBUG")) fprintf(stderr,"BLE write completion uuid=%s peer=%d input=%d pending=%d next=%llu error=%ld\n",
+        characteristic.UUID.UUIDString.UTF8String,peripheral==_peripheral,characteristic==_input,_writePending,
+        (unsigned long long)_sequence,(long)error.code);
     if (self.closed || peripheral != _peripheral) return;
     if (characteristic == _input) {
         _writePending=NO;
@@ -283,25 +335,40 @@ static NSString *const DMInputProof=@"c356a44e-6f2b-4da9-85e5-397991b8a612";
     [peripheral readValueForCharacteristic:characteristic];
 }
 - (void)readReturn {
-    if (self.closed || !self.ready || _readPending || _writePending) return;
+    if (self.closed || !self.ready || self.returnIndications || _readPending || _writePending) return;
+    self.inputTurn=YES;
     _readPending=YES; _progress=NSDate.timeIntervalSinceReferenceDate;
     [_peripheral readValueForCharacteristic:_returning];
+}
+- (void)finishAuthentication {
+    [self setStage:self.returnIndications ? @"authenticated BLE ready (indicated returns)" : @"authenticated BLE ready"];
+    self.ready=YES; self.recovering=NO; self.recoveryDeadline=0;
+    self.progress=NSDate.timeIntervalSinceReferenceDate; _nextRead=self.progress+0.5;
+    [self reportReady]; [self drain];
+}
+- (void)peripheral:(CBPeripheral *)peripheral didUpdateNotificationStateForCharacteristic:(CBCharacteristic *)characteristic error:(NSError *)error {
+    if (self.closed || peripheral != self.peripheral || characteristic != self.returning || !self.awaitingReturnSubscription) return;
+    self.awaitingReturnSubscription=NO;
+    if (error || !characteristic.isNotifying) { [self reportFailure:@"BLE return subscription failed."]; return; }
+    [self finishAuthentication];
 }
 - (void)peripheral:(CBPeripheral *)peripheral didUpdateValueForCharacteristic:(CBCharacteristic *)characteristic error:(NSError *)error {
     if (self.closed || peripheral != _peripheral) return;
     if (characteristic != _nonceCharacteristic && characteristic != _proof && characteristic != _returning && characteristic != _clockCharacteristic && characteristic != _resumeCharacteristic && characteristic != _replayCharacteristic) return;
     if (getenv("DROIDMIRROR_BLE_DEBUG")) fprintf(stderr,"BLE RX %s bytes=%lu ready=%d error=%ld\n",characteristic.UUID.UUIDString.UTF8String,(unsigned long)characteristic.value.length,self.ready,(long)error.code);
-    if ((self.ready || self.recovering) && characteristic == _returning && _readPending) {
-        _readPending=NO; _progress=NSDate.timeIntervalSinceReferenceDate;
+    if ((self.ready || self.recovering) && characteristic == _returning && (_readPending || self.returnIndications)) {
+        BOOL wasRead=_readPending;
+        _readPending=NO;
+        if (wasRead) _progress=NSDate.timeIntervalSinceReferenceDate;
         NSData *packet=characteristic.value;
-        if (!error && !packet.length) { _nextRead=NSDate.timeIntervalSinceReferenceDate+0.5; [self recoverInputServiceAtTime:_progress]; [self drain]; return; }
+        if (wasRead && !error && !packet.length) { _nextRead=NSDate.timeIntervalSinceReferenceDate+0.5; [self recoverInputServiceAtTime:_progress]; [self drain]; return; }
         uint8_t plain[488];
         if (error || !dm_ble_input_open(&_returnKeys,_receiveSequence,packet.bytes,packet.length,plain)) {
             [self reportFailure:@"Invalid BLE return record."]; return;
         }
         ++_receiveSequence;
         [self deliver:[NSData dataWithBytes:plain length:packet.length-24]];
-        _nextRead=0; [self recoverInputServiceAtTime:_progress]; [self drain];
+        _nextRead=0; [self recoverInputServiceAtTime:NSDate.timeIntervalSinceReferenceDate]; [self drain];
         return;
     }
     if (self.recovering && _proofVerified && characteristic == self.resumeCharacteristic) {
@@ -357,9 +424,12 @@ static NSString *const DMInputProof=@"c356a44e-6f2b-4da9-85e5-397991b8a612";
         uint64_t mac=(uint64_t)now.tv_sec*1000+(uint64_t)now.tv_nsec/1000000, phone;
         memcpy(&phone,bytes,8); phone=CFSwapInt64BigToHost(phone);
         [_pending synchronizePhoneClock:phone macClock:mac];
-        [self setStage:@"authenticated BLE ready"];
-        self.ready=YES; self.recovering=NO; self.recoveryDeadline=0; self.progress=NSDate.timeIntervalSinceReferenceDate; _nextRead=NSDate.timeIntervalSinceReferenceDate+0.5;
-        [self reportReady]; [self drain]; return;
+        if (_returning.properties & CBCharacteristicPropertyIndicate) {
+            self.returnIndications=YES; self.awaitingReturnSubscription=YES;
+            [self setStage:@"subscribing authenticated BLE returns"];
+            [peripheral setNotifyValue:YES forCharacteristic:_returning];
+        } else [self finishAuthentication];
+        return;
     }
     if ([characteristic.UUID isEqual:[CBUUID UUIDWithString:DMInputKey]]) {
         if (error || characteristic.value.length != 32) { [self reject]; return; }
@@ -379,11 +449,19 @@ static NSString *const DMInputProof=@"c356a44e-6f2b-4da9-85e5-397991b8a612";
     if (error || characteristic.value.length != sizeof(expected)) { [self reject]; return; }
     const uint8_t *actual=characteristic.value.bytes;
     for (NSUInteger i=0;i<sizeof(expected);++i) difference |= expected[i]^actual[i];
-    if (difference) { [self reject]; return; }
+    if (difference) {
+        // Keep trying other candidates; only report a code mismatch if startup
+        // exhausts its budget without authenticating a phone. Recovery failures
+        // belong to the existing session, not the saved pairing code.
+        if (!self.recovering) self.pairingProofRejected=YES;
+        [self reject]; return;
+    }
+    self.pairingProofRejected=NO;
     if ([peripheral maximumWriteValueLengthForType:CBCharacteristicWriteWithResponse] <= 24) {
         [self reportFailure:@"BLE input MTU is too small for authenticated commands."]; return;
     }
     _proofVerified=YES;
+    [self rememberAuthenticatedPeer:peripheral.identifier];
     if (self.recovering) {
         if (!(self.resumeCharacteristic.properties & CBCharacteristicPropertyRead) ||
                 !(self.replayCharacteristic.properties & CBCharacteristicPropertyRead)) {
@@ -442,17 +520,20 @@ static NSString *const DMInputProof=@"c356a44e-6f2b-4da9-85e5-397991b8a612";
 - (void)drain {
     if (self.closed || !self.ready || _writePending || _readPending) return;
     if (self.retryInput) {
+        self.inputTurn=NO;
         self.retryInput=NO; _writePending=YES; _progress=NSDate.timeIntervalSinceReferenceDate;
         // Exact ciphertext only, and only after the phone proved it was not accepted.
         [_peripheral writeValue:self.inFlightPacket forCharacteristic:_input type:CBCharacteristicWriteWithResponse];
         return;
     }
-    // Only one GATT operation at a time. A due return read gets a turn even
-    // during sustained mouse traffic; video ACKs precede the next input envelope.
-    if (NSDate.timeIntervalSinceReferenceDate >= _nextRead) { [self readReturn]; return; }
+    // Alternate due return reads with ready input. A multi-packet clipboard or
+    // event response must not monopolize ATT while keys/mouse wait to be sent.
+    BOOL readDue=!self.returnIndications && NSDate.timeIntervalSinceReferenceDate >= _nextRead;
+    if (readDue && !self.inputTurn) { [self readReturn]; return; }
     NSUInteger mtu=MIN((NSUInteger)512,[_peripheral maximumWriteValueLengthForType:CBCharacteristicWriteWithResponse]);
     NSData *plain=[_pending takePacket:mtu-24];
     if (!plain.length) {
+        if (readDue) { [self readReturn]; return; }
         NSTimeInterval delay = _pending.motionDelay;
         if (delay > 0 && !_motionWakePending) {
             _motionWakePending=YES;
@@ -467,7 +548,10 @@ static NSString *const DMInputProof=@"c356a44e-6f2b-4da9-85e5-397991b8a612";
         [self reportFailure:@"BLE input encryption failed."]; return;
     }
     self.inFlightPacket=packet;
+    self.inputTurn=NO;
     ++_sequence; _writePending=YES; _progress=NSDate.timeIntervalSinceReferenceDate;
+    if (getenv("DROIDMIRROR_BLE_DEBUG")) fprintf(stderr,"BLE input write sequence=%llu bytes=%lu\n",
+        (unsigned long long)(_sequence-1),(unsigned long)packet.length);
     [_peripheral writeValue:packet forCharacteristic:_input type:CBCharacteristicWriteWithResponse];
 }
 - (void)close {

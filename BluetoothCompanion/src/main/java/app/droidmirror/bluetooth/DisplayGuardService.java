@@ -4,7 +4,6 @@ import com.genymobile.scrcpy.control.PinUnlock;
 
 import android.content.Context;
 import android.os.IBinder;
-import android.os.Process;
 import android.os.RemoteException;
 import android.os.ParcelFileDescriptor;
 import android.os.SystemClock;
@@ -34,6 +33,8 @@ public final class DisplayGuardService extends IDisplayGuard.Stub {
     private IStreamEvents observer;
     private final java.util.LinkedHashMap<Object, Boolean> audits = new java.util.LinkedHashMap<>();
     private PrivilegedCapture capture;
+    private BlackoutOverlay blackout;
+    private TouchBlocker touchBlocker;
     private PrivilegedAudioCapture audio;
     private Object captureGeneration;
     private long captureStarted;
@@ -44,7 +45,7 @@ public final class DisplayGuardService extends IDisplayGuard.Stub {
 
     private void checkCaller() {
         int callingUid = android.os.Binder.getCallingUid();
-        if (callingUid == Process.myUid() || callingUid == ROOT_UID || callingUid == SHELL_UID) {
+        if (callingUid == android.os.Process.myUid() || callingUid == ROOT_UID || callingUid == SHELL_UID) {
             return;
         }
         if (context != null && callingUid == context.getApplicationInfo().uid) {
@@ -72,6 +73,16 @@ public final class DisplayGuardService extends IDisplayGuard.Stub {
                 boolean interactive = true;
                 try { interactive = logical.interactive(); } catch (Exception ignored) {}
                 session.tick(interactive); lease.tick();
+                if (blackout != null && session.owns(owner)) {
+                    try {
+                        if (touchBlocker == null || !touchBlocker.alive()) throw new IllegalStateException("Touch blocker ended");
+                        blackout.update();
+                    }
+                    catch (Exception failure) {
+                        captureError = "Phone blackout overlay unavailable; mirroring stopped.";
+                        session.finish(owner, RemoteSession.RECOVERY);
+                    }
+                }
                 if (lease.owns(owner) && SystemClock.elapsedRealtime() - captureStarted < 1000) {
                     try { lease.keepDark(owner); } catch (Exception failure) {
                         session.finish(owner, RemoteSession.RECOVERY);
@@ -91,13 +102,15 @@ public final class DisplayGuardService extends IDisplayGuard.Stub {
         }, "DisplayRecovery"));
     }
     @Override public byte[] phoneAppearance() { return PhoneAppearance.read(); }
-    @Override public synchronized boolean startCapture(IBinder token, IStreamEvents events, ParcelFileDescriptor output, ParcelFileDescriptor controls, String computerName, boolean panelOff, byte[] unlockPin) {
+    @Override public synchronized boolean startCapture(IBinder token, IStreamEvents events, ParcelFileDescriptor output, ParcelFileDescriptor controls, String computerName, boolean panelOff, byte[] unlockPin, boolean blackoutOverlay, byte[] blackoutMessage) {
         checkCaller();
         if (token == null || owner != null || capture != null || output == null || controls == null || lease.isRestoreNeeded()) {
             if (output != null) try { output.close(); } catch (java.io.IOException ignored) {}
             if (unlockPin != null) java.util.Arrays.fill(unlockPin, (byte) 0);
             return false;
         }
+        // A stale/conflicting caller cannot silently enable both display modes.
+        final boolean usePanelOff = panelOff && !blackoutOverlay;
         this.computerName = computerName;
         // Check before owning a session: rejecting local use must not lock, wake,
         // capture, or turn off the phone the person is holding.
@@ -124,10 +137,16 @@ public final class DisplayGuardService extends IDisplayGuard.Stub {
             if (!session.begin(token, 10000)) throw new IllegalStateException("Remote session already active");
             // Own recovery before waking: encoder/transport startup must not leave the
             // physical lock screen visible while waiting for the first Mac frame.
-            if (panelOff && !lease.acquire(token, 10000)) throw new IllegalStateException(lease.getLastError());
-            if (panelOff) startupOwner = token;
+            if (usePanelOff && !lease.acquire(token, 10000)) throw new IllegalStateException(lease.getLastError());
+            if (usePanelOff) startupOwner = token;
+            if (blackoutOverlay) {
+                PrivilegedCapture.initialize();
+                blackout = new BlackoutOverlay(blackoutMessage);
+                touchBlocker = new TouchBlocker();
+                blackout.update(); // Exclude and cover the display before waking or entering a PIN.
+            }
             if (!logical.interactive()) logical.wake();
-            if (panelOff) lease.keepDark(token);
+            if (usePanelOff) lease.keepDark(token);
             Object generation = new Object(); captureGeneration = generation;
             captureStarted = SystemClock.elapsedRealtime(); captureError = "";
             android.util.Log.i("DroidMirrorCapture", "Preparing privileged capture");
@@ -141,7 +160,7 @@ public final class DisplayGuardService extends IDisplayGuard.Stub {
             if (unlockPin != null) {
                 byte[] pendingPin = unlockPin.clone();
                 try {
-                    unlockInput.execute(() -> completeUnlock(token, events, pendingPin, panelOff));
+                    unlockInput.execute(() -> completeUnlock(token, events, pendingPin, usePanelOff));
                 } catch (RuntimeException rejected) {
                     java.util.Arrays.fill(pendingPin, (byte) 0); throw rejected;
                 }
@@ -156,7 +175,8 @@ public final class DisplayGuardService extends IDisplayGuard.Stub {
             android.util.Log.e("DroidMirrorCapture", "Privileged capture startup failed", failure);
             captureError = failure instanceof PinUnlock.Failure ? failure.getMessage()
                 : "Privileged capture unavailable (" + failure.getClass().getSimpleName() + ")";
-            try { output.close(); } catch (java.io.IOException ignored) {}\n            session.finish(token, RemoteSession.STOP); closeCapture(); unlinkOwner(); return false;
+            try { output.close(); } catch (java.io.IOException ignored) {}
+            session.finish(token, RemoteSession.STOP); closeCapture(); unlinkOwner(); return false;
         } finally { if (unlockPin == null || capture == null) startupOwner = null; if (unlockPin != null) java.util.Arrays.fill(unlockPin, (byte) 0); }
     }
     private void completeUnlock(IBinder token, IStreamEvents events, byte[] pin, boolean panelOff) {
@@ -245,6 +265,15 @@ public final class DisplayGuardService extends IDisplayGuard.Stub {
             android.util.Log.w("DroidMirrorCapture","Bluetooth quality restore failed",failed); return false;
         }
     }
+    @Override public synchronized boolean updateBlackout(IBinder token, byte[] message) {
+        checkCaller();
+        if (token == null || owner != token || !session.owns(token) || blackout == null) return false;
+        try { blackout.setMessage(message); return true; }
+        catch (Exception failure) {
+            android.util.Log.w("DroidMirrorBlackout", "AOD refresh failed; retaining blackout", failure);
+            return false;
+        }
+    }
     @Override public synchronized boolean heartbeat(IBinder token) {
         boolean alive = session.heartbeat(token);
         if (alive && lease.owns(token)) lease.heartbeat(token);
@@ -295,6 +324,7 @@ public final class DisplayGuardService extends IDisplayGuard.Stub {
             if (cause == RemoteSession.LOCAL_USE) {
                 SystemClock.sleep(500); // Let the lock screen settle before turning the panel on.
                 if (!lease.recover()) throw new IllegalStateException("Panel restoration pending");
+                closeBlackout();
                 logical.wake(); awake = true;
             } else {
                 // Stop capture before sleeping so input/codec shutdown cannot wake
@@ -307,6 +337,7 @@ public final class DisplayGuardService extends IDisplayGuard.Stub {
             android.util.Log.e("DroidMirrorLease", "Lock or display recovery failed", failure);
             lease.recover();
         }
+        closeBlackout();
         // Recovery and event delivery precede the slower notification command.
         if (events != null) {
             try { events.onEnded(cause, awake); } catch (RemoteException ignored) {}
@@ -316,6 +347,10 @@ public final class DisplayGuardService extends IDisplayGuard.Stub {
         audits.put(token, posted);
         if (audits.size() > 16) audits.remove(audits.keySet().iterator().next());
         return posted;
+    }
+    private void closeBlackout() {
+        if (touchBlocker != null) { touchBlocker.close(); touchBlocker = null; }
+        if (blackout != null) { blackout.close(); blackout = null; }
     }
     private void unlinkEndedOwner() { if (owner != null && !session.owns(owner)) unlinkOwner(); }
     private void unlinkOwner() {

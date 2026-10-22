@@ -3,6 +3,8 @@ import Foundation
 
 @MainActor
 private final class RendererProbe: NSObject {
+    var activations: [pid_t] = []
+    var activationObserver: NSObjectProtocol?
     var windows: [Int] = []
     var title = ""
     var framesVisible = 0
@@ -12,6 +14,12 @@ private final class RendererProbe: NSObject {
     override init() {
         super.init()
         let center = DistributedNotificationCenter.default()
+        activationObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main
+        ) { [weak self] note in
+            let pid = (note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication)?.processIdentifier
+            MainActor.assumeIsolated { if let pid { self?.activations.append(pid) } }
+        }
         let host = String(ProcessInfo.processInfo.processIdentifier)
         center.addObserver(self, selector: #selector(connecting(_:)), name: Notification.Name("app.droidmirror.connectingVisible"), object: host)
         center.addObserver(self, selector: #selector(visible(_:)), name: Notification.Name("app.droidmirror.mirrorVisible"), object: host)
@@ -79,6 +87,19 @@ struct RendererLifecycleTests {
         wait("viewer menu ownership") { app.ownsMenuBar }
         wait("viewer launch completion") { app.isFinishedLaunching }
 
+        let icon = Bundle.main.bundleURL.appendingPathComponent("Contents/Resources/DroidMirror.icns")
+        let viewerIcon = Bundle.main.bundleURL.appendingPathComponent(
+            "Contents/Helpers/DroidMirror Renderer.app/Contents/Resources/DroidMirror.icns")
+        let hostArtwork = try Data(contentsOf: icon)
+        let viewerArtwork = try Data(contentsOf: viewerIcon)
+        precondition(hostArtwork == viewerArtwork,
+                     "Host and public viewer must ship identical DroidMirror artwork")
+        probe.activations.removeAll()
+        PhoneWindowController.shared.reopen(model: MirrorModel.shared)
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.3))
+        precondition(!probe.activations.contains(ProcessInfo.processInfo.processIdentifier),
+                     "Showing the phone must not activate the accessory host before the viewer")
+
         for attempt in 1...2 {
             let session = MirrorSession()
             session.arguments = ["--external-video-port=1", "--window-title=DroidMirror — Test",
@@ -101,8 +122,15 @@ struct RendererLifecycleTests {
             live.environment = ["DROIDMIRROR_TRANSPORT": "bluetooth-classic"]
             live.arguments = ["--external-video-port=\(CommandLine.arguments[1])", "--window-title=DroidMirror — Test",
                               "--no-control", "--no-audio", "--pause-on-exit=false"]
+            // Simulate Settings retaining focus while video attaches in the
+            // existing phone window. Stream startup must not activate the viewer.
+            NSApp.activate(ignoringOtherApps: true)
+            wait("settings focus") { NSWorkspace.shared.frontmostApplication?.processIdentifier == ProcessInfo.processInfo.processIdentifier }
+            probe.activations.removeAll()
             try live.run()
             wait("rendered video") { probe.framesVisible > 0 }
+            precondition(!probe.activations.contains(pid), "Video attachment must not steal focus from Settings")
+            precondition(NSWorkspace.shared.frontmostApplication?.processIdentifier == ProcessInfo.processInfo.processIdentifier)
             wait("video disconnection") { !live.isRunning }
             wait("live stream end") { probe.windows.count == 3 }
             precondition(renderer.isRunning && renderer.processIdentifier == pid)

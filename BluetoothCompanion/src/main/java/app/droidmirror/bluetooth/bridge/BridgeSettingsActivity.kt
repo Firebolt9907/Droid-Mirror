@@ -18,29 +18,33 @@ class BridgeSettingsActivity : Activity() {
     private lateinit var status: TextView
     private lateinit var permissions: TextView
     private var grantMessage = ""
+    private var requestedDetectionPermissions = false
+    private lateinit var experimentStats: TextView
     private val handler = Handler(Looper.getMainLooper())
     private val refreshStatus = object : Runnable {
         override fun run() {
             val runtime = BridgeRuntime.live
             status.text = when {
-                runtime != null -> "${runtime.status}\n${runtime.details}"
+                runtime != null -> "${runtime.status}\n${runtime.details}\n${WearPhoneBridge.batterySummary()}"
                 BackgroundBridgePreferences.enabled(this@BridgeSettingsActivity) -> "Starting background bridge…"
                 else -> "Background bridge stopped"
             }
+            updatePermissionState()
+            if (::experimentStats.isInitialized) experimentStats.text = LeftBehindMonitor.stats(this@BridgeSettingsActivity)
             handler.postDelayed(this, 1000)
         }
     }
     override fun onCreate(state: Bundle?) {
         super.onCreate(state)
-        title = "Notifications and wireless ADB"
+        title = "Background features and setup"
         status = TextView(this).apply { text = "Background bridge stopped"; textSize = 18f }
         permissions = TextView(this).apply { setTextIsSelectable(true) }
         val layout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(32, 48, 32, 32)
-            addView(TextView(context).apply { text = "DroidMirror notifications and wireless ADB"; textSize = 24f })
+            addView(TextView(context).apply { text = "DroidMirror background features"; textSize = 24f })
             addView(TextView(context).apply {
-                text = "Forward phone notifications over encrypted Bluetooth, even when mirroring is closed. Mirroring video tries Iroh on the local network, then wireless ADB, then Bluetooth. Relay servers are disabled. Wireless ADB is optional and is enabled only by the explicit button below. Pair once with your Mac for mirroring and notifications. One background bridge keeps mirroring, discovery and notification forwarding ready. The Pair Mac button below opens the shared pairing screen.\n\nStop the old BLE ADB Bridge before enabling this service. Use DroidMirror’s shared pairing code and allow its notification access."
+                text = "Notification forwarding has its own permission and Bluetooth connection. Working mirroring does not confirm that forwarding is ready. Complete the steps below, then send a new message to your phone to test."
             })
             addView(status)
             addView(permissions)
@@ -48,14 +52,62 @@ class BridgeSettingsActivity : Activity() {
         fun button(label: String, action: () -> Unit) {
             layout.addView(Button(this).apply { text = label; setOnClickListener { action() } })
         }
-        button("Enable background bridge") {
-            if (hasBluetoothPermissions()) startBridge() else requestPermissions(
-                arrayOf(Manifest.permission.BLUETOOTH_CONNECT, Manifest.permission.BLUETOOTH_ADVERTISE), 100)
+        fun heading(label: String) {
+            layout.addView(TextView(this).apply {
+                text = label; textSize = 20f; setPadding(0, 32, 0, 8)
+            })
         }
-        button("Pair Mac (mirroring and notifications)") {
+        heading("Phone notification setup")
+        button("1. Enable background bridge / allow Nearby devices") {
+            if (hasBluetoothPermissions()) startBridge() else requestPermissions(
+                arrayOf(Manifest.permission.BLUETOOTH_CONNECT, Manifest.permission.BLUETOOTH_ADVERTISE, Manifest.permission.BLUETOOTH_SCAN), 100)
+        }
+        button("2. Pair Mac (mirroring and notifications)") {
             startActivity(Intent(this, app.droidmirror.bluetooth.CaptureActivity::class.java).putExtra("pairMac", true))
         }
-        button("Allow notification forwarding") { startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)) }
+        button("3. Open notification access — enable DroidMirror") {
+            startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
+        }
+        layout.addView(TextView(this).apply {
+            text = "On the notification access screen, select DroidMirror and turn on Allow notification access. Opening that screen alone does not grant access. This is separate from allowing DroidMirror to post its own status or left-behind notifications. If Android blocks the switch for an installed APK, open Android App info for DroidMirror and allow restricted settings if offered, then return here."
+        })
+        button("Reconnect notification listener") {
+            android.service.notification.NotificationListenerService.requestRebind(ComponentName(this, PhoneNotifications::class.java))
+            updatePermissionState()
+        }
+        layout.addView(TextView(this).apply {
+            text = "If access is allowed but the listener stays disconnected, turn DroidMirror notification access off and on again. On your Mac, keep DroidMirror running and allow notifications for DroidMirror Notifications in System Settings → Notifications. Enable the phone app in DroidMirror Settings → Notifications. Test with a new incoming message; existing or silent notifications may appear only in Notification Center. Focus can silence banners. Shizuku and wireless debugging are not required to read and forward notifications."
+        })
+        heading("Left-behind alerts (optional)")
+        layout.addView(Switch(this).apply {
+            text = "Mac left-behind alerts (experimental)"
+            isChecked = LeftBehindMonitor.enabled(this@BridgeSettingsActivity)
+            isEnabled = LeftBehindMonitor.supported(this@BridgeSettingsActivity)
+            setOnCheckedChangeListener { _, enabled ->
+                LeftBehindMonitor.setEnabled(this@BridgeSettingsActivity, enabled)
+                if (enabled) requestDetectionPermissions()
+            }
+        })
+        layout.addView(TextView(this).apply {
+            text = if (LeftBehindMonitor.supported(this@BridgeSettingsActivity))
+                "Requires the background bridge and a paired Mac running DroidMirror. Runs four independent Bluetooth detectors in parallel: authenticated BLE link, passive Mac BLE beacon, active Mac GATT challenge, and Classic RFCOMM challenge. Pair the Mac in Android Bluetooth settings for Classic. Both apps need the matching update. Each posts its own numbered alert once per separation after that channel has first succeeded nearby; counts persist across restarts. Significant motion approximates travel, including walking or biking, but does not classify activity. Mac sleep or disabling Mac Bluetooth may cause false alerts. Closed-lid operation is experimental."
+            else "Left-behind alerts are unavailable: this phone has no significant-motion sensor."
+        })
+        experimentStats = TextView(this).apply {
+            text = LeftBehindMonitor.stats(this@BridgeSettingsActivity)
+            setTextIsSelectable(true)
+        }
+        layout.addView(experimentStats)
+        button("Allow detection permissions") {
+            requestedDetectionPermissions = false
+            requestDetectionPermissions()
+        }
+        button("Refresh left-behind counts") { experimentStats.text = LeftBehindMonitor.stats(this) }
+        button("Reset left-behind counts") {
+            LeftBehindMonitor.resetStats(this)
+            experimentStats.text = LeftBehindMonitor.stats(this)
+        }
+        heading("Wireless ADB and Shizuku (optional for notifications)")
         button("Grant secure settings with Shizuku") {
             SecureSettingsPermission.ensure(this) { message ->
                 grantMessage = message
@@ -68,15 +120,30 @@ class BridgeSettingsActivity : Activity() {
         button("Enable wireless ADB (optional)") {
             BridgeRuntime.live?.findEndpoint(enableWirelessDebugging = true) ?: run { status.text = "Enable the background bridge first." }
         }
-        button("Stop background bridge") {
+        heading("Recovery")
+        button("Stop background bridge (also stops forwarding)") {
             BackgroundBridgePreferences.setEnabled(this, false)
             stopService(Intent(this, CaptureService::class.java))
             status.text = "Background bridge stopped"
         }
         setContentView(ScrollView(this).apply { addView(layout) })
     }
+    private fun requestDetectionPermissions() {
+        if (requestedDetectionPermissions) return
+        val needed = mutableListOf<String>()
+        if (Build.VERSION.SDK_INT >= 33) needed.add(Manifest.permission.POST_NOTIFICATIONS)
+        if (Build.VERSION.SDK_INT >= 31) needed.addAll(listOf(Manifest.permission.BLUETOOTH_SCAN,
+            Manifest.permission.BLUETOOTH_CONNECT, Manifest.permission.BLUETOOTH_ADVERTISE))
+        else needed.add(Manifest.permission.ACCESS_FINE_LOCATION)
+        val missing = needed.filter { checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED }
+        if (missing.isNotEmpty()) {
+            requestedDetectionPermissions = true
+            requestPermissions(missing.toTypedArray(), 101)
+        }
+    }
     private fun hasBluetoothPermissions(): Boolean = Build.VERSION.SDK_INT < 31 ||
-        (checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED &&
+        (checkSelfPermission(Manifest.permission.BLUETOOTH_SCAN) == PackageManager.PERMISSION_GRANTED &&
+         checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED &&
          checkSelfPermission(Manifest.permission.BLUETOOTH_ADVERTISE) == PackageManager.PERMISSION_GRANTED)
     private fun startBridge() {
         BackgroundBridgePreferences.setEnabled(this, true)
@@ -90,6 +157,7 @@ class BridgeSettingsActivity : Activity() {
         handler.removeCallbacks(refreshStatus)
         handler.post(refreshStatus)
         updatePermissionState()
+        if (LeftBehindMonitor.enabled(this)) requestDetectionPermissions()
         if (!SecureSettingsPermission.granted(this) && SecureSettingsPermission.shizukuAuthorized()) {
             SecureSettingsPermission.ensure(this) { message ->
                 grantMessage = message
@@ -105,14 +173,25 @@ class BridgeSettingsActivity : Activity() {
         else Settings.Secure.getString(contentResolver, "enabled_notification_listeners")
             .orEmpty().split(':').any { ComponentName.unflattenFromString(it) == component }
         val secure = checkSelfPermission(Manifest.permission.WRITE_SECURE_SETTINGS) == PackageManager.PERMISSION_GRANTED
-        permissions.text = "\nNotification forwarding: ${if (access) "allowed" else "not allowed"}\n" +
-            "Shared Mac pairing code: ${if (BleTrust.key(this) != null) "available; paste it on your Mac" else "select a Mac and tap Pair Mac"}\n" +
+        permissions.text = "\nLeft-behind alerts: ${if (LeftBehindMonitor.enabled(this)) (if (getSystemService(NotificationManager::class.java).areNotificationsEnabled()) "enabled (experimental)" else "allow DroidMirror notifications in Android settings") else "off"}\n" +
+            "Bluetooth scan permission: ${if (Build.VERSION.SDK_INT < 31 || checkSelfPermission(Manifest.permission.BLUETOOTH_SCAN) == PackageManager.PERMISSION_GRANTED) "allowed" else "missing — #2 and initial #3 discovery cannot run"}\n" +
+            "Bluetooth connect permission: ${if (Build.VERSION.SDK_INT < 31 || checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED) "allowed" else "missing — active probes cannot run"}\n" +
+            "Notification access: ${if (access) "allowed" else "missing — complete step 3"}\n" +
+            "Notification listener: ${if (PhoneNotifications.live != null) "connected" else if (access) "disconnected — try reconnecting below" else "waiting for access"}\n" +
+            "Shared Mac pairing code: ${if (BleTrust.key(this) != null) "available (does not confirm Mac connection)" else "select a Mac and tap Pair Mac"}\n" +
             (if (secure) "Optional wireless ADB setup: authorized\n" else
                 "Start and authorize Shizuku in the main setup screen. DroidMirror grants secure settings automatically, or tap Grant secure settings with Shizuku to retry.\n") +
             grantMessage
     }
     override fun onRequestPermissionsResult(request: Int, permissions: Array<out String>, grants: IntArray) {
         super.onRequestPermissionsResult(request, permissions, grants)
+        if (request == 101) {
+            if (grants.isEmpty() || grants.any { it != PackageManager.PERMISSION_GRANTED })
+                status.text = "Allow Nearby Devices and notifications (Location on Android 11 or earlier) for all left-behind channels."
+            BridgeRuntime.live?.refreshLeftBehind()
+            updatePermissionState()
+            return
+        }
         if (request == 100 && hasBluetoothPermissions()) startBridge()
         else status.text = "Nearby Devices permission is required."
     }

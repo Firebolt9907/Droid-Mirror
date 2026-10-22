@@ -59,6 +59,10 @@ Targets stay usable at small window sizes and with square or unknown geometry.
 The rounded band uses distance to the same sampled curve rather than a circle. It does not introduce overlays/windows or global event taps. Corner
 drags preserve the starting aspect ratio and opposite-corner anchor, respect window
 size limits, and consume their down/drag/up events instead of tapping Android.
+Holding Option while dragging resizes around the starting window center, moving
+both edges while preserving the aspect ratio and size limits. Corners use AppKit's
+native frame-resize cursors on macOS 15 and later, with drawn diagonal cursors as
+a compatibility fallback on macOS 14.
 Ordinary side resizing and screen interactions are left to the existing handlers.
 
 `PhoneShadowTests.m` checks transparent caster interiors, removal of old shadow

@@ -33,12 +33,15 @@ DMResizeCorner DMCornerAtPoint(NSPoint point, NSSize size) {
 }
 
 NSRect DMCornerResizeFrame(NSRect start, NSPoint delta, DMResizeCorner corner,
-                          NSSize minimum, NSSize maximum) {
+                          NSSize minimum, NSSize maximum, BOOL centered) {
     if (corner == DMResizeCornerNone || start.size.width <= 0 || start.size.height <= 0) return start;
     BOOL left = corner == DMResizeCornerBottomLeft || corner == DMResizeCornerTopLeft;
     BOOL bottom = corner == DMResizeCornerBottomLeft || corner == DMResizeCornerBottomRight;
     CGFloat width = start.size.width, height = start.size.height;
     CGFloat dx = left ? -delta.x : delta.x, dy = bottom ? -delta.y : delta.y;
+    // Both edges move when resizing around the center, so a corner drag
+    // changes the full size by twice the pointer's movement.
+    if (centered) { dx *= 2; dy *= 2; }
     // Project the drag onto the fixed-aspect-ratio size vector.
     CGFloat scale = 1 + (dx * width + dy * height) / (width * width + height * height);
     CGFloat minScale = MAX(MAX(minimum.width / width, minimum.height / height), .01);
@@ -47,11 +50,28 @@ NSRect DMCornerResizeFrame(NSRect start, NSPoint delta, DMResizeCorner corner,
     if (maximum.height > 0) maxScale = MIN(maxScale, maximum.height / height);
     scale = MAX(minScale, MIN(MAX(minScale, maxScale), scale));
     NSSize size = NSMakeSize(width * scale, height * scale);
+    if (centered) {
+        return NSMakeRect(NSMidX(start) - size.width / 2,
+                          NSMidY(start) - size.height / 2, size.width, size.height);
+    }
     return NSMakeRect(left ? NSMaxX(start) - size.width : NSMinX(start),
                       bottom ? NSMaxY(start) - size.height : NSMinY(start), size.width, size.height);
 }
 
-static NSCursor *DMResizeCursor(BOOL rising) {
+static NSCursor *DMResizeCursor(DMResizeCorner corner) {
+    if (@available(macOS 15.0, *)) {
+        NSCursorFrameResizePosition position;
+        switch (corner) {
+            case DMResizeCornerTopLeft: position = NSCursorFrameResizePositionTopLeft; break;
+            case DMResizeCornerTopRight: position = NSCursorFrameResizePositionTopRight; break;
+            case DMResizeCornerBottomLeft: position = NSCursorFrameResizePositionBottomLeft; break;
+            case DMResizeCornerBottomRight: position = NSCursorFrameResizePositionBottomRight; break;
+            default: return NSCursor.arrowCursor;
+        }
+        return [NSCursor frameResizeCursorFromPosition:position inDirections:NSCursorFrameResizeDirectionsAll];
+    }
+    // macOS 14 has no public diagonal frame-resize cursor API.
+    BOOL rising = corner == DMResizeCornerTopRight || corner == DMResizeCornerBottomLeft;
     static NSCursor *up, *down;
     NSCursor *cached = rising ? up : down;
     if (cached) return cached;
@@ -99,7 +119,8 @@ void DMInstallCornerResizing(NSWindow *window, NSView *screen) {
                 if (event.type == NSEventTypeLeftMouseDragged) {
                     NSPoint mouse = NSEvent.mouseLocation;
                     NSPoint delta = NSMakePoint(mouse.x - startMouse.x, mouse.y - startMouse.y);
-                    [host setFrame:DMCornerResizeFrame(startFrame, delta, dragging, host.minSize, host.maxSize) display:YES];
+                    BOOL centered = (event.modifierFlags & NSEventModifierFlagOption) != 0;
+                    [host setFrame:DMCornerResizeFrame(startFrame, delta, dragging, host.minSize, host.maxSize, centered) display:YES];
                     return nil;
                 }
                 if (event.type == NSEventTypeLeftMouseUp) {
@@ -118,8 +139,7 @@ void DMInstallCornerResizing(NSWindow *window, NSView *screen) {
             if (surface.isFlipped) point.y = surface.bounds.size.height - point.y;
             DMResizeCorner corner = DMCornerAtPoint(point, surface.bounds.size);
             if (corner != DMResizeCornerNone) {
-                BOOL rising = corner == DMResizeCornerTopRight || corner == DMResizeCornerBottomLeft;
-                [DMResizeCursor(rising) set]; showingCursor = YES;
+                [DMResizeCursor(corner) set]; showingCursor = YES;
                 if (event.type == NSEventTypeLeftMouseDown) {
                     dragging = corner;
                     startMouse = [host convertPointToScreen:event.locationInWindow];

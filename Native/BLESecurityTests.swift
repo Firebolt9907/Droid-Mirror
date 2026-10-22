@@ -3,6 +3,18 @@ import CryptoKit
 
 @main struct SecurityTests {
     static func main() throws {
+        let discoveryKey = Data(HMAC<SHA256>.authenticationCode(
+            for: Data("DroidMirror notifications pairing v1".utf8),
+            using: SymmetricKey(data: Data(0..<32))))
+        let discovery = BLEDiscovery.uuid(key: discoveryKey)
+        precondition(discovery.uuidString.lowercased() == "78daac5a-2c5f-8f8f-830c-5e1fe3a976da")
+        let known = UUID(), stranger = UUID()
+        precondition(!BLEDiscovery.permits(stranger, remembered: nil, advertised: [], discovery: discovery))
+        precondition(!BLEDiscovery.permits(stranger, remembered: known, advertised: [UUID()], discovery: discovery))
+        precondition(BLEDiscovery.permits(known, remembered: known, advertised: [], discovery: discovery))
+        // A new privacy identity is selectable only with our pairing-specific advertisement.
+        precondition(BLEDiscovery.permits(stranger, remembered: known, advertised: [discovery], discovery: discovery))
+        precondition(BLEDiscovery.uuid(key: Data(repeating: 99, count: 32)) != discovery)
         let arguments = CommandLine.arguments
         let task = Process(); task.executableURL = URL(fileURLWithPath: arguments[1])
         task.arguments = ["-cp", arguments[2], "BLESecurityPeer"]
@@ -10,8 +22,11 @@ import CryptoKit
         task.standardInput = input; task.standardOutput = output; task.standardError = FileHandle.standardError
         try task.run()
         func check(_ value: Bool) { precondition(value) }
-        func exchange(_ object: [String: Any]) throws -> [String: Any] {
-            try input.fileHandleForWriting.write(contentsOf: JSONSerialization.data(withJSONObject: object) + Data([10]))
+        func exchange(_ object: [String: Any], wire: Data? = nil) throws -> [String: Any] {
+            let packet: Data
+            if let wire { packet = wire }
+            else { packet = try JSONSerialization.data(withJSONObject: object) }
+            try input.fileHandleForWriting.write(contentsOf: packet + Data([10]))
             var line = Data()
             while let byte = try output.fileHandleForReading.read(upToCount: 1), !byte.isEmpty {
                 if byte.first == 10 { break }; line.append(byte)
@@ -94,7 +109,11 @@ import CryptoKit
             let chunk: [String: Any] = ["type": "clipboardFileChunk", "id": UUID().uuidString, "offset": 4_999_998, "data": encoded]
             let envelope = try client.seal(chunk)
             check(envelope.count <= 8192)
-            let reply = try exchange(JSONSerialization.jsonObject(with: envelope) as! [String: Any])
+            // Optional JSON slash escapes must not inflate encrypted Base64.
+            // Parsing and exchanging this exact envelope still exercises Android
+            // authentication/decryption and preserves the original binary data.
+            check(!String(decoding: envelope, as: UTF8.self).contains("\\/"))
+            let reply = try exchange(JSONSerialization.jsonObject(with: envelope) as! [String: Any], wire: envelope)
             check(try JSONSerialization.data(withJSONObject: reply).count <= 8192)
             check(try client.open(reply)["data"] as? String == encoded)
         }

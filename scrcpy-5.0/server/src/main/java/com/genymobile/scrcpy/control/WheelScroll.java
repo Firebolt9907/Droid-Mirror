@@ -36,8 +36,16 @@ public final class WheelScroll {
             if (x+dx < 1 || x+dx > width-2 || y+dy < 1 || y+dy > height-2) {
                 // Re-anchor long wheel bursts locally; no extra Bluetooth traffic.
                 sink.touch(1, (int)Math.round(x), (int)Math.round(y));
-                x = anchorX; y = anchorY; sink.touch(0, (int)x, (int)y);
+                // Stay as close to the cursor as possible while leaving room
+                // for this step, including when the cursor is at the border.
+                x = Math.max(Math.ceil(1-Math.min(0,dx)), Math.min(Math.floor(width-2-Math.max(0,dx)), anchorX));
+                y = Math.max(Math.ceil(1-Math.min(0,dy)), Math.min(Math.floor(height-2-Math.max(0,dy)), anchorY));
+                sink.touch(0, (int)x, (int)y);
             }
+            // Cursor anchors may be close to an edge. Consume only the part
+            // that fits and retain the remaining distance for the next tick.
+            dx = Math.max(1-x, Math.min(width-2-x, dx));
+            dy = Math.max(1-y, Math.min(height-2-y, dy));
             int oldX = (int)Math.round(x), oldY = (int)Math.round(y);
             x += dx; y += dy; pendingX -= dx; pendingY -= dy;
             int nextX = (int)Math.round(x), nextY = (int)Math.round(y);

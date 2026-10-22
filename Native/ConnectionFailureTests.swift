@@ -5,6 +5,8 @@ struct ConnectionFailureTests {
     static func main() async throws {
         let cases: [(String, String)] = [
             ("Command timed out", "Timed out"),
+            ("PAIRING_CODE_MISMATCH: Pairing code is wrong.", "Pairing code is wrong"),
+            ("Bluetooth timed out\nPAIRING_CODE_MISMATCH\nERROR: Server connection failed", "Pairing code is wrong"),
             ("BLE operation stalled (write=1 read=0 queued=5).", "Timed out"),
             ("Shizuku unavailable", "Start Shizuku"),
             ("Shizuku is not authorized; phone display stays on.", "Authorize Shizuku"),
@@ -44,6 +46,51 @@ struct ConnectionFailureTests {
         let screenshotFailure = ConnectionFailure.recognize(screenshotLog)
         precondition(screenshotFailure.title == "Enable bridge on Android phone")
         precondition(!screenshotFailure.showsLog, "Secondary renderer errors must not hide the bridge failure")
+        let invalidBLELog = """
+        Bluetooth video stopped (exit 1).
+
+        LISTENING 61806 61807
+        Trying direct IP (LAN/VPN) video
+        Iroh: LAN endpoint bound; relays and public discovery disabled
+        Opening Classic L2CAP PSM 0xd001
+        Android accepted mirror session; starting BLE discovery
+        BLE setup: scanning for the phone's BLE service
+        BLE setup: connecting to a BLE service candidate
+        BLE candidate: 3D1B1E59-DC41-7410-3668-37BAD3AC3FAF
+        BLE setup: discovering BLE services
+        BLE setup: discovering BLE characteristics
+        BLE setup: reading the BLE session nonce
+        BLE setup: writing the BLE authentication challenge
+        BLE setup: reading the BLE pairing proof
+        BLE setup: reading the authenticated phone clock
+        BLE setup: authenticated BLE ready
+        READY 61806 61807
+        BLE side channel authenticated; Classic L2CAP carries video only (phone to Mac)
+        Invalid BLE control or event stream.
+
+        WARN: Could not set app name
+        WARN: Could not clear rendering: Parameter 'renderer' is invalid
+        ERROR: Could not render: Parameter 'renderer' is invalid
+        ERROR: Server connection failed
+        """
+        let invalidBLEFailure = ConnectionFailure.recognize(invalidBLELog)
+        precondition(invalidBLEFailure.title == "Bluetooth session interrupted")
+        precondition(!invalidBLEFailure.showsLog, "Secondary renderer errors must not hide the BLE stream failure")
+        let lanUnavailableBLELog = """
+        BLE setup: authenticated BLE ready
+        READY 61924 61925
+        BLE side channel authenticated; Classic L2CAP carries video only (phone to Mac)
+        Received Tailscale direct IP candidate over authenticated BLE
+        Iroh: Peer connection failed: Err(Elapsed(()))
+        EVENT LAN_UNAVAILABLE
+        Invalid BLE control or event stream.
+
+        WARN: Could not set app name
+        WARN: Device disconnected
+        """
+        let lanUnavailableBLEFailure = ConnectionFailure.recognize(lanUnavailableBLELog)
+        precondition(lanUnavailableBLEFailure.title == "Bluetooth session interrupted")
+        precondition(!lanUnavailableBLEFailure.showsLog, "A failed direct IP probe must not hide the BLE stream failure")
         // Setup advice mentioning Shizuku must not hide the actual failure.
         precondition(ConnectionFailure.recognize("Bluetooth connection timed out. Keep Shizuku running.").title == "Timed out")
         let unknown = "Stream began\n" + String(repeating: "verbose diagnostic\n", count: 2000) + "Unexpected packet 0xFE\n"

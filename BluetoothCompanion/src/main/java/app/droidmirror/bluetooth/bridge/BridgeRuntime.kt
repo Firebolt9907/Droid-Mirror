@@ -39,10 +39,13 @@ class BridgeRuntime(private val context: Context, private val onChanged: Runnabl
             when (intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, -1)) {
                 BluetoothAdapter.STATE_ON -> runCatching { ble.start { update(it, details) } }
                     .onFailure { update("Bluetooth unavailable", "Check Nearby Devices permission and try again.") }
+                BluetoothAdapter.STATE_TURNING_OFF -> handler.post { leftBehind?.disarm() }
                 BluetoothAdapter.STATE_OFF -> { ble.stop(); update("Bluetooth is off", details) }
             }
         }
     }
+    private var leftBehind: LeftBehindMonitor? = null
+    fun refreshLeftBehind() { handler.post { if (!destroyed) leftBehind?.refresh() } }
     private lateinit var finder: AdbEndpointFinder
     private var clipboard: app.droidmirror.bluetooth.ClipboardSyncClient? = null
     private var media: PhoneMediaSync? = null
@@ -84,11 +87,15 @@ class BridgeRuntime(private val context: Context, private val onChanged: Runnabl
         private set
 
     fun start() {
+        leftBehind = LeftBehindMonitor(context)
         hotspot = app.droidmirror.bluetooth.HotspotClient(context)
         finder = AdbEndpointFinder(context)
         ble = BlePeripheral(
             context = context,
             endpoint = { finder.endpoint },
+            onPresence = { peer, present -> handler.post { if (!destroyed) leftBehind?.presence(peer, present) } },
+            onPresenceReset = { handler.post { if (!destroyed) leftBehind?.disarm() } },
+            onWatchEvent = { event, valid, send -> WearPhoneBridge.receiveMac(context, event, valid, send) },
             onCommand = { command ->
                 if (command == "CONNECTED") update("Mac connected", details)
                 else if (finder.endpoint != null) update("Ready for Mac", details)
@@ -134,6 +141,7 @@ class BridgeRuntime(private val context: Context, private val onChanged: Runnabl
             wifiCallback
         )
         live = this
+        WearPhoneBridge.refresh(context)
         Shizuku.addBinderReceivedListenerSticky(shizukuReceived)
         Shizuku.addRequestPermissionResultListener(shizukuPermission)
         findEndpoint()
@@ -253,6 +261,7 @@ class BridgeRuntime(private val context: Context, private val onChanged: Runnabl
 
     override fun close() {
         destroyed = true
+        leftBehind?.close(); leftBehind = null
         media?.close(); media = null
         hotspot?.close(); hotspot = null
         clipboard?.close(); clipboard = null
@@ -262,6 +271,7 @@ class BridgeRuntime(private val context: Context, private val onChanged: Runnabl
         Shizuku.removeRequestPermissionResultListener(shizukuPermission)
         runCatching { context.unregisterReceiver(bluetoothChanged) }
         live = null
+        WearPhoneBridge.disconnected(context)
         handler.removeCallbacksAndMessages(null)
         runCatching { connectivity.unregisterNetworkCallback(networkCallback) }
         runCatching { connectivity.unregisterNetworkCallback(wifiCallback) }

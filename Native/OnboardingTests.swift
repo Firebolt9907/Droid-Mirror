@@ -43,6 +43,16 @@ struct OnboardingTests {
         precondition(!model.isPairingBluetooth && model.pairingError != nil)
         precondition(model.savedPairingDeviceID == nil && model.verifiedBluetoothDeviceID == nil,
                      "An invalid code must not mark pairing or streaming verified")
+        precondition(model.beginQRPairing(), "QR transfer should reserve the pairing flow")
+        precondition(!model.beginQRPairing(), "Only one QR invitation may be open")
+        model.start()
+        precondition(!model.isStarting, "Mirroring must wait until QR pairing closes")
+        model.pairBluetooth()
+        precondition(model.isPairingBluetooth, "Manual entry cannot replace an open QR transfer")
+        model.endQRPairing()
+        precondition(!model.isPairingBluetooth, "Closing QR setup releases the connection guard")
+        precondition(model.savedPairingDeviceID == nil && model.verifiedBluetoothDeviceID == nil,
+                     "Opening or cancelling QR setup must not mark a key saved or a mirror verified")
         model.bluetoothPairingCode = ""
         model.pairingError = nil
         model.status = "Select your phone and continue setup"
@@ -65,6 +75,6 @@ struct OnboardingTests {
             try bitmap.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: "\(output)/mac-step-\(step + 1).png"))
             window.orderOut(nil)
         }
-        print("PASS: first-run migration, interrupted setup, setup window reopening, draft-code cleanup and four rendered onboarding steps")
+        print("PASS: first-run migration, interrupted setup, setup window reopening, draft-code cleanup, QR pairing guards and four rendered onboarding steps")
     }
 }

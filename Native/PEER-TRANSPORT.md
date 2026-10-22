@@ -1,7 +1,10 @@
 # LAN → wireless ADB → Bluetooth (companion 0.29)
 
-Automatic mode starts video over Classic Bluetooth immediately. Once capture is
-running, it tries these video paths in order:
+Automatic mode starts the Iroh dial alongside the Classic Bluetooth connection.
+Android binds its paired Iroh endpoint while idle and opens the authenticated
+handoff endpoint as soon as the Classic session is accepted. Either path may
+carry the first video packet; Bluetooth capture never waits for LAN discovery.
+Video paths are preferred in this order:
 
 1. Iroh over direct LAN or Tailscale/VPN IPs, discovered through authenticated BLE hints and local multicast.
 2. An already-authorized wireless ADB device, using a session-owned loopback forward.
@@ -38,6 +41,13 @@ slow Iroh paths have a 60-second retry cooldown. Wireless ADB remains an optiona
 fallback under the existing discovery policy. These are packet delivery measures,
 not screen-to-screen latency measurements.
 
+If Iroh authenticates before the first video byte, the DMWIFI06 initial handoff
+uses a separately authenticated zero cutoff and skips the Bluetooth preview.
+Its video feeds the same decoder and entrance animation as Bluetooth. The
+entrance gate requires 150 ms of confirmed nonblack presented content regardless
+of transport; it does not require Bluetooth to supply the first frame. If
+Bluetooth wins, later Iroh handoff retains the preview and latency checks below.
+
 ## Pairing, handoff and recovery
 
 The random 32-byte BLE pairing credential derives separate phone/Mac Ed25519
@@ -73,11 +83,13 @@ unacknowledged suffix without changing decoder byte continuity. After recovery,
 the Mac again tries LAN before wireless ADB. Session-owned ADB forwards are removed
 at teardown; stale forwards are recreated after ADB disconnection/reconnection.
 
-The JNI endpoint exists only during capture. Android releases its multicast lock
-and endpoint at teardown. The Mac closes its endpoint with the Bluetooth helper.
+The JNI endpoint is readiness-owned and remains bound while the paired bridge
+is idle. Per-session media sockets close at teardown; disabling readiness closes
+the endpoint and releases its multicast lock. The Mac closes its endpoint with the Bluetooth helper.
 Copies have bounded buffers and backpressure. EOF closes both stream directions.
 Native errors appear under `DroidMirrorIroh` in Android logcat and in the Mac
-session log. No network endpoint listens while mirroring readiness is merely idle.
+session log. An idle paired endpoint cannot start capture without the Classic session and
+authenticated BLE setup.
 
 ## Build and validation
 
@@ -100,7 +112,8 @@ For other devices/emulators, install the corresponding Rust targets and set
 Tests cover production endpoints with no relay addresses and no public lookup,
 exact transfer of two million bytes over encrypted direct QUIC, unpaired identity
 rejection, delayed QUIC startup without expiring the application proof deadline,
-and a delayed native challenge that exceeded the old two-second Mac timeout.
+a delayed native challenge that exceeded the old two-second Mac timeout,
+and BLE hints that arrive during an active dial to an unreachable address.
 The existing handoff suite checks authentication, Java-to-C byte continuity,
 quality confirmation, BLE recovery and preservation of the decoder stream. Swift
 compilation and Android assemble/lint check integration. Actual LAN discovery,
@@ -119,7 +132,11 @@ and per-family UDP ports in BLE setup envelopes (type 3, 32-byte payload).
 Updates are published when addresses change. No ADB operation locates Iroh.
 
 The Mac reassembles these records, caches them before starting the native endpoint,
-and supplies them as explicit EndpointAddr IP candidates on subsequent dials.
+and supplies them as explicit EndpointAddr IP candidates. New hints wake an
+in-flight dial immediately, retaining its original five-second budget and local
+consumer instead of waiting for the old address search to time out. Android
+wakes its address publisher when the authenticated session attaches, avoiding
+the idle one-second refresh delay. Duplicate hints do not restart a dial.
 These hints are transport locations, not authentication: QUIC still requires the
 phone identity derived from the selected BLE pairing. Iroh selects a working
 direct path; the session log prints the selected IP/port to distinguish LAN and

@@ -22,7 +22,8 @@ final class PhoneWindowController: NSWindowController, NSWindowDelegate {
             try MirrorRenderer.shared.prepare()
             window?.orderOut(nil)
             NSApp.setActivationPolicy(.accessory)
-            NSApp.activate(ignoringOtherApps: true)
+            // Focus the public viewer directly; activating this accessory first
+            // makes macOS visibly switch applications twice.
             MirrorRenderer.shared.focus()
         } catch {
             showFallback(model: model)

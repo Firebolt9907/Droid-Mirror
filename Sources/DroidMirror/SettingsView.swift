@@ -57,12 +57,13 @@ struct SettingsView: View {
                         Text("Select a phone").tag(String?.none)
                         ForEach(model.devices) { Text($0.displayName).tag(Optional($0.id)) }
                     }.disabled(model.isMirroring || model.isStarting || model.isPairingBluetooth)
+                    QRPairingButton()
                     HStack {
                         SecureField("BLE pairing code from Android", text: $model.bluetoothPairingCode)
                         Button("Pair Mac") { model.pairBluetooth() }
                             .disabled(model.selectedDevice == nil || model.bluetoothPairingCode.isEmpty || model.isPairingBluetooth)
                     }.disabled(model.isMirroring || model.isStarting)
-                    Text("Once per phone: open Pair Mac (mirroring and notifications) in DroidMirror on Android and paste its code here. This pairs mirroring, notification forwarding and ADB discovery together. Allow notification forwarding on Android once.")
+                    Text("Once per phone: select this Mac in DroidMirror on Android and tap Scan Mac QR code after showing a QR code here, or paste its code manually. This pairs mirroring, notification forwarding and ADB discovery together. Allow notification forwarding on Android once.")
                         .font(.caption).foregroundStyle(.secondary)
                     HStack {
                         Button("Refresh") { model.refreshDevices() }.disabled(model.isStarting || model.isMirroring)
