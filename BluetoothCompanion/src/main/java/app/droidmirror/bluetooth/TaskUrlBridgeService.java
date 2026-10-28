@@ -13,6 +13,39 @@ public final class TaskUrlBridgeService extends ITaskUrlBridge.Stub {
         catch (Exception | LinkageError unavailable) { return ""; }
         finally { Binder.restoreCallingIdentity(identity); }
     }
+    @Override public String readHandoffDiagnostics() {
+        long identity = Binder.clearCallingIdentity();
+        Process process = null;
+        try {
+            // Metadata only: never call push-task or requestHandoff.
+            int user = (Integer) Class.forName("android.app.ActivityManager")
+                    .getMethod("getCurrentUser").invoke(null);
+            process = new ProcessBuilder("cmd", "task_continuity", "handoff", "list-tasks",
+                    Integer.toString(user)).redirectErrorStream(true).start();
+            final Process child = process;
+            java.util.concurrent.FutureTask<String> output = new java.util.concurrent.FutureTask<>(() -> {
+                try (java.io.InputStream input = child.getInputStream()) {
+                    byte[] bytes = input.readNBytes(65537);
+                    if (bytes.length > 65536) throw new java.io.IOException("oversize");
+                    return new String(bytes, java.nio.charset.StandardCharsets.UTF_8);
+                }
+            });
+            Thread reader = new Thread(output, "handoff-metadata");
+            reader.setDaemon(true);
+            reader.start();
+            String listing = output.get(3, java.util.concurrent.TimeUnit.SECONDS);
+            if (!process.waitFor(1, java.util.concurrent.TimeUnit.SECONDS) || process.exitValue() != 0)
+                return "{\"status\":\"unavailable\"}";
+            java.util.Set<String> packages = HandoffDiagnostics.packages(listing);
+            return new org.json.JSONObject().put("status", packages.isEmpty() ? "no_recognized_packages" : "eligible")
+                    .put("user", user).put("packages", new org.json.JSONArray(packages)).toString();
+        } catch (Exception | LinkageError unavailable) {
+            return "{\"status\":\"unavailable\"}";
+        } finally {
+            if (process != null) process.destroyForcibly();
+            Binder.restoreCallingIdentity(identity);
+        }
+    }
     @Override public boolean openBrowser(String url) {
         if (!TaskUrlResolver.webUrl(url)) return false;
         long identity = Binder.clearCallingIdentity();

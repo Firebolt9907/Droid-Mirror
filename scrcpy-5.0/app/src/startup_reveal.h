@@ -13,10 +13,11 @@ enum sc_startup_reveal_action { SC_REVEAL_WAIT, SC_REVEAL_ANIMATE, SC_REVEAL_IMM
 
 // Require content to stay on the presented surface for 150 ms. A startup flash
 // followed by black must not consume the entrance animation. Uninspectable
-// frames are not confirmation; black/protected screens remain usable via the
-// bounded fallback, which never animates.
+// formats have a bounded, nonanimated fallback. Known black frames stay covered
+// until content arrives; authenticated secure-window confirmation separately
+// replaces the loading surface with the protected-page UI.
 static inline enum sc_startup_reveal_action
-sc_startup_reveal_update(struct sc_startup_reveal *state, uint64_t now, bool content) {
+sc_startup_reveal_update(struct sc_startup_reveal *state, uint64_t now, bool content, bool unknown) {
     if (!state->started) { state->started = true; state->started_at = now; }
     if (content) {
         if (!state->confirming_content) {
@@ -27,6 +28,7 @@ sc_startup_reveal_update(struct sc_startup_reveal *state, uint64_t now, bool con
     } else {
         state->confirming_content = false;
     }
-    return now - state->started_at < 1500 ? SC_REVEAL_WAIT : SC_REVEAL_IMMEDIATE;
+    return unknown && now - state->started_at >= 1500
+        ? SC_REVEAL_IMMEDIATE : SC_REVEAL_WAIT;
 }
 #endif

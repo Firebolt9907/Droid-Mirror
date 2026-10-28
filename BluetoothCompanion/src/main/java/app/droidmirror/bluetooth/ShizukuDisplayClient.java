@@ -42,7 +42,18 @@ final class ShizukuDisplayClient implements AutoCloseable {
             try { SavedUnlockPin.completed(context); }
             catch (Exception failure) { status.accept("Could not update automatic unlock state. Save the PIN again on your phone."); }
         }
-        @Override public void onEnded(int cause, boolean lockedAndAwake) { ended.accept(cause, lockedAndAwake); }
+        @Override public void onEnded(int cause, boolean lockedAndAwake) {
+            beginHapticRecovery();
+            ended.accept(cause, lockedAndAwake);
+        }
+        @Override public void onHaptic() {
+            if (closed || ending || lastVideo == 0) return;
+            app.droidmirror.bluetooth.bridge.BridgeRuntime runtime =
+                app.droidmirror.bluetooth.bridge.BridgeRuntime.Companion.getLive();
+            if (runtime == null) return;
+            try { runtime.sendEvent(new org.json.JSONObject().put("type", "haptic")); }
+            catch (org.json.JSONException ignored) {}
+        }
     };
     private final Shizuku.UserServiceArgs args;
     private volatile IDisplayGuard guard;
@@ -52,6 +63,11 @@ final class ShizukuDisplayClient implements AutoCloseable {
     private boolean attempted;
     private boolean armed;
     private boolean peerDelayReported;
+    private boolean silentHapticsAttempted;
+    private volatile boolean hapticForwarding;
+    private volatile boolean ending;
+    private final java.util.concurrent.atomic.AtomicBoolean earlyHapticRecovery = new java.util.concurrent.atomic.AtomicBoolean();
+    private final java.util.concurrent.ExecutorService hapticWork = Executors.newSingleThreadExecutor();
     private final long started = SystemClock.elapsedRealtime();
 
     static boolean authorized() {
@@ -62,7 +78,7 @@ final class ShizukuDisplayClient implements AutoCloseable {
         return new Shizuku.UserServiceArgs(new ComponentName(context.getPackageName(), DisplayGuardService.class.getName()))
             // Bump when the embedded capture code changes: Shizuku daemons can
             // survive APK replacement and otherwise keep running the old code.
-            .daemon(true).processNameSuffix("display_guard").debuggable(false).version(61);
+            .daemon(true).processNameSuffix("display_guard").debuggable(false).version(76);
     }
     private final ServiceConnection connection = new ServiceConnection() {
         @Override public void onServiceConnected(ComponentName name, IBinder binder) {
@@ -111,10 +127,18 @@ final class ShizukuDisplayClient implements AutoCloseable {
     }
     void localUse() {
         if (closed) return;
+        beginHapticRecovery();
         try { heartbeats.execute(() -> {
             try { IDisplayGuard remote = guard; if (!closed && remote != null) remote.localUse(owner); }
             catch (RemoteException | RuntimeException ignored) {}
         }); } catch (java.util.concurrent.RejectedExecutionException ignored) {}
+    }
+    private void beginHapticRecovery() {
+        ending = true;
+        hapticForwarding = false;
+        if (earlyHapticRecovery.compareAndSet(false, true)) {
+            new Thread(() -> HapticVibrationRecovery.restoreSetting(context), "LocalHapticRecovery").start();
+        }
     }
     void upgradeVideo(WirelessVideoProfile profile) throws java.io.IOException {
         IDisplayGuard remote = guard;
@@ -183,17 +207,41 @@ final class ShizukuDisplayClient implements AutoCloseable {
                 }
                 String error = remote.getLastError();
                 status.accept(!error.isEmpty() ? "Display stays on: " + error : panelOff
-                    ? "Streaming with phone panel off · Shizuku recovery active"
-                    : blackoutOverlay ? "Streaming with phone blackout overlay · press power to use phone"
-                    : "Streaming · Shizuku local-use monitor active");
+                    ? "Streaming with phone panel off \u00b7 Shizuku recovery active"
+                    : blackoutOverlay ? "Streaming with phone blackout overlay \u00b7 press power to use phone"
+                    : "Streaming \u00b7 Shizuku local-use monitor active");
             } else if (armed && !remote.heartbeat(owner)) {
                 status.accept("Screen-off lease ended; phone display restored or recovery is retrying."); close();
             }
+            updateHaptics(remote);
             refreshBlackout(remote);
         } catch (RemoteException | RuntimeException error) {
             android.util.Log.e("DroidMirrorLease", "Session heartbeat failed", error);
             status.accept("Display guard unavailable; the shell watchdog must restore the panel."); close();
         }
+    }
+    private void updateHaptics(IDisplayGuard remote) {
+        if (closed || ending || !armed) return;
+        app.droidmirror.bluetooth.bridge.BridgeRuntime runtime =
+            app.droidmirror.bluetooth.bridge.BridgeRuntime.Companion.getLive();
+        boolean forwarding = runtime != null && runtime.canForwardHaptics();
+        hapticForwarding = forwarding;
+        if (forwarding == silentHapticsAttempted) return;
+        silentHapticsAttempted = forwarding;
+        hapticWork.execute(() -> {
+            try {
+                if (!forwarding) { remote.stopSilentHaptics(owner); HapticVibrationRecovery.restore(context); return; }
+                if (closed || ending || !hapticForwarding) return;
+                if (context.checkSelfPermission("android.permission.WRITE_SECURE_SETTINGS") != PackageManager.PERMISSION_GRANTED
+                        && !remote.grantSecureSettings()) return;
+                String original = HapticVibrationRecovery.prepare(context);
+                if (closed || !hapticForwarding || !remote.startSilentHaptics(owner, original)) HapticVibrationRecovery.restore(context);
+                if (closed || !hapticForwarding) { remote.stopSilentHaptics(owner); HapticVibrationRecovery.restore(context); }
+            } catch (Exception failure) {
+                HapticVibrationRecovery.restore(context);
+                android.util.Log.w("DroidMirrorHaptics", "Silent haptics unavailable", failure);
+            }
+        });
     }
     private void refreshBlackout(IDisplayGuard remote) throws RemoteException {
         if (closed || !armed || blackoutState == null || SystemClock.elapsedRealtime() < nextBlackoutCheck) return;
@@ -215,6 +263,7 @@ final class ShizukuDisplayClient implements AutoCloseable {
     @Override public synchronized void close() {
         if (closed) { if (auditKnown) audit.accept(auditResult); return; }
         closed = true; // Suppress any future acquisition before queuing release.
+        beginHapticRecovery();
         heartbeats.execute(() -> {
             try {
                 IDisplayGuard remote = guard;
@@ -222,6 +271,8 @@ final class ShizukuDisplayClient implements AutoCloseable {
             } catch (RemoteException | RuntimeException ignored) {
                 // Process-death/lease timeout recovery runs independently in the shell service.
             } finally {
+                hapticWork.execute(() -> HapticVibrationRecovery.restore(context));
+                hapticWork.shutdown();
                 auditKnown = true; audit.accept(auditResult);
                 main.post(this::unbind);
             }
@@ -249,20 +300,17 @@ final class ShizukuDisplayClient implements AutoCloseable {
                         status.accept(remote.restoreDisplay() ? "Phone display restored." : remote.getLastError());
                     } catch (RemoteException | RuntimeException error) { status.accept("Could not reach the display guard."); }
                     finally {
+                        work.shutdown();
                         main.post(() -> { try { Shizuku.unbindUserService(args, this, false); } catch (RuntimeException ignored) {} });
-                        work.shutdownNow();
                     }
                 });
             }
-            @Override public void onServiceDisconnected(ComponentName name) { work.shutdownNow(); status.accept("Display guard disconnected."); }
+            @Override public void onServiceDisconnected(ComponentName name) {
+                work.shutdown();
+                status.accept("Could not reach the display guard.");
+            }
         };
-        try {
-            work.schedule(() -> {
-                status.accept("Display guard connection timed out.");
-                main.post(() -> { try { Shizuku.unbindUserService(args, connection, false); } catch (RuntimeException ignored) {} });
-                work.shutdownNow();
-            }, 10, TimeUnit.SECONDS);
-            Shizuku.bindUserService(args, connection);
-        } catch (RuntimeException error) { work.shutdownNow(); status.accept("Could not start the display guard."); }
+        try { Shizuku.bindUserService(args, connection); }
+        catch (RuntimeException error) { status.accept("Could not start display guard recovery."); }
     }
 }

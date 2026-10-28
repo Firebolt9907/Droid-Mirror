@@ -53,6 +53,36 @@ sc_frame_content(const AVFrame *frame) {
     return SC_FRAME_BLACK;
 }
 
+// Entrance readiness is deliberately stricter than secure-window detection.
+// Ignore system bars and require visible area, rather than a single bright or
+// chroma-noise pixel on an otherwise black startup surface. Dark/unknown pages
+// still become interactive through the nonanimated startup fallback.
+static inline enum sc_frame_content
+sc_frame_reveal_content(const AVFrame *frame) {
+    if (!frame || frame->width <= 0 || frame->height <= 0
+            || (frame->format != AV_PIX_FMT_YUV420P
+                && frame->format != AV_PIX_FMT_YUVJ420P
+                && frame->format != AV_PIX_FMT_NV12)
+            || !frame->data[0] || !frame->linesize[0]) {
+        return SC_FRAME_UNKNOWN;
+    }
+    bool full_range = frame->color_range == AVCOL_RANGE_JPEG
+                      || frame->format == AV_PIX_FMT_YUVJ420P;
+    int threshold = full_range ? 8 : 23;
+    int left = frame->width / 20, top = frame->height / 20;
+    int right = frame->width - left, bottom = frame->height - top;
+    size_t required = ((size_t)(right - left) * (bottom - top) + 99) / 100;
+    size_t visible = 0;
+    for (int y = top; y < bottom; ++y) {
+        const unsigned char *row = frame->data[0]
+            + (ptrdiff_t)y * frame->linesize[0];
+        for (int x = left; x < right; ++x) {
+            if (row[x] > threshold && ++visible >= required) return SC_FRAME_CONTENT;
+        }
+    }
+    return SC_FRAME_BLACK;
+}
+
 static inline bool
 sc_frame_is_fully_black(const AVFrame *frame) {
     return sc_frame_content(frame) == SC_FRAME_BLACK;

@@ -2,6 +2,28 @@ package app.droidmirror.bluetooth.bridge
 
 import org.json.JSONObject
 
+/** Avoid notifying system media/Bluetooth clients for unchanged descriptions. */
+class MediaSessionPublication {
+    private var metadata: List<Any>? = null
+    private var queue: String? = null
+    fun metadataChanged(value: JSONObject, artworkVersion: Long): Boolean {
+        val next = listOf(value.getString("id"), value.getString("title"), value.getString("artist"),
+            value.getString("album"), value.getDouble("duration"), artworkVersion)
+        if (metadata == next) return false
+        metadata = next; return true
+    }
+    fun queueChanged(value: JSONObject?): Boolean {
+        val next = value?.toString().orEmpty()
+        if (queue == next) return false
+        queue = next; return true
+    }
+    fun clear(): Boolean {
+        val hadValue = metadata != null || queue != null
+        metadata = null; queue = null
+        return hadValue
+    }
+}
+
 /** Bounded metadata and short leases are shared by every Android proxy callback. */
 object MediaSyncProtocol {
     @JvmStatic fun fresh(receivedAt: Long, now: Long): Boolean = now >= receivedAt && now - receivedAt < 8000L

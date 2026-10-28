@@ -18,5 +18,7 @@ interface IDisplayGuard {
     boolean startAudio(IBinder owner, in ParcelFileDescriptor output) = 12;
     void stopAudio(IBinder owner) = 13;
     boolean updateBlackout(IBinder owner, in byte[] message) = 14;
+    boolean startSilentHaptics(IBinder owner, String originalSetting) = 15;
+    void stopSilentHaptics(IBinder owner) = 16;
     void destroy() = 16777114;
 }

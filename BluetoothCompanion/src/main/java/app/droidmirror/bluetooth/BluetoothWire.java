@@ -22,6 +22,9 @@ public final class BluetoothWire {
     private final java.util.ArrayDeque<Chunk> replay = new java.util.ArrayDeque<>();
     private long videoBytes, upgradeCutoff;
     private volatile boolean upgraded;
+    public static final int CONNECTION_BLUETOOTH=0, CONNECTION_WIFI=1, CONNECTION_USB=2;
+    private volatile int connectionMethod=CONNECTION_BLUETOOTH;
+    public int connectionMethod() { return connectionMethod; }
     private final WriteDeadline deadline;
     public interface SideChannel { void send(byte[] record) throws IOException; }
     private volatile SideChannel sideChannel;
@@ -29,6 +32,8 @@ public final class BluetoothWire {
     private Preview preview;
     private byte[] latestBluetoothFrame;
     private boolean latencySamples;
+    private volatile long generation;
+    private boolean waitingForSession, hasVideoFrame;
     /** A bounded copy of live video. A slow candidate must never block Classic. */
     static final class Preview {
         static final class Record {
@@ -61,6 +66,7 @@ public final class BluetoothWire {
         if (preview != null) preview.offer(new byte[0]);
     }
     public synchronized void videoFrameSent(byte[] frame) {
+        hasVideoFrame=true;
         // A static screen may produce no fresh frames during discovery. Keep a
         // bounded, complete encoded packet for candidate delivery checks only.
         latestBluetoothFrame=!upgraded && frame.length<=128*1024 ? frame.clone() : null;
@@ -108,14 +114,18 @@ public final class BluetoothWire {
         out.writeByte(4); out.writeInt(json.length); out.write(json); out.flush();
     }
     public void video(byte[] bytes) throws IOException {
+        video(bytes,generation);
+    }
+    private void video(byte[] bytes, long epoch) throws IOException {
         long captured=System.nanoTime();
         for (int offset = 0; offset < bytes.length;) {
             // A handoff commits before the receiver confirms the larger window;
             // fallback can also shrink it while this writer is waiting on ACKs.
             // Every reservation must fit either transport's capacity.
             int length = Math.min(upgraded ? Math.min(MAX_CHUNK, VIDEO_WINDOW_BYTES) : videoChunk, bytes.length - offset);
-            if (videoWindow != null) videoWindow.reserve(length);
+            if (videoWindow != null && !videoWindow.reserve(length, () -> epoch == generation)) return;
             synchronized (this) {
+                if (epoch != generation) return;
                 deadline.begin();
                 try {
                     pruneReplay();
@@ -139,6 +149,7 @@ public final class BluetoothWire {
                     }
                 } finally { deadline.end(); }
             }
+            if (epoch != generation) return;
             offset += length;
         }
         try { latencySample(captured); }
@@ -180,8 +191,41 @@ public final class BluetoothWire {
                 writeVideo(classic,chunk.bytes,offset,length); offset+=length;
             }
         }
+        connectionMethod=CONNECTION_BLUETOOTH;
         upgraded=false; pruneReplay(); notifyAll();
         return true;
+    }
+    /** Drop Wi-Fi backlog at a codec boundary rather than replaying it on Bluetooth. */
+    public synchronized boolean fallbackLive(long received) throws IOException {
+        if (!hasVideoFrame) return fallback(received); // Preserve startup headers.
+        if (!upgraded) return false;
+        received=Math.max(received,upgradeCutoff);
+        long first=replay.isEmpty() ? videoBytes : replay.peek().offset;
+        if (received<first || received>videoBytes) throw new IOException("Invalid Bluetooth resume offset");
+        out=classic;
+        // A reservation may already be waiting for the wire monitor. Retire it
+        // too, so the next ACK remains in the original cumulative byte sequence.
+        generation++;
+        long cutoff=videoWindow==null ? videoBytes : videoWindow.discardPending();
+        videoBytes=cutoff;
+        classic.writeByte(8); classic.writeInt(8); classic.writeLong(cutoff); classic.flush();
+        replay.clear(); latestBluetoothFrame=null;
+        waitingForSession=true; connectionMethod=CONNECTION_BLUETOOTH; upgraded=false;
+        if (videoWindow!=null) videoWindow.useBluetoothCapacity();
+        notifyAll();
+        return true;
+    }
+    /** Called with whole scrcpy packets by the capture relay. */
+    public void videoPacket(byte[] packet) throws IOException {
+        long epoch;
+        synchronized (this) {
+            if (waitingForSession) {
+                if ((packet[0] & 0x80)==0) return;
+                waitingForSession=false;
+            }
+            epoch=generation;
+        }
+        video(packet,epoch);
     }
     /** Sparse transport heartbeat; never enters scrcpy's video decoder. */
     public synchronized void wirelessHeartbeat() throws IOException {
@@ -223,9 +267,12 @@ public final class BluetoothWire {
         upgradeCutoff = 0; out = next; upgraded = true;
         return true;
     }
-    public void enableWirelessThroughput() {
+    public void enableWirelessThroughput() { enableWirelessThroughput(CONNECTION_WIFI); }
+    public synchronized void enableWirelessThroughput(int method) {
+        if (method!=CONNECTION_WIFI && method!=CONNECTION_USB) throw new IllegalArgumentException("Invalid video connection");
         if (!upgraded) throw new IllegalStateException("Wireless video is not connected");
         if (videoWindow != null) videoWindow.useWirelessCapacity();
+        connectionMethod=method;
     }
     public void control(byte[] bytes, int length) throws IOException {
         if (length <= 0 || length > MAX_CHUNK) throw new IOException("Invalid control reply size");

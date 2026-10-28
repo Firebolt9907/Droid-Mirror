@@ -5,6 +5,8 @@ import Darwin
 
 final class AndroidNotificationBridge {
     weak var controller: BLEController?
+    private let activities = AndroidActivityMenu()
+    private let activityImages = ActivityImages()
     private let center = UNUserNotificationCenter.current()
     private var categories = [String: UNNotificationCategory]()
     private var observer: NSObjectProtocol?
@@ -16,6 +18,7 @@ final class AndroidNotificationBridge {
     private let policy = NotificationDeliveryPolicy()
     private var sessionObserver: NSObjectProtocol?
     private var configurationObserver: NSObjectProtocol?
+    private let activityPreferences = ActivityAppPreferences(defaults: NotificationRuntime.preferences)
     private let appPreferences = NotificationAppPreferences(defaults: NotificationRuntime.preferences)
     private var sourcePackages = [String: String]()
     private var sessionPID: pid_t?
@@ -30,9 +33,38 @@ final class AndroidNotificationBridge {
     private var dismissals = NotificationDismissalQueue()
     private static let fallbackCategory = "DroidMirror.dismiss"
     var diagnostics: String {
-        "received=\(received) suppressed=\(suppressed) submitted=\(submitted) accepted=\(accepted) icons=\(iconsAttached) authorization=\(authorization)"
+        "activities=\(activities.count) received=\(received) suppressed=\(suppressed) submitted=\(submitted) accepted=\(accepted) icons=\(iconsAttached) authorization=\(authorization)"
     }
     init() {
+        activityImages.request = { [weak self] command, reply in
+            guard let controller = self?.controller, controller.authenticated, controller.supportsActivityImages else { reply(nil); return }
+            let type = command["type"] as? String == "activityImageRequest" ? "activityImageChunk" : "activityImageManifest"
+            controller.request(command, expecting: type, timeout: 12) { outcome in
+                if case .response(let response) = outcome { reply(response) } else { reply(nil) }
+            }
+        }
+        activityImages.onUpdate = { [weak self] event in
+            guard let self, self.controller?.authenticated == true, self.activityPreferences.allows(event) else { return }
+            self.activities.update(event)
+        }
+        activities.onAction = { [weak self] event, action in
+            guard let self, self.activityPreferences.allows(event), self.controller?.authenticated == true,
+                  let phone = BLETrust.identity, let id = event["id"] as? String,
+                  let version = event["version"] as? String else { return }
+            let opensApp = action == "open" || (event["actions"] as? [[String: Any]] ?? []).contains {
+                $0["id"] as? String == action && $0["opensApp"] as? Bool == true
+            }
+            let spec = action == "open" ? ["id": "open"] :
+                (event["actions"] as? [[String: Any]] ?? []).first { $0["id"] as? String == action }
+            self.actions.enqueue(phone: phone, command: ["type": "action", "id": id, "version": version,
+                "action": action, "opensApp": opensApp, "request": UUID().uuidString], activitySpec: spec)
+            if opensApp {
+                self.focusPolicy = NotificationFocusPolicy()
+                self.visible = false
+            }
+            self.flush()
+        }
+
         categories[Self.fallbackCategory] = NotificationDismissalCategory.make(identifier: Self.fallbackCategory, actions: [])
         center.setNotificationCategories(Set(categories.values))
         center.getDeliveredNotifications { [weak self] notifications in
@@ -78,7 +110,9 @@ final class AndroidNotificationBridge {
             }
         configurationObserver = DistributedNotificationCenter.default().addObserver(
             forName: NotificationAppPreferences.changed, object: nil, queue: .main) { [weak self] _ in
-                self?.applyAppPreferences()
+                guard let self else { return }
+                self.applyAppPreferences()
+                if self.controller?.authenticated == true { _ = self.controller?.send(["type": "subscribe", "activityDeltas": 1]) }
             }
         let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in self?.flush() }
         self.timer = timer
@@ -88,6 +122,8 @@ final class AndroidNotificationBridge {
         stop()
     }
     func stop() {
+        activityImages.reset()
+        activities.clear()
         timer?.invalidate()
         if let observer { DistributedNotificationCenter.default().removeObserver(observer) }
         if let sessionObserver { DistributedNotificationCenter.default().removeObserver(sessionObserver) }
@@ -98,6 +134,18 @@ final class AndroidNotificationBridge {
         restorations.removeAll()
         sourcePackages.removeAll()
     }
+    private var activityMembership = ActivitySnapshotMembership()
+    private var activityPhone: String?
+    func connected() {
+        let phone = BLETrust.identity
+        if activityPhone != phone { activityImages.reset(); activities.clear() }
+        activityPhone = phone
+        activityMembership = ActivitySnapshotMembership()
+        flush()
+    }
+    func resetActivities() { activityImages.reset(); activities.clear(); activityMembership = ActivitySnapshotMembership(); activityPhone = nil }
+    func disconnected() { activityImages.suspend(); activityMembership = ActivitySnapshotMembership(); activities.suspend() }
+
     private func recordApp(_ event: [String: Any]) {
         if appPreferences.record(event) {
             NotificationRuntime.post(NotificationAppPreferences.catalogChanged.rawValue)
@@ -108,6 +156,11 @@ final class AndroidNotificationBridge {
     }
     private func applyAppPreferences() {
         NotificationRuntime.preferences.synchronize()
+        activities.removeDisallowed { event in
+            let allowed = activityPreferences.allows(event)
+            if !allowed, let id = event["id"] as? String { activityImages.remove(id) }
+            return allowed
+        }
         let excluded = appPreferences.excluded
         for (id, package) in sourcePackages where excluded.contains(package) { remove(id) }
         // Include cards retained by macOS across receiver restarts. Never send
@@ -132,6 +185,10 @@ final class AndroidNotificationBridge {
     }
     func receive(_ event: [String: Any]) {
         switch event["type"] as? String {
+        case "activitiesReset":
+            if event["ids"] != nil {
+                if let ids = activityMembership.accept(event) { activityImages.reconcile(ids); activities.reconcile(ids) }
+            } else { activityImages.suspend(); activities.suspend() }
         case "dismissResult":
             if let request = event["request"] as? String { dismissals.acknowledged(request) }
         case "actionResult":
@@ -144,6 +201,21 @@ final class AndroidNotificationBridge {
             remove(id)
         case "notification":
             received += 1
+            if AndroidActivityMenu.isActivity(event) {
+                guard let phone = BLETrust.identity else { return }
+                if actions.refreshActivity(phone: phone, event: event) {
+                    failure("This live activity action changed while mirroring connected. Choose the action again.")
+                }
+                // Remove any ordinary banner when the same notification becomes persistent.
+                if let id = event["id"] as? String { remove(id, includeActivity: false) }
+                if activityPreferences.record(event) {
+                    NotificationRuntime.post(ActivityAppPreferences.catalogChanged.rawValue)
+                }
+                if activityPreferences.allows(event) { activities.update(activityImages.observe(event)) }
+                else if let id = event["id"] as? String { activityImages.remove(id); activities.remove(id) }
+                return
+            }
+            if let id = event["id"] as? String { activityImages.remove(id); activities.remove(id) }
             // Deliver live events even while the mirror host is running.
             guard policy.shouldDeliver(event: event) else {
                 suppressed += 1
@@ -241,7 +313,9 @@ final class AndroidNotificationBridge {
             self.deliver(event, forceQuiet: true)
         }
     }
-    private func remove(_ id: String) {
+    private func remove(_ id: String, includeActivity: Bool = true) {
+        if includeActivity { activityImages.remove(id) }
+        if includeActivity { activities.remove(id) }
         sourcePackages.removeValue(forKey: id)
         let cards = conversations.remove(id)
         for card in cards {
@@ -312,6 +386,7 @@ final class AndroidNotificationBridge {
         flush()
     }
     func flush() {
+        activities.tick()
         if let identity = BLETrust.identity, controller?.authenticated == true {
             for command in dismissals.due(phone: identity) {
                 if controller?.send(command) == true, let request = command["request"] as? String {

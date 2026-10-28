@@ -8,7 +8,8 @@ eligibility should not be presented as working web continuation.
 ## Implemented task URL continuation
 
 The Android background bridge now starts a separate Shizuku `TaskUrlBridgeService`
-only while an authenticated Mac subscribes using `taskSubscribe`. It reads the
+for the lifetime of the background bridge. URL events are sent only while an
+authenticated Mac subscribes using `taskSubscribe`. It reads the
 top task on the phone's default display using structured `getTasks` every two
 seconds. It requests `AssistContent` for that task, with screenshots and view
 structure capture disabled, and accepts only a validated HTTP/HTTPS web URI
@@ -174,3 +175,28 @@ adb -s SERIAL push /tmp/droidmirror-docs-probe/classes.dex /data/local/tmp/droid
 adb -s SERIAL shell 'CLASSPATH=/data/local/tmp/droidmirror-docs-probe.dex app_process /system/bin DocsTaskUrlProbe TASK_ID'
 adb -s SERIAL shell rm /data/local/tmp/droidmirror-docs-probe.dex
 ```
+
+## Local support diagnostics
+
+While the background bridge runs, a Shizuku monitor checks every ten seconds,
+including without a connected Mac. It records changes in observed working web
+continuation (`webContinuationPackage`) using the same live URL discovery path
+as Mac continuation, plus native `task_continuity handoff list-tasks` package
+metadata when recognized. These are separate signals: native eligibility is
+not proof of a usable web URL. No handoff is requested.
+
+The private app files `handoff-support.jsonl` and `handoff-support.previous.jsonl`
+retain timestamps, package names, user ID and diagnostic status; URLs, task titles
+and payload extras are excluded. Each file is bounded to approximately 64 KiB.
+Changed records also use the `DroidMirrorHandoff` logcat tag. For a debuggable build:
+
+```sh
+adb shell run-as app.droidmirror.bluetooth cat files/handoff-support.jsonl
+adb logcat -s DroidMirrorHandoff
+```
+
+Requires the background bridge and authorized Shizuku, but no Mac subscription.
+Observations cover tasks seen during polling, not a complete installed-app scan.
+`no_recognized_packages` means the native listing was empty or its format was not
+recognized; it must not be interpreted as an app lacking support. Native listing
+parsing was checked against the Pixel 8 shell output (`Task ID: package.name`).

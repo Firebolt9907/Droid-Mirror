@@ -97,6 +97,7 @@ private final class BLEIntegration: NSObject {
         menuObservers.append(distributed.addObserver(forName: Notification.Name("app.droidmirror.receiverConfiguration"), object: nil, queue: .main) {
             [weak self] _ in
             guard NotificationRuntime.background, let self else { return }
+            self.phoneNotifications?.resetActivities()
             BLETrust.invalidate()
             self.wear.clear()
             self.wear.controller = nil
@@ -166,6 +167,9 @@ private final class BLEIntegration: NSObject {
                 self?.taskContinuation?.receive(event)
             } else if (event["type"] as? String)?.hasPrefix("clipboard") == true {
                 self?.clipboard?.receive(event)
+            } else if event["type"] as? String == "haptic" {
+                guard self?.mirrorTarget.target() != nil else { return }
+                TrackpadHaptics.shared.tick()
             } else if event["type"] as? String == "minimizeMirror" {
                 guard let pid = self?.mirrorTarget.target() else {
                     NSLog("DroidMirror minimize: no active mirror heartbeat")
@@ -180,6 +184,7 @@ private final class BLEIntegration: NSObject {
             }
         }
         bridge.onDisconnected = { [weak self] in
+            self?.phoneNotifications?.disconnected()
             self?.wear.clear()
             self?.media?.clear()
             self?.clipboard?.disconnected()
@@ -189,7 +194,7 @@ private final class BLEIntegration: NSObject {
         }
         bridge.onAuthenticated = { [weak self] in
             self?.wear.connected()
-            self?.phoneNotifications?.flush()
+            self?.phoneNotifications?.connected()
             self?.media?.connected()
             self?.clipboard?.connected()
             self?.taskContinuation?.connected()

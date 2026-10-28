@@ -9,11 +9,14 @@
 #import "ScrollDirection.h"
 #import "MirrorMenu.h"
 #import "ConnectingPhone.h"
+#import "SyntheticText.h"
 
 static id DMKeyboardMonitor;
 static id DMWindowCloseObserver;
 static BOOL DMCommandQuitActive;
 static BOOL DMEmojiShortcutActive;
+static BOOL DMSyntheticTextKeyActive;
+static BOOL DMPasteKeyActive;
 static BOOL DMHostQuitRequested;
 static NSUInteger DMPINSyntheticEventsRemaining;
 static void (*DMOriginalSendEvent)(NSApplication *, SEL, NSEvent *);
@@ -38,7 +41,11 @@ static id DMFocusObserver;
 static id DMMinimizeObserver;
 
 static void DMReportMirrorVisible(void) {
-    if (!DMFrameRendered || !DMMirrorWindow.visible || DMMirrorWindow.miniaturized) return;
+    // The toolbar/controller attaches after the loading overlay is removed.
+    // First-frame readiness must use the persistent phone window even while
+    // that controller has not been created yet.
+    NSWindow *window = DMMirrorWindow ?: DMConnectingPhoneWindow();
+    if (!DMFrameRendered || !window.visible || window.miniaturized) return;
     [[NSDistributedNotificationCenter defaultCenter] postNotificationName:@"app.droidmirror.mirrorVisible"
         object:NSProcessInfo.processInfo.environment[@"DROIDMIRROR_HOST_PID"] userInfo:nil deliverImmediately:YES];
 }
@@ -145,6 +152,11 @@ void DroidMirrorSetSecureScreen(int secure) {
         // Debounce window transitions independently of video frame contents.
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 350 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
             if (generation != DMSecureGeneration || DMHostQuitRequested) return;
+            // A confirmed protected page is usable without exposing black
+            // video or waiting for startup content that Android cannot send.
+            DMFinishConnectingPhoneWithoutAnimation();
+            DMFrameRendered = YES;
+            DMReportMirrorVisible();
             DMSecureOverlay.hidden = NO;
             [DMSecureOverlay setNeedsDisplay:YES];
         });
@@ -203,6 +215,46 @@ static BOOL DMEventIsQ(NSEvent *event) {
 static DMMirrorQuitTarget *DMMirrorQuit;
 
 static void DMSendEvent(NSApplication *app, SEL selector, NSEvent *event) {
+    // Snippet tools can put Command on V without posting a separate modifier
+    // event. SDL's physical modifier state then loses Command, producing "v".
+    // Read the original Cocoa flags and send clipboard+paste as one operation.
+    if (event.type == NSEventTypeKeyUp && event.keyCode == kVK_ANSI_V && DMPasteKeyActive) {
+        DMPasteKeyActive = NO;
+        return;
+    }
+    BOOL mirrorInput = DMMirrorWindow.isKeyWindow && !DMSecureWindow &&
+        ![DMMirrorWindow.firstResponder isKindOfClass:NSTextView.class];
+    if (mirrorInput && DMPasteShortcutEvent(event)) {
+        if (!event.isARepeat) {
+            NSString *text = [NSPasteboard.generalPasteboard stringForType:NSPasteboardTypeString];
+            if (!text || !DMQueueSyntheticText(text)) {
+                NSLog(@"DroidMirror: could not queue clipboard paste");
+            }
+        }
+        DMPasteKeyActive = YES;
+        return;
+    }
+    // Intercept before SDL emits both the dummy physical A and text events.
+    // Pair the release as well, without disturbing a real hardware A press.
+    if (event.type == NSEventTypeKeyUp && event.keyCode == kVK_ANSI_A && DMSyntheticTextKeyActive) {
+        DMSyntheticTextKeyActive = NO;
+        return;
+    }
+    if (mirrorInput && DMSyntheticTextEvent(event)) {
+        if (DMQueueSyntheticText(event.characters)) {
+            DMSyntheticTextKeyActive = YES;
+            return;
+        }
+    }
+    // setupKeyboardRemapping is replaced below, so media keys must enter here,
+    // before either SDL or AppKit handles the system-defined event.
+    if (event.type == NSEventTypeSystemDefined && !DMHostQuitRequested) {
+        id controller = DMSecureController;
+        SEL volume = NSSelectorFromString(@"handleVolumeEvent:focused:");
+        if ([controller respondsToSelector:volume] &&
+            !((NSEvent *(*)(id, SEL, NSEvent *, BOOL))objc_msgSend)(
+                controller, volume, event, app.isActive)) return;
+    }
     if ((event.type == NSEventTypeKeyDown || event.type == NSEventTypeKeyUp) &&
             event.keyCode == 49 &&
             (DMEmojiShortcutActive ||

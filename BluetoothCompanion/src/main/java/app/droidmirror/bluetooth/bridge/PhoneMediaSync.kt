@@ -45,11 +45,21 @@ class PhoneMediaSync(private val context: Context, private val send: (JSONObject
     private var localId = UUID.randomUUID().toString()
     private val artwork = MediaArtworkTransfer()
     private val remoteQueue = RemoteMediaQueue()
+    private val publication = MediaSessionPublication()
     private val route = if (Build.VERSION.SDK_INT >= 30) MacMediaRoute(context) { controllerId ->
         // System UI maps remote playback to the selected route through this ID.
         proxy.setPlaybackToRemote(object : VolumeProvider(VOLUME_CONTROL_FIXED, 1, 1, controllerId) {})
     } else null
     private var remoteArtwork: Bitmap? = null
+    private var remoteArtworkBytes: String? = null
+    private var artworkVersion = 0L
+    private fun updateRemoteArtwork(value: Any?) {
+        val bytes = value as? String
+        if (bytes == remoteArtworkBytes) return
+        remoteArtworkBytes = bytes
+        remoteArtwork = decodeArtwork(bytes)
+        ++artworkVersion
+    }
     private var remote: JSONObject? = null
     private var remoteAt = 0L
     private var closed = false
@@ -141,7 +151,7 @@ class PhoneMediaSync(private val context: Context, private val send: (JSONObject
                 remote = event.takeIf { MediaSyncProtocol.validSnapshot(it) }
                 remoteQueue.observe(remote)
                 artwork.observe(remote ?: JSONObject())
-                remoteArtwork = if (remote != null) decodeArtwork(artwork.completed ?: event.opt("artwork")) else null
+                updateRemoteArtwork(if (remote != null) artwork.completed ?: event.opt("artwork") else null)
                 remoteAt = SystemClock.elapsedRealtime()
                 requestArtwork()
                 render()
@@ -155,7 +165,7 @@ class PhoneMediaSync(private val context: Context, private val send: (JSONObject
             }
             "mediaArtworkChunk" -> {
                 if (remote == null || !MediaSyncProtocol.fresh(remoteAt, SystemClock.elapsedRealtime()) || !artwork.receive(event)) return
-                remoteArtwork = decodeArtwork(artwork.completed)
+                updateRemoteArtwork(artwork.completed)
                 requestArtwork(); render()
             }
             "mediaCommand" -> {
@@ -210,6 +220,7 @@ class PhoneMediaSync(private val context: Context, private val send: (JSONObject
         val value = usableRemote()
         if (value == null) {
             route?.setActive(false)
+            if (!publication.clear()) return
             proxy.isActive = false
             proxy.setMetadata(null)
             proxy.setQueue(null); proxy.setQueueTitle(null)
@@ -224,24 +235,28 @@ class PhoneMediaSync(private val context: Context, private val send: (JSONObject
             "next" to PlaybackState.ACTION_SKIP_TO_NEXT, "previous" to PlaybackState.ACTION_SKIP_TO_PREVIOUS, "seek" to PlaybackState.ACTION_SEEK_TO)
         val queue = remoteQueue.value.takeIf { "queue" in names }
         val flags = (if (queue != null) PlaybackState.ACTION_SKIP_TO_QUEUE_ITEM else 0L) or names.fold(0L) { result, name -> result or (actionMap[name] ?: 0L) }
-        val metadata = MediaMetadata.Builder().putString(MediaMetadata.METADATA_KEY_TITLE, value.getString("title"))
-            .putString(MediaMetadata.METADATA_KEY_ARTIST, value.getString("artist"))
-            .putString(MediaMetadata.METADATA_KEY_ALBUM, value.getString("album"))
-            .putLong(MediaMetadata.METADATA_KEY_DURATION, (value.getDouble("duration") * 1000).toLong())
-        remoteArtwork?.let {
-            metadata.putBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART, it).putBitmap(MediaMetadata.METADATA_KEY_ART, it)
-        }
-        proxy.setMetadata(metadata.build())
-        val queueItems = queue?.getJSONArray("items")?.let { entries ->
-            (0 until entries.length()).map { index ->
-                val item = entries.getJSONObject(index)
-                val id = item.getLong("queueItemId")
-                MediaSession.QueueItem(MediaDescription.Builder().setMediaId(id.toString())
-                    .setTitle(item.getString("title")).setSubtitle(item.getString("artist")).build(), id)
+        if (publication.metadataChanged(value, artworkVersion)) {
+            val metadata = MediaMetadata.Builder().putString(MediaMetadata.METADATA_KEY_TITLE, value.getString("title"))
+                .putString(MediaMetadata.METADATA_KEY_ARTIST, value.getString("artist"))
+                .putString(MediaMetadata.METADATA_KEY_ALBUM, value.getString("album"))
+                .putLong(MediaMetadata.METADATA_KEY_DURATION, (value.getDouble("duration") * 1000).toLong())
+            remoteArtwork?.let {
+                metadata.putBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART, it).putBitmap(MediaMetadata.METADATA_KEY_ART, it)
             }
+            proxy.setMetadata(metadata.build())
         }
-        proxy.setQueue(queueItems)
-        proxy.setQueueTitle(if (queueItems != null) "Playing Next · Apple Music on Mac" else null)
+        if (publication.queueChanged(queue)) {
+            val queueItems = queue?.getJSONArray("items")?.let { entries ->
+                (0 until entries.length()).map { index ->
+                    val item = entries.getJSONObject(index)
+                    val id = item.getLong("queueItemId")
+                    MediaSession.QueueItem(MediaDescription.Builder().setMediaId(id.toString())
+                        .setTitle(item.getString("title")).setSubtitle(item.getString("artist")).build(), id)
+                }
+            }
+            proxy.setQueue(queueItems)
+            proxy.setQueueTitle(if (queueItems != null) "Playing Next · Apple Music on Mac" else null)
+        }
         val playback = PlaybackState.Builder().setActions(flags)
         if (queue != null) playback.setActiveQueueItemId(queue.getLong("currentItemId"))
         for (action in listOf("shuffle", "repeat").filter { it in names }) {
@@ -314,7 +329,8 @@ class PhoneMediaSync(private val context: Context, private val send: (JSONObject
     override fun close() {
         closed = true
         handler.removeCallbacksAndMessages(null)
-        remote = null; remoteArtwork = null; local = null; remoteQueue.observe(null); artwork.clear(); route?.close()
+        remote = null; remoteArtwork = null; remoteArtworkBytes = null; publication.clear()
+        local = null; remoteQueue.observe(null); artwork.clear(); route?.close()
         proxy.isActive = false; proxy.release()
         notifications.cancel(NOTIFICATION)
         if (live === this) live = null

@@ -8,6 +8,13 @@
 #include "../scrcpy-5.0/app/src/rotation.h"
 #import "PhoneAppearance.h"
 
+static _Thread_local Uint64 DMTrackpadEventTimestamp;
+static Uint64 DMTrackpadSourceTicks(NSTimeInterval source, NSTimeInterval now, Uint64 ticks) {
+    if (!isfinite(source) || source<=0 || source>now) return ticks;
+    double age=(now-source)*1e9;
+    return age<ticks ? ticks-(Uint64)llround(age) : 1;
+}
+
 bool DroidMirrorReduceMotion(void) {
     return NSWorkspace.sharedWorkspace.accessibilityDisplayShouldReduceMotion;
 }
@@ -96,6 +103,12 @@ static inline CGFloat DMScreenCornerRadius(CGFloat width) {
 @property(nonatomic) NSPoint pendingScrollPosition;
 @property(nonatomic) CGFloat pendingWheelX;
 @property(nonatomic) CGFloat pendingWheelY;
+@property(nonatomic) BOOL pendingWheelTrackpad;
+@property(nonatomic) BOOL directTrackpad;
+@property(nonatomic) BOOL trackpadAxisChosen;
+@property(nonatomic) NSPoint trackpadStartPosition;
+@property(nonatomic) Uint64 trackpadStartTimestamp;
+@property(nonatomic) Uint64 pendingTrackpadTimestamp;
 @property(nonatomic) BOOL wheelScheduled;
 @property(nonatomic) NSPoint pendingWheelPosition;
 @property(nonatomic) NSUInteger wheelGeneration;
@@ -312,14 +325,35 @@ static inline CGFloat DMScreenCornerRadius(CGFloat width) {
     return event;
 }
 
+// Local AppKit monitoring runs inside sendEvent:, including SDL's application.
+// Do not install a global tap: other focused apps keep their normal media keys.
+- (NSEvent *)handleVolumeEvent:(NSEvent *)event focused:(BOOL)focused {
+    if (!focused || !self.sessionActive || !self.sdlWindow ||
+        event.type != NSEventTypeSystemDefined || event.subtype != 8) return event;
+    uint32_t data = (uint32_t)event.data1;
+    unsigned key = data >> 16;
+    unsigned state = (data >> 8) & 0xff;
+    if ((key != 0 && key != 1) || (state != 0x0a && state != 0x0b)) return event;
+    if (state == 0x0a) {
+        // Each repeat is a complete Android press, just like the toolbar buttons.
+        [self runAndroidKey:key == 0 ? @"KEYCODE_VOLUME_UP" : @"KEYCODE_VOLUME_DOWN"];
+    }
+    // Consume both edges so SDL/macOS cannot also handle the volume key.
+    return nil;
+}
+
 - (void)setupKeyboardRemapping {
     if (self.keyboardMonitor) return;
     __weak typeof(self) weakSelf = self;
-    NSEventMask mask = NSEventMaskKeyDown | NSEventMaskKeyUp | NSEventMaskFlagsChanged;
+    NSEventMask mask = NSEventMaskKeyDown | NSEventMaskKeyUp | NSEventMaskFlagsChanged | NSEventMaskSystemDefined;
     self.keyboardMonitor = [NSEvent addLocalMonitorForEventsMatchingMask:mask handler:^NSEvent *(NSEvent *event) {
         typeof(self) selfRef = weakSelf;
         if (!selfRef || (event.window && event.window != selfRef.window && event.window != selfRef.toolbarWindow)) {
             return event;
+        }
+
+        if (event.type == NSEventTypeSystemDefined) {
+            return [selfRef handleVolumeEvent:event focused:NSApp.isActive];
         }
 
         // Cancel pending single-tap Control action if any other key event arrives.
@@ -622,6 +656,11 @@ static inline CGFloat DMScreenCornerRadius(CGFloat width) {
 }
 
 - (void)endPhoneGestures {
+    if (self.directTrackpad) {
+        self.pendingWheelX=self.pendingWheelY=0;
+        self.wheelScheduled=NO; ++self.wheelGeneration;
+        [self endTrackpadTouch];
+    }
     [self endLongPress];
     if (self.pinchActive) [self pushPinchType:SDL_EVENT_FINGER_UP];
     self.pinchActive = NO;
@@ -668,6 +707,9 @@ static inline CGFloat DMScreenCornerRadius(CGFloat width) {
         if (!NSPointInRect(point, bounds) || bounds.size.width < 20) return event;
         [self endLongPress];
         if (self.touchActive) [self endTrackpadTouch];
+        self.pendingWheelX = self.pendingWheelY = 0;
+        self.wheelScheduled = NO;
+        ++self.wheelGeneration;
         // Keep both fingers inside the screen, including near its edges.
         CGFloat margin = MIN(80, bounds.size.width * 0.2);
         self.pinchCenter = NSMakePoint(MIN(NSMaxX(bounds) - margin - 1, MAX(margin + 1, point.x)),
@@ -708,59 +750,7 @@ static inline CGFloat DMScreenCornerRadius(CGFloat width) {
 
     __weak typeof(self) weakSelf = self;
     self.scrollMonitor = [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskScrollWheel handler:^NSEvent *(NSEvent *event) {
-        typeof(self) selfRef = weakSelf;
-        if (!selfRef || event.window != selfRef.window) return event;
-        if (selfRef.pinchActive || selfRef.longPressActive) return nil;
-
-        // macOS generates momentum after fingers leave the trackpad. Android
-        // generates its own fling from the injected UP velocity, so forwarding
-        // both would make scrolling feel far too sensitive.
-        if (event.momentumPhase != NSEventPhaseNone) return nil;
-
-        CGFloat dx = event.scrollingDeltaX;
-        CGFloat dy = event.scrollingDeltaY;
-        if (event.phase != NSEventPhaseNone) {
-            if ((event.phase & NSEventPhaseBegan) || !selfRef.touchActive) [selfRef beginTrackpadTouchAt:event.locationInWindow];
-            if (fabs(dx) >= 0.01 || fabs(dy) >= 0.01) [selfRef moveTrackpadTouchX:dx y:dy];
-            if (event.phase & (NSEventPhaseEnded | NSEventPhaseCancelled)) [selfRef endTrackpadTouch];
-            return nil;
-        }
-
-        NSPoint position = [selfRef.screenView convertPoint:event.locationInWindow fromView:nil];
-        if (!NSPointInRect(position, selfRef.screenView.bounds)) return event;
-        // Give ordinary wheel ticks a modest boost without changing trackpads.
-        if (DMIsMouseWheel(event.phase, event.hasPreciseScrollingDeltas, event.momentumPhase)) {
-            dx *= 1.25;
-            dy *= 1.25;
-        }
-        if (selfRef.bluetoothStream && DMIsMouseWheel(event.phase, event.hasPreciseScrollingDeltas, event.momentumPhase)) {
-            if (!selfRef.wheelScheduled) selfRef.pendingWheelPosition = position;
-            selfRef.pendingWheelX += dx; selfRef.pendingWheelY += dy;
-            if (!selfRef.wheelScheduled) {
-                NSTimeInterval delay = MAX(0, selfRef.lastWheelCommand + 1.0/30.0 - NSProcessInfo.processInfo.systemUptime);
-                if (delay == 0) [selfRef flushMouseWheelCommands];
-                else {
-                    selfRef.wheelScheduled = YES;
-                    NSUInteger generation = selfRef.wheelGeneration;
-                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(delay*NSEC_PER_SEC)),dispatch_get_main_queue(),^{
-                        if (weakSelf.scrollMonitor && weakSelf.wheelGeneration == generation) [weakSelf flushMouseWheelCommands];
-                    });
-                }
-            }
-            return nil;
-        }
-
-        // Discrete mouse wheels have no gesture phase. Coalesce them into one
-        // short two-dimensional swipe while preserving both axes.
-        if (fabs(dx) < 0.01 && fabs(dy) < 0.01) return nil;
-        if (!selfRef.swipeScheduled) selfRef.pendingScrollPosition = position;
-        selfRef.pendingScrollX += dx;
-        selfRef.pendingScrollY += dy;
-        if (!selfRef.swipeScheduled) {
-            selfRef.swipeScheduled = YES;
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 28 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{ [selfRef flushSwipe]; });
-        }
-        return nil;
+        return weakSelf ? [weakSelf handleScrollEvent:event] : event;
     }];
 
     if (self.bluetoothStream) return;
@@ -783,6 +773,129 @@ static inline CGFloat DMScreenCornerRadius(CGFloat width) {
     });
 }
 
+- (NSEvent *)handleScrollEvent:(NSEvent *)event {
+    typeof(self) selfRef = self;
+    if (event.window != selfRef.window) return event;
+    if (selfRef.pinchActive) {
+        if (event.phase & NSEventPhaseCancelled) {
+            [selfRef endPhoneGestures];
+            return nil;
+        }
+        // Translate the same two contacts used by magnification. Forwarding a
+        // wheel or single-finger drag here would interrupt Android's pinch.
+        if (event.hasPreciseScrollingDeltas && event.momentumPhase == NSEventPhaseNone) {
+            NSRect bounds = selfRef.screenView.bounds;
+            CGFloat radius = selfRef.pinchRadius;
+            selfRef.pinchCenter = NSMakePoint(
+                MIN(NSMaxX(bounds) - radius - 1, MAX(radius + 1,
+                    selfRef.pinchCenter.x + event.scrollingDeltaX * 1.5)),
+                MIN(NSMaxY(bounds) - 1, MAX(1,
+                    selfRef.pinchCenter.y - event.scrollingDeltaY * 1.5)));
+            selfRef.pinchMaxRadius = MIN(selfRef.pinchCenter.x - 1,
+                NSMaxX(bounds) - selfRef.pinchCenter.x - 1);
+            [selfRef pushPinchType:SDL_EVENT_FINGER_MOTION];
+        }
+        return nil;
+    }
+    if (selfRef.longPressActive) return nil;
+
+    if (selfRef.bluetoothStream && (event.hasPreciseScrollingDeltas || event.phase != NSEventPhaseNone
+            || event.momentumPhase != NSEventPhaseNone)) {
+        NSPoint position=[selfRef.screenView convertPoint:event.locationInWindow fromView:nil];
+        if (!NSPointInRect(position,selfRef.screenView.bounds) && !selfRef.directTrackpad) return event;
+        Uint64 timestamp=DMTrackpadSourceTicks(event.timestamp,NSProcessInfo.processInfo.systemUptime,SDL_GetTicksNS());
+        if (event.phase & NSEventPhaseBegan) {
+            if (selfRef.touchActive) [selfRef endTrackpadTouch];
+            selfRef.directTrackpad=NO; selfRef.trackpadAxisChosen=NO;
+            selfRef.trackpadStartPosition=position;
+            selfRef.trackpadStartTimestamp=timestamp;
+            selfRef.pendingWheelX=selfRef.pendingWheelY=0;
+            selfRef.wheelScheduled=NO; ++selfRef.wheelGeneration;
+            [selfRef resetTrackpadPlaybackAt:position];
+        }
+        if (event.phase & NSEventPhaseCancelled) {
+            selfRef.pendingWheelX=selfRef.pendingWheelY=0;
+            selfRef.wheelScheduled=NO; ++selfRef.wheelGeneration;
+            if (selfRef.touchActive) [selfRef endTrackpadTouch];
+            [selfRef resetTrackpadPlaybackAt:position];
+            return nil;
+        }
+        CGFloat dx=event.scrollingDeltaX, dy=event.scrollingDeltaY;
+        if (!selfRef.trackpadAxisChosen && (dx != 0 || dy != 0)) {
+            selfRef.trackpadAxisChosen=YES;
+            selfRef.directTrackpad=event.phase != NSEventPhaseNone;
+            if (selfRef.directTrackpad) {
+                Uint64 previous=DMTrackpadEventTimestamp;
+                // Use the original contact time even if the first movement
+                // arrives later. Android needs a real velocity history.
+                DMTrackpadEventTimestamp=selfRef.trackpadStartTimestamp ?: timestamp;
+                @try { [selfRef beginTrackpadTouchAt:selfRef.trackpadStartTimestamp ? selfRef.trackpadStartPosition : position]; }
+                @finally { DMTrackpadEventTimestamp=previous; }
+            }
+        }
+        if (selfRef.directTrackpad) {
+            // Both page swipes and Home need UP at finger lift with velocity
+            // intact. Android owns the fling for every phased trackpad gesture.
+            if (event.momentumPhase != NSEventPhaseNone) return nil;
+            if (dx != 0 || dy != 0) selfRef.pendingTrackpadTimestamp=timestamp;
+            [selfRef queueWheelX:dx*1.5/24.0 y:dy*1.5/24.0 at:position trackpad:YES];
+            if (event.phase & NSEventPhaseEnded) {
+                [selfRef flushMouseWheelCommands];
+                ++selfRef.wheelGeneration;
+                Uint64 previous=DMTrackpadEventTimestamp;
+                DMTrackpadEventTimestamp=timestamp;
+                @try { [selfRef endTrackpadTouch]; }
+                @finally { DMTrackpadEventTimestamp=previous; }
+            }
+            return nil;
+        }
+        // Forward native momentum exactly once. Convert points to the
+        // wheel protocol's 24-point units, retaining touch sensitivity.
+        [selfRef queueWheelX:event.scrollingDeltaX*1.5/24.0 y:event.scrollingDeltaY*1.5/24.0
+            at:position trackpad:YES];
+        return nil;
+    }
+
+    // ADB uses direct touch gestures and Android's native fling.
+    if (event.momentumPhase != NSEventPhaseNone) return nil;
+    CGFloat dx = event.scrollingDeltaX;
+    CGFloat dy = event.scrollingDeltaY;
+    if (event.phase != NSEventPhaseNone) {
+        Uint64 previous=DMTrackpadEventTimestamp;
+        DMTrackpadEventTimestamp=DMTrackpadSourceTicks(event.timestamp,NSProcessInfo.processInfo.systemUptime,SDL_GetTicksNS());
+        @try {
+            if ((event.phase & NSEventPhaseBegan) || !selfRef.touchActive) [selfRef beginTrackpadTouchAt:event.locationInWindow];
+            if (fabs(dx) >= 0.01 || fabs(dy) >= 0.01) [selfRef moveTrackpadTouchX:dx y:dy];
+            if (event.phase & (NSEventPhaseEnded | NSEventPhaseCancelled)) [selfRef endTrackpadTouch];
+        } @finally { DMTrackpadEventTimestamp=previous; }
+        return nil;
+    }
+
+    NSPoint position = [selfRef.screenView convertPoint:event.locationInWindow fromView:nil];
+    if (!NSPointInRect(position, selfRef.screenView.bounds)) return event;
+    // Give ordinary wheel ticks a modest boost without changing trackpads.
+    if (DMIsMouseWheel(event.phase, event.hasPreciseScrollingDeltas, event.momentumPhase)) {
+        dx *= 1.25;
+        dy *= 1.25;
+    }
+    if (selfRef.bluetoothStream && DMIsMouseWheel(event.phase, event.hasPreciseScrollingDeltas, event.momentumPhase)) {
+        [selfRef queueWheelX:dx y:dy at:position trackpad:NO];
+        return nil;
+    }
+
+    // Discrete mouse wheels have no gesture phase. Coalesce them into one
+    // short two-dimensional swipe while preserving both axes.
+    if (fabs(dx) < 0.01 && fabs(dy) < 0.01) return nil;
+    if (!selfRef.swipeScheduled) selfRef.pendingScrollPosition = position;
+    selfRef.pendingScrollX += dx;
+    selfRef.pendingScrollY += dy;
+    if (!selfRef.swipeScheduled) {
+        selfRef.swipeScheduled = YES;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 28 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{ [selfRef flushSwipe]; });
+    }
+    return nil;
+}
+
 - (void)stopSwipeScrolling {
     if (self.touchActive) [self endTrackpadTouch];
     if (self.scrollMonitor) [NSEvent removeMonitor:self.scrollMonitor];
@@ -798,14 +911,45 @@ static inline CGFloat DMScreenCornerRadius(CGFloat width) {
     ++self.wheelGeneration;
 }
 
+- (void)queueWheelX:(CGFloat)dx y:(CGFloat)dy at:(NSPoint)position trackpad:(BOOL)trackpad {
+    if (dx == 0 && dy == 0) return;
+    if (self.wheelScheduled && self.pendingWheelTrackpad!=trackpad) [self flushMouseWheelCommands];
+    if (!self.wheelScheduled) self.pendingWheelPosition=position;
+    self.pendingWheelTrackpad=trackpad;
+    self.pendingWheelX+=dx; self.pendingWheelY+=dy;
+    if (self.wheelScheduled) return;
+    NSTimeInterval delay=MAX(0,self.lastWheelCommand+1.0/30.0-NSProcessInfo.processInfo.systemUptime);
+    if (delay==0) { [self flushMouseWheelCommands]; return; }
+    self.wheelScheduled=YES;
+    NSUInteger generation=self.wheelGeneration;
+    __weak typeof(self) weakSelf=self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(delay*NSEC_PER_SEC)),dispatch_get_main_queue(),^{
+        if (weakSelf.scrollMonitor && weakSelf.wheelGeneration==generation) [weakSelf flushMouseWheelCommands];
+    });
+}
+- (void)resetTrackpadPlaybackAt:(NSPoint)position {
+    if (!self.sdlWindow) return;
+    SDL_Event event; SDL_zero(event); event.type=SDL_EVENT_MOUSE_WHEEL;
+    event.wheel.timestamp=SDL_GetTicksNS(); event.wheel.windowID=SDL_GetWindowID(self.sdlWindow);
+    event.wheel.which=SC_DROIDMIRROR_TRACKPAD_RESET_ID;
+    event.wheel.mouse_x=position.x; event.wheel.mouse_y=self.screenView.bounds.size.height-position.y;
+    SDL_PushEvent(&event);
+}
 - (void)flushMouseWheelCommands {
     CGFloat dx=self.pendingWheelX, dy=self.pendingWheelY;
     self.pendingWheelX=self.pendingWheelY=0; self.wheelScheduled=NO;
-    if (!self.sdlWindow || (fabs(dx)<0.001 && fabs(dy)<0.001)) return;
+    if (!self.sdlWindow || (dx == 0 && dy == 0)) return;
     self.lastWheelCommand=NSProcessInfo.processInfo.systemUptime;
+    if (self.pendingWheelTrackpad && self.directTrackpad) {
+        Uint64 previous=DMTrackpadEventTimestamp;
+        DMTrackpadEventTimestamp=self.pendingTrackpadTimestamp;
+        @try { [self moveTrackpadTouchX:dx*24.0/1.5 y:dy*24.0/1.5]; }
+        @finally { DMTrackpadEventTimestamp=previous; }
+        return;
+    }
     SDL_Event event; SDL_zero(event); event.type=SDL_EVENT_MOUSE_WHEEL;
     event.wheel.timestamp=SDL_GetTicksNS(); event.wheel.windowID=SDL_GetWindowID(self.sdlWindow);
-    event.wheel.which=SC_DROIDMIRROR_WHEEL_MOUSE_ID;
+    event.wheel.which=self.pendingWheelTrackpad ? SC_DROIDMIRROR_TRACKPAD_MOUSE_ID : SC_DROIDMIRROR_WHEEL_MOUSE_ID;
     event.wheel.x=dx; event.wheel.y=dy;
     event.wheel.mouse_x=self.pendingWheelPosition.x;
     event.wheel.mouse_y=self.screenView.bounds.size.height-self.pendingWheelPosition.y;
@@ -817,7 +961,7 @@ static inline CGFloat DMScreenCornerRadius(CGFloat width) {
     SDL_Event event;
     SDL_zero(event);
     event.type = down ? SDL_EVENT_MOUSE_BUTTON_DOWN : SDL_EVENT_MOUSE_BUTTON_UP;
-    event.button.timestamp = SDL_GetTicksNS();
+    event.button.timestamp = DMTrackpadEventTimestamp ?: SDL_GetTicksNS();
     event.button.windowID = SDL_GetWindowID(self.sdlWindow);
     event.button.which = 0;
     event.button.button = SDL_BUTTON_LEFT;
@@ -833,7 +977,7 @@ static inline CGFloat DMScreenCornerRadius(CGFloat width) {
     SDL_Event event;
     SDL_zero(event);
     event.type = SDL_EVENT_MOUSE_MOTION;
-    event.motion.timestamp = SDL_GetTicksNS();
+    event.motion.timestamp = DMTrackpadEventTimestamp ?: SDL_GetTicksNS();
     event.motion.windowID = SDL_GetWindowID(self.sdlWindow);
     event.motion.which = 0;
     event.motion.state = SDL_BUTTON_LMASK;

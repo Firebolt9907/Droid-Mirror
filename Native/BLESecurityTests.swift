@@ -155,6 +155,15 @@ import CryptoKit
         }
         check(scheduled.count == 0)
         try input.fileHandleForWriting.close(); task.waitUntilExit(); precondition(task.terminationStatus == 0)
+        var delayed = BLEFragments()
+        let delayedData = Data(repeating: 42, count: 300)
+        let delayedFrames = BLEFragments.split(delayedData, id: 901, maximum: 185)
+        check(delayed.accept(delayedFrames[0], now: 1000) == nil)
+        check(delayed.accept(delayedFrames[1], now: 1006) == delayedData)
+        check(delayed.lastMessageStartedAt == 1000)
+        var expired = BLEFragments()
+        check(expired.accept(delayedFrames[0], now: 1000) == nil)
+        check(expired.accept(delayedFrames[1], now: 1016) == nil)
         print("PASS: Swift ↔ Android Kotlin mutual authentication, AES-GCM, tampering, replay, duplicate handshake, fragmentation")
     }
 }

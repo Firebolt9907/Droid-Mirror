@@ -71,5 +71,23 @@ int main(void) {
     portrait_y[198 * 100 + 5] = 16;
     for (int row = 194; row < 200; row++) memset(portrait_y + row * 100 + 20, 235, 60);
     assert(!sc_frame_is_fully_black(&frame)); // A navigation strip is too large.
-    puts("Secure black-frame tests passed");
+    // Startup frames may contain status icons, a navigation pill, or noise.
+    memset(portrait_y, 18, sizeof(portrait_y));
+    memset(portrait_y, 235, 4 * 100); // Status bar alone is not a phone page.
+    memset(portrait_y + 198 * 100, 235, 2 * 100);
+    portrait_y[100 * 100 + 50] = 235;
+    assert(sc_frame_reveal_content(&frame) == SC_FRAME_BLACK);
+    assert(sc_frame_content(&frame) == SC_FRAME_CONTENT); // Secure check stays conservative.
+    for (int row = 80; row < 100; ++row) memset(portrait_y + row * 100 + 20, 40, 30);
+    assert(sc_frame_reveal_content(&frame) == SC_FRAME_CONTENT); // Dark real content.
+    frame.format = AV_PIX_FMT_NV12;
+    assert(sc_frame_reveal_content(&frame) == SC_FRAME_CONTENT);
+    frame.color_range = AVCOL_RANGE_JPEG;
+    memset(portrait_y, 2, sizeof(portrait_y));
+    assert(sc_frame_reveal_content(&frame) == SC_FRAME_BLACK);
+    for (int row = 80; row < 100; ++row) memset(portrait_y + row * 100 + 20, 12, 30);
+    assert(sc_frame_reveal_content(&frame) == SC_FRAME_CONTENT);
+    frame.format = AV_PIX_FMT_RGB24;
+    assert(sc_frame_reveal_content(&frame) == SC_FRAME_UNKNOWN);
+    puts("Secure black-frame and startup content tests passed");
 }

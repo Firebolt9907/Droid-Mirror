@@ -49,7 +49,7 @@ public final class WirelessVideoUpgradeTest {
         check(Arrays.equals(Arrays.copyOfRange(response,40,48),BluetoothWire.MAGIC));
         return nonce;
     }
-    static void initialPathWins() throws Exception {
+    static void initialPathWins(int connection) throws Exception {
         byte[] key=new byte[32];
         byte[] profile=new WirelessVideoProfile(1920,60,12000000).bytes();
         ByteArrayOutputStream classic=new ByteArrayOutputStream();
@@ -70,18 +70,23 @@ public final class WirelessVideoUpgradeTest {
             byte[] authenticated=java.nio.ByteBuffer.allocate(20).put(profile).putLong(0).array();
             check(Arrays.equals(Arrays.copyOfRange(response,8,40),WirelessUpgradeAuth.proof(key,"initial server",nonce,authenticated)));
             check(Arrays.equals(Arrays.copyOfRange(response,40,48),BluetoothWire.MAGIC));
-            output.write(1); output.flush();
+            check(wire.connectionMethod()==BluetoothWire.CONNECTION_BLUETOOTH);
+            output.write(connection); output.flush();
             check(!quality.await(50,TimeUnit.MILLISECONDS)); // BLE/capture are still starting.
             endpoint.captureReady(); check(quality.await(2,TimeUnit.SECONDS));
+            check(wire.connectionMethod()==connection);
             wire.video(new byte[]{1,2,3});
             int type=input.readUnsignedByte();
             while (type==BluetoothWire.EVENT) { check(input.readInt()==1); input.readByte(); type=input.readUnsignedByte(); }
             check(type==0 && input.readInt()==3 && Arrays.equals(input.readNBytes(3),new byte[]{1,2,3}));
             check(classic.size()==8); // No video packet ever travelled over Classic.
+            endpoint.fallback(new byte[32],2);
+            check(wire.connectionMethod()==connection); // Wrong nonce cannot change the indicator.
             endpoint.fallback(nonce,2); check(restored.await(2,TimeUnit.SECONDS));
             long until=System.nanoTime()+2_000_000_000L;
             while(wire.isWireless() && System.nanoTime()<until) Thread.sleep(5);
             check(!wire.isWireless() && classic.size()>8);
+            check(wire.connectionMethod()==BluetoothWire.CONNECTION_BLUETOOTH);
         }
         System.out.println("LAN startup wins: zero cutoff, distinct proof, first packet on LAN, capture readiness and authenticated replay passed");
     }
@@ -97,7 +102,8 @@ public final class WirelessVideoUpgradeTest {
         System.out.println("Bluetooth startup wins: delayed LAN uses live preview and exact cutoff");
     }
     public static void main(String[] args) throws Exception {
-        initialPathWins();
+        initialPathWins(BluetoothWire.CONNECTION_WIFI);
+        initialPathWins(BluetoothWire.CONNECTION_USB);
         bluetoothWinsStartup();
         blockedWarmupKeepsBluetooth();
         staticScreenCanUpgrade();

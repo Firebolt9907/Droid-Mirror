@@ -39,11 +39,14 @@ public final class CaptureService extends Service {
         volatile long lastPeerSeen;
         final VideoWindow videoWindow = VideoWindow.bluetooth(5000);
         final SessionEndDelivery endEvent = new SessionEndDelivery();
+        volatile int notifiedConnection=-2;
         final AtomicBoolean streamStarted = new AtomicBoolean();
         final AtomicBoolean auditPosted = new AtomicBoolean();
         final AtomicBoolean heartbeatReply = new AtomicBoolean();
     }
     private volatile SessionState current;
+    private static volatile boolean mirrorOwnsRadio;
+    public static boolean mirrorOwnsRadio() { return mirrorOwnsRadio; }
     private final BroadcastReceiver screenActions = new BroadcastReceiver() {
         @Override public void onReceive(Context context, Intent intent) {
             SessionState state = current;
@@ -54,10 +57,12 @@ public final class CaptureService extends Service {
     };
     @Override public void onCreate() {
         super.onCreate();
+        HapticVibrationRecovery.restore(this);
         IntentFilter filter = new IntentFilter(Intent.ACTION_SCREEN_OFF);
         if (Build.VERSION.SDK_INT >= 33) registerReceiver(screenActions, filter, Context.RECEIVER_NOT_EXPORTED);
         else registerReceiver(screenActions, filter);
     }
+    private UsbAccessoryBridge usbAccessory;
     private Thread server;
     private ScheduledExecutorService watchdog;
     private final Object notificationLock = new Object();
@@ -99,7 +104,8 @@ public final class CaptureService extends Service {
     private Notification notification(String text) {
         SessionState state = current;
         if (streamingNotification())
-            return StreamNotifications.streaming(this, state.token, state.startedElapsed, state.promotionDismissed);
+            return StreamNotifications.streaming(this, state.token, state.startedElapsed, state.promotionDismissed,
+                state.wire == null ? BluetoothWire.CONNECTION_BLUETOOTH : state.wire.connectionMethod());
         PendingIntent open = PendingIntent.getActivity(this, 0, new Intent(this, CaptureActivity.class), PendingIntent.FLAG_IMMUTABLE);
         BridgeRuntime runtime = bridge;
         return new Notification.Builder(this, "capture").setSmallIcon(android.R.drawable.ic_menu_camera)
@@ -150,6 +156,7 @@ public final class CaptureService extends Service {
             if (Build.VERSION.SDK_INT >= 29) startForeground(foregroundNotificationId, notification(captureStatus), ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE);
             else startForeground(foregroundNotificationId, notification(captureStatus));
         }
+        if (usbAccessory == null) usbAccessory=new UsbAccessoryBridge(this);
         if (bridge == null) {
             bridge = new BridgeRuntime(this, this::refreshNotification);
             try { bridge.start(); }
@@ -167,6 +174,13 @@ public final class CaptureService extends Service {
         watchdog = Executors.newSingleThreadScheduledExecutor();
         watchdog.scheduleWithFixedDelay(() -> {
             SessionState state = current;
+            if (state != null && !state.stopped && state.wire != null && state.streamStarted.get()) {
+                int connection=state.wire.connectionMethod();
+                if (state.notifiedConnection!=connection) {
+                    state.notifiedConnection=connection;
+                    refreshNotification();
+                }
+            }
             if (state != null && !state.stopped && state.wire != null
                     && state.wire.writeStalled(SystemClock.elapsedRealtime() - state.lastPeerSeen)) {
                 synchronized (CaptureService.this) {
@@ -250,6 +264,8 @@ public final class CaptureService extends Service {
         }
     }
     private void serve() {
+        mirrorOwnsRadio=true;
+        if (bridge!=null) bridge.suspendPresenceProbes();
         SessionState state = new SessionState(); current = state;
         BluetoothWire wire = null;
         try {
@@ -300,11 +316,13 @@ public final class CaptureService extends Service {
                 status("Waiting for authenticated BLE input");
                 if (!state.ble.awaitInput()) throw new IOException("BLE input connection timed out");
                 if (peerTransport != null) peerTransport.attach(wire);
-                // Optional appearance must never prevent capture on unsupported OEMs.
-                try { wire.appearance(state.guard.phoneAppearance()); }
-                catch (Exception unavailable) { android.util.Log.d("DroidMirrorAppearance", "Appearance unavailable", unavailable); }
                 if (SavedUnlockPin.paused(this)) wire.event(BluetoothWire.PIN_PAUSED);
                 state.guard.startVideo(output, remoteControls, state.computerName);
+                // Capture startup wakes the logical display while preserving the
+                // panel-off lease. Live wallpaper layers are unavailable before
+                // that wake. Read off the video loop with bounded render retries.
+                BluetoothWire appearanceWire = wire;
+                new Thread(() -> refreshAppearance(state, appearanceWire), "PhoneAppearance").start();
                 if (state.wirelessUpgrade != null) state.wirelessUpgrade.captureReady();
             }
             ByteArrayOutputStream header = new ByteArrayOutputStream();
@@ -315,13 +333,13 @@ public final class CaptureService extends Service {
                 long statsStarted = SystemClock.elapsedRealtime(), frames = 0, bytesSent = 0, sendingMillis = 0, maxCaptureAgeUs = 0;
                 while (!shutdown && !state.stopped && state.endEvent.get() == 0) {
                     byte[] frameHeader = new byte[12]; input.readFully(frameHeader);
-                    if ((frameHeader[0] & 0x80) != 0) { sendVideo(wire, frameHeader); continue; }
+                    if ((frameHeader[0] & 0x80) != 0) { wire.videoPacket(frameHeader); continue; }
                     int size = ((frameHeader[8] & 255) << 24) | ((frameHeader[9] & 255) << 16) | ((frameHeader[10] & 255) << 8) | (frameHeader[11] & 255);
                     int maxPacket = 8 * 1024 * 1024;
                     if (size <= 0 || size > maxPacket) throw new IOException("Invalid video frame size");
                     byte[] frame = new byte[12 + size]; System.arraycopy(frameHeader, 0, frame, 0, 12); input.readFully(frame, 12, size);
                     long sendingStarted = SystemClock.elapsedRealtime();
-                    sendVideo(wire, frame);
+                    wire.videoPacket(frame);
                     sendingMillis += SystemClock.elapsedRealtime() - sendingStarted;
                     bytesSent += frame.length;
                     if ((frameHeader[0] & 0x40) == 0) {
@@ -365,6 +383,18 @@ public final class CaptureService extends Service {
             status("Bluetooth session unavailable: " + error.getMessage());
         } finally {
             stopSession(); status("Ready for your paired Mac");
+        }
+    }
+    private void refreshAppearance(SessionState state, BluetoothWire wire) {
+        // Re-read on every stream; an unavailable wallpaper leaves
+        // the host's last successful preview intact.
+        ShizukuDisplayClient guard = state.guard;
+        if (state.stopped || state.endEvent.get() != 0 || guard == null) return;
+        try {
+            byte[] appearance = guard.phoneAppearance();
+            if (!state.stopped && state.endEvent.get() == 0) wire.appearance(appearance);
+        } catch (Exception unavailable) {
+            android.util.Log.d("DroidMirrorAppearance", "Appearance unavailable", unavailable);
         }
     }
     private void startControls(SessionState state, InputStream peer, BluetoothWire wire) {
@@ -450,6 +480,9 @@ public final class CaptureService extends Service {
         if (state != null) {
             boolean wasStreaming = state.streamStarted.get() && !state.stopped;
             state.stopped = true;
+            ShizukuDisplayClient active = state.guard; state.guard = null;
+            if (active != null) active.close(); // Restore haptics before transport cleanup can block.
+            else if (!state.hasGuard && state.streamStarted.get()) auditEnd(state, false);
             // Publish the end before transport/guard cleanup, which can block.
             // Readiness owns this foreground notification even between sessions.
             refreshNotification();
@@ -458,8 +491,6 @@ public final class CaptureService extends Service {
             if (state.wirelessUpgrade != null) state.wirelessUpgrade.close();
             if (peerTransport != null) peerTransport.attach(null);
             if (state.ble != null) state.ble.close();
-            ShizukuDisplayClient active = state.guard; state.guard = null;
-            if (active != null) active.close(); else if (!state.hasGuard && state.streamStarted.get()) auditEnd(state, false);
             try { if (state.inputPipe != null) state.inputPipe.close(); } catch (IOException ignored) {}
             state.inputPipe = null;
             try { if (state.controlPipe != null) state.controlPipe.close(); } catch (IOException ignored) {}
@@ -469,6 +500,7 @@ public final class CaptureService extends Service {
         try { if (socket != null) socket.close(); } catch (IOException ignored) {}
         socket = null;
         if (listener != null) listener.disconnect();
+        mirrorOwnsRadio=false;
     }
     private void auditEnd(SessionState state, boolean shellPosted) {
         if (!state.streamStarted.get() || !state.auditPosted.compareAndSet(false, true)) return;
@@ -476,6 +508,7 @@ public final class CaptureService extends Service {
     }
     @Override public void onDestroy() {
         shutdown = true;
+        if (usbAccessory != null) { usbAccessory.close(); usbAccessory=null; }
         if (bridge != null) { bridge.close(); bridge = null; }
         stopSession();
         if (listener != null) listener.close();

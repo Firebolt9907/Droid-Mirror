@@ -52,8 +52,8 @@ cp "$ROOT/PeerTransport/target/release/libdroidmirror_peer.dylib" "$APP/Contents
 # The host and background receiver share the same pairing implementation.
 BLE_SOURCES=(Sources/DroidMirror/NotificationAppPreferences.swift Native/BrowserURL.swift Native/LinkSharing.swift Native/MediaSyncState.swift Native/AppleMusicQueue.swift Native/MusicCatalogArtwork.swift Native/AppleMusicSync.swift Native/MediaPlaybackSync.swift Native/WearCompanionState.swift Native/WearCompanion.swift Native/PhoneHotspot.swift Native/TaskContinuation.swift Native/ClipboardSync.swift Native/NotificationRuntime.swift Native/NotificationPresentationPolicy.swift Native/NotificationDismissal.swift Native/NotificationActions.swift Native/NotificationConversationState.swift
   Native/NotificationIconAttachment.swift Native/NotificationCommunicationContent.swift Native/BLESession.swift Native/BLEController.swift Native/BLEIntegration.swift
-  Native/BLEMenu.swift Native/DiscoveryNotifications.swift Native/BLESecurity.swift
-  Native/PresenceRadioServer.swift Native/AndroidNotificationBridge.swift)
+  Native/BLEMenu.swift Native/TrackpadHaptics.swift Native/DiscoveryNotifications.swift Native/ActivityClock.swift Native/BLESecurity.swift
+  Native/PresenceRadioServer.swift Native/ActivityImages.swift Native/AndroidActivityRenderer.swift Native/AndroidActivityMenu.swift Native/AndroidNotificationBridge.swift)
 xcrun swiftc "${SWIFT_FLAGS[@]}" -module-cache-path /private/tmp/droidmirror-swift-module-cache \
   -emit-library -module-name DroidMirrorBLE -target arm64-apple-macosx14.0 \
   -framework AppKit -framework IOBluetooth -framework CoreBluetooth -framework UserNotifications -framework Security \
@@ -98,12 +98,27 @@ cp "$APP/Contents/Resources/DroidMirror.icns" "$RECEIVER/Resources/DroidMirror.i
   -framework CoreImage -framework Cocoa -framework QuartzCore \
   -I/opt/homebrew/include -L/opt/homebrew/lib -lSDL3 \
   "$ROOT/Native/ConnectingPhone.m" "$ROOT/Native/KeyboardPassthroughShim.m" "$ROOT/Native/DeviceCorners.m" \
+  -framework Carbon \
   "$ROOT/Native/CornerResize.m" "$ROOT/Native/ScrollDirection.m" "$ROOT/Native/MirrorMenu.m" "$ROOT/Native/RotationPresentation.m" \
   -o "$APP/Contents/Frameworks/libDroidMirrorStyle.dylib"
 /usr/bin/clang "${C_FLAGS[@]}" -mmacosx-version-min=14.0 -c "$ROOT/Native/ClassicBluetoothWire.c" -o /tmp/droidmirror-classic-wire.o
 /usr/bin/clang "${C_FLAGS[@]}" -fobjc-arc -fblocks -mmacosx-version-min=14.0 \
   -framework Foundation -framework AVFoundation -framework IOBluetooth -framework CoreBluetooth -framework Security \
   "$ROOT/Native/ClassicBluetoothBridge.m" "$ROOT/Native/BleInputTransport.m" "$ROOT/Native/BleInputQueue.m" "$ROOT/Native/BleInputCrypto.c" /tmp/droidmirror-classic-wire.o -o "$APP/Contents/Helpers/DroidMirrorBluetooth"
+# AOA bulk USB does not depend on adb or USB debugging. Bundle libusb so the
+# runtime transport works without Homebrew on the destination Mac.
+USB_PREFIX="$(pkg-config --variable=prefix libusb-1.0)"
+# Homebrew's library is read-only, including in a copied previous bundle.
+rm -f "$APP/Contents/Frameworks/libusb-1.0.0.dylib"
+cp "$USB_PREFIX/lib/libusb-1.0.0.dylib" "$APP/Contents/Frameworks/libusb-1.0.0.dylib"
+chmod u+w "$APP/Contents/Frameworks/libusb-1.0.0.dylib"
+install_name_tool -id @rpath/libusb-1.0.0.dylib "$APP/Contents/Frameworks/libusb-1.0.0.dylib"
+/usr/bin/clang "${C_FLAGS[@]}" -std=c11 -dynamiclib -mmacosx-version-min=14.0 \
+  -I"$USB_PREFIX/include" -L"$USB_PREFIX/lib" -lusb-1.0 \
+  "$ROOT/Native/UsbAccessoryTransport.c" -o "$APP/Contents/Frameworks/libdroidmirror_usb.dylib"
+USB_INSTALL_NAME="$(otool -D "$USB_PREFIX/lib/libusb-1.0.0.dylib" | tail -n 1)"
+install_name_tool -change "$USB_INSTALL_NAME" @loader_path/libusb-1.0.0.dylib \
+  "$APP/Contents/Frameworks/libdroidmirror_usb.dylib"
 # Runtime-loaded Wi-Fi Aware SPI stays isolated from the main app's deployment target.
 /usr/bin/clang "${C_FLAGS[@]}" -fobjc-arc -fblocks -mmacosx-version-min=14.0 \
   -framework Foundation -framework Security "$ROOT/Native/WiFiAwareBridge.m" -o "$APP/Contents/Helpers/DroidMirrorWiFiAware"

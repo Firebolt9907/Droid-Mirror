@@ -76,7 +76,7 @@ any active mirror before updating, then restart the phone's background bridge.
 2. On the Mac, press **Mirror my phone**.
 3. Wait for your phone's screen to appear, then use your Mac's mouse and keyboard to control it.
 
-Leave the connection mode at **Automatic (Bluetooth → Wi-Fi)**. Mirroring starts over Bluetooth and can switch video to a faster direct network connection when available. Keeping both devices on the same Wi-Fi network can help. Tailscale isn't required.
+Leave the connection mode at **Automatic (USB / Wi-Fi / Bluetooth)**. Mirroring starts over Bluetooth and prefers an approved USB accessory connection for video when a supported phone is plugged in, without USB debugging or ADB access. Otherwise it can switch video to a faster direct network connection when available. USB video adds no playback buffer; encoding, decoding and display still take time. Keeping both devices on the same Wi-Fi network can help. Tailscale isn't required.
 
 ## Everyday use
 

@@ -117,10 +117,13 @@ final class WirelessVideoUpgrade implements AutoCloseable {
                             // The receiver must drain the old Classic cutoff first.
                             // Only then may larger frames and bitrate enter Wi-Fi.
                             socket.setSoTimeout(8000);
-                            if (input.readUnsignedByte() != 1) throw new IOException("Wi-Fi receiver did not confirm handoff");
+                            // 1 = network, 2 = USB accessory. This is read only on
+                            // the pairing-proof-authenticated candidate socket.
+                            int connection=input.readUnsignedByte();
+                            if (connection!=1 && connection!=2) throw new IOException("Video receiver did not confirm handoff");
                             synchronized (transition) {
                                 if (recovering.get() || !wire.isWireless()) throw new IOException("Wi-Fi handoff was cancelled");
-                                wire.enableWirelessThroughput();
+                                wire.enableWirelessThroughput(connection);
                                 // Capture and BLE authentication continue independently.
                                 // Never wait for a LAN candidate on the capture thread.
                                 try {
@@ -189,8 +192,8 @@ final class WirelessVideoUpgrade implements AutoCloseable {
         new Thread(() -> {
             try {
                 synchronized (transition) {
+                    wire.fallbackLive(received);
                     quality.apply(null);
-                    wire.fallback(received);
                     System.err.println("DroidMirror Bluetooth video recovery completed");
                 }
             } catch (IOException failed) { close(); }

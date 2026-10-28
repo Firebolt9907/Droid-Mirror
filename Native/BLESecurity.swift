@@ -152,21 +152,25 @@ struct BLEFragments {
     private var message: UInt32?
     private var total = 0
     private var bytes = Data()
-    private var started = Date.distantPast
-    mutating func accept(_ data: Data) -> Data? {
+    private var started: TimeInterval = 0
+    private(set) var lastMessageStartedAt: TimeInterval?
+    mutating func accept(_ data: Data, now: TimeInterval = ActivityClock.now) -> Data? {
         guard data.count > 9, data.first == 0xd2 else { return nil }
         let b = [UInt8](data)
         let id = b[1...4].reduce(UInt32(0)) { ($0 << 8) | UInt32($1) }
         let offset = Int(b[5]) << 8 | Int(b[6])
         let length = Int(b[7]) << 8 | Int(b[8])
         guard length > 0, length <= 8192 else { return nil }
-        if offset == 0 { message = id; total = length; bytes = Data(); started = Date() }
+        if offset == 0 { message = id; total = length; bytes = Data(); started = now }
         guard message == id, length == total, offset == bytes.count,
-              Date().timeIntervalSince(started) < 15, bytes.count + data.count - 9 <= total else {
+              now >= started, now - started < 15, bytes.count + data.count - 9 <= total else {
             message = nil; bytes = Data(); return nil
         }
         bytes.append(data.dropFirst(9))
-        if bytes.count == total { let result = bytes; message = nil; bytes = Data(); return result }
+        if bytes.count == total {
+            let result = bytes; lastMessageStartedAt = started
+            message = nil; bytes = Data(); return result
+        }
         return nil
     }
     static func split(_ data: Data, id: UInt32, maximum: Int) -> [Data] {

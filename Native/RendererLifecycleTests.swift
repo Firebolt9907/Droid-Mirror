@@ -127,8 +127,18 @@ struct RendererLifecycleTests {
             NSApp.activate(ignoringOtherApps: true)
             wait("settings focus") { NSWorkspace.shared.frontmostApplication?.processIdentifier == ProcessInfo.processInfo.processIdentifier }
             probe.activations.removeAll()
+            let startedAt = Date()
             try live.run()
-            wait("rendered video") { probe.framesVisible > 0 }
+            wait("rendered video") {
+                if !live.isRunning && probe.framesVisible == 0 {
+                    fatalError("Stream ended before its reveal: \(live.diagnostic)")
+                }
+                return probe.framesVisible > 0
+            }
+            if CommandLine.arguments.contains("--delayed-content") {
+                precondition(Date().timeIntervalSince(startedAt) >= 2.5,
+                             "Black startup frames must not dismiss the loading surface before content arrives")
+            }
             precondition(!probe.activations.contains(pid), "Video attachment must not steal focus from Settings")
             precondition(NSWorkspace.shared.frontmostApplication?.processIdentifier == ProcessInfo.processInfo.processIdentifier)
             wait("video disconnection") { !live.isRunning }

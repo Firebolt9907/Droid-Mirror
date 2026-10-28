@@ -47,7 +47,7 @@ enum MirrorTransport: String, CaseIterable, Identifiable, Codable {
     var id: String { rawValue }
     var label: String {
         switch self {
-        case .bluetoothClassic: "Automatic (Bluetooth → Wi-Fi)"
+        case .bluetoothClassic: "Automatic (USB / Wi-Fi / Bluetooth)"
         case .adb: "USB / wireless ADB"
         case .wifiAware: "Wi-Fi Aware (experimental)"
         }

@@ -11,6 +11,7 @@ typedef struct {
     uint8_t latency_bytes[8];
     size_t latency_used;
     void (*latency)(void *, uint64_t);
+    bool (*reset_video)(void *, uint64_t);
     bool (*appearance)(void *, const uint8_t *, size_t);
     // Audio is an explicitly negotiated extension on the authenticated Wi-Fi
     // parser only. Classic and BLE leave this callback unset and reject it.

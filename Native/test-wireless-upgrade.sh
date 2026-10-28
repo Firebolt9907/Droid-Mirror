@@ -18,6 +18,8 @@ java -cp "$work" BluetoothVideoBudgetTest
 java -cp "$work" BitrateRecoveryTest
 javac -cp "$work" -d "$work" scrcpy-5.0/server/src/main/java/com/genymobile/scrcpy/video/FrameFreshness.java BluetoothCompanion/tests/FrameFreshnessTest.java
 java -cp "$work" FrameFreshnessTest
+javac -d "$work" scrcpy-5.0/server/src/main/java/com/genymobile/scrcpy/control/WheelScroll.java BluetoothCompanion/tests/WheelScrollTest.java
+java -cp "$work" WheelScrollTest
 java -cp "$work" BluetoothWireTest
 java -cp "$work" WirelessUpgradeTest "$work"
 java -cp "$work" WirelessFallbackTest "$work"
@@ -46,6 +48,8 @@ clang Native/BleInputCrypto.c Native/BleInputCryptoTests.c -o "$work/input-crypt
 "$work/input-crypto" "$work/input.bin"
 javac -d "$work" "$src/BleInputCrypto.java" BluetoothCompanion/tests/BleInputCryptoTest.java
 java -cp "$work" app.droidmirror.bluetooth.BleInputCryptoTest "$work/input.bin" "$work/return.bin"
+javac -cp "$work" -d "$work" "$src/BlePreparedWrite.java" "$src/BleInputCommandStream.java" BluetoothCompanion/tests/BlePreparedWriteTest.java
+java -cp "$work" app.droidmirror.bluetooth.BlePreparedWriteTest
 "$work/input-crypto" unused "$work/return.bin"
 clang -fsanitize=address,undefined -g Native/ClassicBluetoothWire.c Native/WirelessUpgradeTests.c -o "$work/handoff"
 "$work/handoff" "$work/classic.bin" "$work/wifi.bin" "$work/expected.bin"

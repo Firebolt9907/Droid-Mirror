@@ -9,6 +9,7 @@ import android.content.Intent;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.SystemClock;
 import android.provider.Settings;
 
 /** One notification becomes a live update only while actual video is flowing. */
@@ -28,7 +29,14 @@ final class StreamNotifications {
     }
 
     static Notification streaming(Context context, String token, long started, boolean dismissed) {
+        return streaming(context, token, started, dismissed, -1);
+    }
+
+    static Notification streaming(Context context, String token, long started, boolean dismissed, int connection) {
         WearSessionAccess.streaming(context, token);
+        app.droidmirror.bluetooth.bridge.BridgeRuntime runtime=
+            app.droidmirror.bluetooth.bridge.BridgeRuntime.Companion.getLive();
+        if (runtime!=null) runtime.suspendPresenceProbes();
         context.getSystemService(NotificationManager.class).createNotificationChannel(
             new NotificationChannel(CHANNEL, "Phone Mirroring", NotificationManager.IMPORTANCE_LOW));
         Intent details = new Intent(context, StreamDetailsActivity.class)
@@ -36,21 +44,26 @@ final class StreamNotifications {
             .putExtra(TOKEN, token).putExtra(STARTED, started);
         PendingIntent open = PendingIntent.getActivity(context, 0, details,
             PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
-        String text = mirroringText(context);
+        String method = connectionName(context, connection);
+        String text = context.getString(R.string.stream_connection_status, mirroringText(context), method);
         Notification.Builder builder = new Notification.Builder(context, CHANNEL)
             .setSmallIcon(R.drawable.ic_screen_share)
             .setContentTitle(TITLE_TEXT)
             .setContentText(text)
             .setContentIntent(open).setOngoing(true).setOnlyAlertOnce(true)
             .setCategory(Notification.CATEGORY_STATUS).setVisibility(Notification.VISIBILITY_PRIVATE)
-            .setShowWhen(false)
+            // Use the system's small header stopwatch. ShortCriticalText below
+            // identifies the video transport even in the compact Live Update chip.
+            .setWhen(System.currentTimeMillis() - Math.max(0, SystemClock.elapsedRealtime() - started))
+            .setShowWhen(true).setUsesChronometer(true)
             .setDeleteIntent(action(context, DISMISSED, token))
             .addAction(new Notification.Action.Builder(null, context.getString(R.string.stream_minimize),
                 action(context, MINIMIZE, token)).build())
             .addAction(new Notification.Action.Builder(null, context.getString(R.string.stream_disconnect),
                 action(context, DISCONNECT, token)).build());
         if (Build.VERSION.SDK_INT >= 36) {
-            builder.setShortCriticalText(context.getString(R.string.stream_short_status));
+            builder.setShortCriticalText(connection == BluetoothWire.CONNECTION_BLUETOOTH
+                ? context.getString(R.string.stream_connection_bluetooth_short) : method);
             // Public 36.1 extra: older Android 16 releases safely ignore the promotion request.
             // Using the documented extra also avoids calling a 36.1 method on base API 36.
             Bundle extras = new Bundle();
@@ -58,6 +71,16 @@ final class StreamNotifications {
             builder.addExtras(extras);
         }
         return builder.build();
+    }
+
+    static String connectionName(Context context, int connection) {
+        int label = switch (connection) {
+            case BluetoothWire.CONNECTION_USB -> R.string.stream_connection_usb;
+            case BluetoothWire.CONNECTION_WIFI -> R.string.stream_connection_wifi;
+            case BluetoothWire.CONNECTION_BLUETOOTH -> R.string.stream_connection_bluetooth;
+            default -> R.string.stream_connection_adb;
+        };
+        return context.getString(label);
     }
 
     static String mirroringText(Context context) {

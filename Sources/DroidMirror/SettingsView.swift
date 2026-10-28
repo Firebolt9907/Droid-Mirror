@@ -80,7 +80,7 @@ struct SettingsView: View {
                     Text("Experimental direct connection. Mirroring is unavailable in this build.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
-                Text("Bluetooth and direct LAN video connect in parallel. LAN can carry the first video packet; otherwise Bluetooth starts at 320p, up to 15 fps, and a 128 kbps HEVC ceiling, then upgrades to the picture settings below. Video tries direct LAN or Tailscale IPs first, then an already-paired wireless ADB connection, then stays on Bluetooth. Relays and public Iroh discovery are disabled. Wireless ADB fallback requires Wireless debugging and one-time ADB pairing. Mouse, keyboard and navigation stay on Bluetooth. Audio requires a direct ADB session. Authorize Shizuku and enable the background bridge once in the Android companion.")
+                Text("Automatic mode detects supported USB accessory connections without ADB and prefers USB video with no added playback buffer. Android may ask you to approve the accessory on first connection. Bluetooth and direct LAN video connect in parallel. LAN can carry the first video packet; otherwise Bluetooth starts at 320p, up to 15 fps, and a 128 kbps HEVC ceiling, then upgrades to the picture settings below. Video tries direct LAN or Tailscale IPs first, then an already-paired wireless ADB connection, then stays on Bluetooth. Relays and public Iroh discovery are disabled. Wireless ADB fallback requires Wireless debugging and one-time ADB pairing. Mouse, keyboard and navigation stay on Bluetooth. Audio requires a direct ADB session. Authorize Shizuku and enable the background bridge once in the Android companion.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section("Phone hotspot") {
@@ -95,6 +95,7 @@ struct SettingsView: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
             NotificationAppsView()
+            ActivityAppsView()
             Section("Clipboard") {
                 Toggle("Mirror clipboard over Bluetooth", isOn: $clipboardMirroring)
                     .onChange(of: clipboardMirroring) { _, _ in

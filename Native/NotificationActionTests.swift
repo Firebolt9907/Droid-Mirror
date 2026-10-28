@@ -38,6 +38,17 @@ import Foundation
                      "Slow connection setup must leave time for unlocking")
         precondition(queue.expire(phone: "phone", now: now.addingTimeInterval(74)).isEmpty)
         precondition(queue.expire(phone: "phone", now: now.addingTimeInterval(75)).first?.sent == true)
+        var opening = command("map", "1")
+        opening["opensApp"] = true
+        let spec: [String: Any] = ["id": "1", "title": "Map", "opensApp": true, "reply": false]
+        queue.enqueue(phone: "phone", command: opening, activitySpec: spec, now: now)
+        precondition(queue.due(phone: "phone", mirrorVisible: false).isEmpty, "App-opening buttons must wait for a rendered stream")
+        precondition(queue.needsMirror(phone: "phone"))
+        precondition(!queue.refreshActivity(phone: "phone", event: ["id": "notification", "version": "v2", "actions": [spec]]))
+        precondition(queue.due(phone: "phone", mirrorVisible: true).first?.command["version"] as? String == "v2")
+        var changed = spec; changed["title"] = "Leave"
+        precondition(queue.refreshActivity(phone: "phone", event: ["id": "notification", "version": "v3", "actions": [changed]]))
+        precondition(queue.pending.isEmpty, "A changed operation must not execute after video startup")
         print("Direct replies, mirror-only opens, acknowledgments, duplicate prevention, expiry and phone isolation passed")
     }
 }

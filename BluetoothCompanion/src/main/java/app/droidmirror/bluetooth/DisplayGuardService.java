@@ -33,6 +33,13 @@ public final class DisplayGuardService extends IDisplayGuard.Stub {
     private IStreamEvents observer;
     private final java.util.LinkedHashMap<Object, Boolean> audits = new java.util.LinkedHashMap<>();
     private PrivilegedCapture capture;
+    private HapticListener haptics;
+    private SilentHaptics silentHaptics;
+    private SilentHaptics restoringHaptics;
+    private Object hapticAttempt;
+    private boolean hapticRestoreRunning;
+    private long lastHapticRestore;
+    private final java.util.concurrent.ExecutorService hapticCleanup = Executors.newSingleThreadExecutor();
     private BlackoutOverlay blackout;
     private TouchBlocker touchBlocker;
     private PrivilegedAudioCapture audio;
@@ -66,6 +73,18 @@ public final class DisplayGuardService extends IDisplayGuard.Stub {
         watchdog.scheduleWithFixedDelay(() -> {
             synchronized (this) {
                 long now = SystemClock.elapsedRealtime();
+                if (restoringHaptics != null && restoringHaptics.released()) restoringHaptics = null;
+                if (restoringHaptics != null && !hapticRestoreRunning && now - lastHapticRestore >= 1000)
+                    queueHapticRestore(restoringHaptics);
+                if (silentHaptics != null) {
+                    try {
+                        if (!silentHaptics.healthy()) throw new IllegalStateException("Haptic trace stopped");
+                        silentHaptics.heartbeat();
+                    } catch (Exception failure) {
+                        android.util.Log.w("DroidMirrorHaptics", "Restoring phone vibration after trace failure", failure);
+                        stopSilentHaptics(owner);
+                    }
+                }
                 if (audio != null && now - lastAudioRecovery >= 1000) {
                     lastAudioRecovery = now;
                     audio.retryRelease();
@@ -98,10 +117,17 @@ public final class DisplayGuardService extends IDisplayGuard.Stub {
             }
         }, 100, 100, TimeUnit.MILLISECONDS);
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-            synchronized (this) { session.finish(owner, RemoteSession.GUARD_STOP); keyboard.destroy(); closeCapture(); lease.recover(); }
+            synchronized (this) { session.finish(owner, RemoteSession.GUARD_STOP); keyboard.destroy(); closeBlackout(); closeCapture(); lease.recover(); }
         }, "DisplayRecovery"));
     }
-    @Override public byte[] phoneAppearance() { return PhoneAppearance.read(); }
+    @Override public byte[] phoneAppearance() {
+        checkCaller();
+        // Context permission/compatibility checks must use the authorized shell,
+        // not the unprivileged app making this Binder call.
+        long identity = android.os.Binder.clearCallingIdentity();
+        try { return PhoneAppearance.read(); }
+        finally { android.os.Binder.restoreCallingIdentity(identity); }
+    }
     @Override public synchronized boolean startCapture(IBinder token, IStreamEvents events, ParcelFileDescriptor output, ParcelFileDescriptor controls, String computerName, boolean panelOff, byte[] unlockPin, boolean blackoutOverlay, byte[] blackoutMessage) {
         checkCaller();
         if (token == null || owner != null || capture != null || output == null || controls == null || lease.isRestoreNeeded()) {
@@ -146,6 +172,7 @@ public final class DisplayGuardService extends IDisplayGuard.Stub {
                 blackout.update(); // Exclude and cover the display before waking or entering a PIN.
             }
             if (!logical.interactive()) logical.wake();
+            if (blackout != null) blackout.reveal();
             if (usePanelOff) lease.keepDark(token);
             Object generation = new Object(); captureGeneration = generation;
             captureStarted = SystemClock.elapsedRealtime(); captureError = "";
@@ -157,6 +184,7 @@ public final class DisplayGuardService extends IDisplayGuard.Stub {
                     }
                 }
             }), unlockPin != null);
+            startStateHaptics();
             if (unlockPin != null) {
                 byte[] pendingPin = unlockPin.clone();
                 try {
@@ -245,7 +273,85 @@ public final class DisplayGuardService extends IDisplayGuard.Stub {
         if (token == null || owner != token) return;
         if (audio != null) audio.close(); // Retain until release/volume restoration completes.
     }
-    private void closeCapture() { stopAudio(owner); keyboard.destroy(); if (capture != null) { capture.close(); capture = null; } }
+    private void closeCapture() {
+        releaseSilentHaptics();
+        if (haptics != null) { haptics.close(); haptics = null; }
+        stopAudio(owner);
+        keyboard.destroy();
+        if (capture != null) { capture.close(); capture = null; }
+        closeBlackout();
+    }
+    private void emitHaptic(Object generation, IBinder token) {
+        synchronized (this) {
+            if (captureGeneration != generation || capture == null || !session.owns(token)) return;
+            try { if (observer != null) observer.onHaptic(); }
+            catch (RemoteException ignored) {}
+        }
+    }
+    private void startStateHaptics() {
+        if (haptics != null || silentHaptics != null || capture == null) return;
+        Object generation = captureGeneration; IBinder token = owner;
+        try { haptics = new HapticListener(() -> emitHaptic(generation, token)); }
+        catch (Exception | LinkageError unavailable) {
+            android.util.Log.w("DroidMirrorHaptics", "State listener unavailable", unavailable);
+        }
+    }
+    @Override public boolean startSilentHaptics(IBinder token, String originalSetting) {
+        checkCaller();
+        int user = android.os.Binder.getCallingUid() / 100000;
+        Object generation, attempt = new Object();
+        synchronized (this) {
+            if (token == null || owner != token || !session.owns(token) || capture == null || restoringHaptics != null || hapticAttempt != null) return false;
+            if (silentHaptics != null) return silentHaptics.healthy();
+            generation = captureGeneration; hapticAttempt = attempt;
+        }
+        long identity = android.os.Binder.clearCallingIdentity();
+        SilentHaptics started = null;
+        try {
+            started = new SilentHaptics(user, originalSetting, () -> emitHaptic(generation, token), () -> {
+                synchronized (DisplayGuardService.this) { return hapticAttempt == attempt && owner == token && session.owns(token); }
+            });
+            synchronized (this) {
+                if (hapticAttempt != attempt || owner != token || !session.owns(token)) return false;
+                silentHaptics = started; started = null;
+                if (haptics != null) { haptics.close(); haptics = null; }
+                return true;
+            }
+        } catch (Exception | LinkageError unavailable) {
+            android.util.Log.w("DroidMirrorHaptics", "Phone vibration retained; request tracing unavailable", unavailable);
+            return false;
+        } finally {
+            if (started != null) started.close();
+            synchronized (this) { if (hapticAttempt == attempt) hapticAttempt = null; }
+            android.os.Binder.restoreCallingIdentity(identity);
+        }
+    }
+    @Override public synchronized void stopSilentHaptics(IBinder token) {
+        checkCaller();
+        if (token == null || owner != token) return;
+        releaseSilentHaptics();
+        startStateHaptics();
+    }
+    private void releaseSilentHaptics() {
+        hapticAttempt = null;
+        SilentHaptics old = silentHaptics; silentHaptics = null;
+        if (old == null) return;
+        old.requestRestore(); // Signal before cleanup can queue behind slow driver/trace work.
+        restoringHaptics = old;
+        queueHapticRestore(old);
+    }
+    private void queueHapticRestore(SilentHaptics old) {
+        hapticRestoreRunning = true; lastHapticRestore = SystemClock.elapsedRealtime();
+        hapticCleanup.execute(() -> {
+            try { old.close(); }
+            finally {
+                synchronized (DisplayGuardService.this) {
+                    hapticRestoreRunning = false;
+                    if (restoringHaptics == old && old.released()) restoringHaptics = null;
+                }
+            }
+        });
+    }
     @Override public synchronized boolean upgradeVideo(IBinder token, int maxSize, int fps, int bitRate) {
         checkCaller();
         if (token == null || owner != token || !session.owns(token) || capture == null) return false;
@@ -317,6 +423,7 @@ public final class DisplayGuardService extends IDisplayGuard.Stub {
     @Override public synchronized String getLastError() { return captureError.isEmpty() ? lease.getLastError() : captureError; }
     private boolean ended(Object token, int cause) {
         android.util.Log.i("DroidMirrorLease", "Remote session ended, cause=" + cause);
+        releaseSilentHaptics(); // Local phone feedback must return before display recovery or teardown.
         IStreamEvents events = observer;
         boolean awake = false;
         try {
@@ -324,12 +431,15 @@ public final class DisplayGuardService extends IDisplayGuard.Stub {
             if (cause == RemoteSession.LOCAL_USE) {
                 SystemClock.sleep(500); // Let the lock screen settle before turning the panel on.
                 if (!lease.recover()) throw new IllegalStateException("Panel restoration pending");
-                closeBlackout();
+                closeCapture(); // Stop remote input before waking for the local user.
                 logical.wake(); awake = true;
+                if (blackout != null) blackout.fadeOut();
+                closeBlackout();
             } else {
                 // Stop capture before sleeping so input/codec shutdown cannot wake
                 // Android after its transition back to the configured AOD policy.
                 closeCapture();
+                if (cause == RemoteSession.STOP && blackout != null) blackout.fadeOut();
                 logical.sleep();
                 lease.release(token);
             }
@@ -365,7 +475,7 @@ public final class DisplayGuardService extends IDisplayGuard.Stub {
             session.finish(owner, RemoteSession.GUARD_STOP);
             keyboard.destroy();
             if (!lease.recover()) return;
-            closeCapture(); unlinkOwner(); watchdog.shutdown(); startupDisplay.shutdown(); unlockInput.shutdown();
+            closeCapture(); unlinkOwner(); watchdog.shutdown(); startupDisplay.shutdown(); unlockInput.shutdown(); hapticCleanup.shutdown();
         }
         System.exit(0); // Do not hold this monitor while shutdown hooks acquire it.
     }

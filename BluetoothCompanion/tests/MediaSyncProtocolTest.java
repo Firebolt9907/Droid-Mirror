@@ -36,6 +36,21 @@ public final class MediaSyncProtocolTest {
             .put("items", new JSONArray().put(new JSONObject().put("queueItemId", 123L).put("title", "Current").put("artist", "Artist"))
                 .put(new JSONObject().put("queueItemId", 9007199254740993L).put("title", "Next").put("artist", "Artist")));
         check(remoteQueue.receive(new JSONObject(queue.toString())));
+        var publication = new app.droidmirror.bluetooth.bridge.MediaSessionPublication();
+        check(publication.metadataChanged(queueState, 1));
+        check(publication.queueChanged(queue));
+        for (int refresh = 0; refresh < 1000; ++refresh) {
+            JSONObject positionOnly = new JSONObject(queueState.toString()).put("position", refresh / 10.0);
+            check(!publication.metadataChanged(positionOnly, 1));
+            check(!publication.queueChanged(new JSONObject(queue.toString())));
+        }
+        check(publication.metadataChanged(queueState, 2)); // A real cover change is published.
+        check(!publication.metadataChanged(queueState, 2));
+        check(publication.metadataChanged(new JSONObject(queueState.toString()).put("title", "Changed"), 2));
+        check(publication.queueChanged(null));
+        check(!publication.queueChanged(null));
+        check(publication.clear()); check(!publication.clear());
+        check(publication.metadataChanged(queueState, 2) && publication.queueChanged(queue));
         check(remoteQueue.command(9007199254740993L).getLong("queueItemId") == 9007199254740993L);
         check(remoteQueue.command(999) == null);
         check(!remoteQueue.receive(new JSONObject(queue.toString()).put("revision", "b".repeat(64))));

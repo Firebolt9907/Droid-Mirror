@@ -21,6 +21,7 @@ struct sc_stream_session_video {
     uint32_t width;
     uint32_t height;
     bool client_resized;
+    bool low_latency; // Local USB transport: bypass optional video jitter delay.
 };
 
 struct sc_stream_session {

@@ -26,9 +26,63 @@ import java.io.ByteArrayOutputStream
 /** PendingIntents stay on Android. BLE carries only opaque IDs and bounded text. */
 class PhoneNotifications : NotificationListenerService() {
     companion object { @Volatile var live: PhoneNotifications? = null }
-    private data class Entry(val notification: StatusBarNotification, val version: String)
+    private data class Entry(val notification: StatusBarNotification, val version: String, @Volatile var imageRevision: String? = null)
     private val entries = LinkedHashMap<String, Entry>()
     private val icons = LinkedHashMap<String, String>()
+    private val imageAssets = ActivityImageAssets()
+    private var imageThread: android.os.HandlerThread? = null
+    private var imageHandler: Handler? = null
+    @Synchronized private fun currentImageSource(id: String): Entry? = entries[id]?.takeIf {
+        live === this && eligible(it.notification) && ActivityNotification.isActivity(it.notification.notification)
+    }
+    fun imageManifest(command: JSONObject, done: (JSONObject) -> Unit) {
+        val entry = currentImageSource(command.optString("id"))
+        if (entry == null) {
+            done(JSONObject().put("success", false)); return
+        }
+        val handler = synchronized(this) {
+            imageHandler ?: Handler(android.os.HandlerThread("DroidMirrorActivityImages").also { it.start(); imageThread = it }.looper).also { imageHandler = it }
+        }
+        var waits = 0
+        fun build() {
+            if (entry.imageRevision == null && waits++ < 80) { handler.postDelayed({ build() }, 25); return }
+            if (command.optString("imageRevision").isNotEmpty() && entry.imageRevision != command.optString("imageRevision")) {
+                done(JSONObject().put("success", false).put("stale", true)); return
+            }
+            val manifest = JSONObject()
+            val n = entry.notification.notification
+            val drawables = linkedMapOf<String, android.graphics.drawable.Drawable>()
+            fun add(key: String, load: () -> android.graphics.drawable.Drawable?) { runCatching { load() }.getOrNull()?.let { drawables[key] = it } }
+            add("appIcon") { packageManager.getApplicationIcon(entry.notification.packageName) }
+            add("activityIcon") { n.smallIcon?.loadDrawable(this) }
+            add("contactImage") {
+                val person = if (Build.VERSION.SDK_INT >= 28) messages(n).lastOrNull()?.senderPerson else null
+                person?.icon?.loadDrawable(this) ?: n.getLargeIcon()?.loadDrawable(this)
+            }
+            add("contentImage") { contentDrawable(n) }
+            if (Build.VERSION.SDK_INT >= 36) runCatching {
+                val style = Notification.Builder.recoverBuilder(this, n).style as? Notification.ProgressStyle
+                add("progressStartIcon") { style?.progressStartIcon?.loadDrawable(this) }
+                add("progressEndIcon") { style?.progressEndIcon?.loadDrawable(this) }
+                add("progressTrackerIcon") { style?.progressTrackerIcon?.loadDrawable(this) }
+            }
+            drawables.putAll(ActivityCustomLayout.imageDrawables(n))
+            drawables.forEach { (field, drawable) -> runCatching {
+                val isolated = drawable.constantState?.newDrawable(resources)?.mutate() ?: drawable
+                isolated.state = drawable.state; isolated.level = drawable.level; isolated.alpha = drawable.alpha
+                isolated.layoutDirection = drawable.layoutDirection
+                imageAssets.encode(isolated, field)?.let { manifest.put(field, imageAssets.remember(it)) }
+            } }
+            done(if (currentImageSource(command.optString("id")) != null)
+                JSONObject().put("success", true).put("images", manifest).put("imageRevision", entry.imageRevision) else JSONObject().put("success", false))
+        }
+        handler.post { build() }
+    }
+    fun imageChunk(command: JSONObject): JSONObject =
+        if (currentImageSource(command.optString("id")) == null) JSONObject().put("success", false)
+        else imageAssets.chunk(command.optString("asset"), command.optInt("offset", -1))?.put("success", true)
+            ?: JSONObject().put("success", false)
+
     private val openHandler = Handler(Looper.getMainLooper())
     private var pendingOpen: Runnable? = null
     private var pendingOpenResult: ((Boolean) -> Unit)? = null
@@ -39,6 +93,17 @@ class PhoneNotifications : NotificationListenerService() {
         val result = pendingOpenResult
         pendingOpenResult = null
         result?.invoke(false)
+    }
+
+    private fun opensApp(notification: Notification, action: String): Boolean =
+        if (action == "open") notification.contentIntent != null
+        else action.toIntOrNull()?.takeIf { it in 0..2 }?.let { index ->
+            notification.actions?.getOrNull(index)?.actionIntent?.let { Build.VERSION.SDK_INT >= 31 && it.isActivity }
+        } == true
+
+    @Synchronized fun requiresMirror(command: JSONObject): Boolean {
+        val entry = entries[command.optString("id")] ?: return false
+        return entry.version == command.optString("version") && opensApp(entry.notification.notification, command.optString("action"))
     }
 
     /** Only an authenticated explicit open may wait for the user to unlock. */
@@ -57,7 +122,7 @@ class PhoneNotifications : NotificationListenerService() {
                             val entry = entries[command.getString("id")]
                             val current = live === this@PhoneNotifications && entry != null &&
                                 entry.version == command.getString("version") &&
-                                entry.notification.notification.contentIntent != null &&
+                                opensApp(entry.notification.notification, command.optString("action")) &&
                                 activeNotifications.any { it.key == entry.notification.key && it.postTime == entry.notification.postTime }
                             val locked = getSystemService(KeyguardManager::class.java).isKeyguardLocked
                             when (gate.poll(SystemClock.elapsedRealtime(), locked, trusted, current)) {
@@ -83,9 +148,10 @@ class PhoneNotifications : NotificationListenerService() {
     private fun encodeImage(drawable: android.graphics.drawable.Drawable, photo: Boolean, maximumBytes: Int, content: Boolean = false): String? {
         if (maximumBytes < 256) return null
         val originalBounds = android.graphics.Rect(drawable.bounds)
+        val lossless = !photo || drawable !is android.graphics.drawable.BitmapDrawable
         try {
             for (size in if (content) listOf(256, 192, 128, 96, 64, 48, 32, 24, 16)
-                else if (photo) listOf(96, 64, 48, 32, 24, 16) else listOf(48, 32, 24, 16)) {
+                else if (photo) listOf(96, 64, 48, 32, 24, 16) else listOf(96, 64, 48, 32, 24, 16)) {
                 val ratio = if (content && drawable.intrinsicWidth > 0 && drawable.intrinsicHeight > 0)
                     size.toDouble() / maxOf(drawable.intrinsicWidth, drawable.intrinsicHeight) else 1.0
                 val width = if (content) maxOf(1, (drawable.intrinsicWidth.coerceAtLeast(1) * ratio).toInt()).coerceAtMost(size) else size
@@ -94,10 +160,10 @@ class PhoneNotifications : NotificationListenerService() {
                 val output = ByteArrayOutputStream()
                 try {
                     val canvas = Canvas(bitmap)
-                    if (photo) canvas.drawColor(android.graphics.Color.WHITE)
+                    if (photo && !lossless) canvas.drawColor(android.graphics.Color.WHITE)
                     drawable.setBounds(0, 0, width, height)
                     drawable.draw(canvas)
-                    bitmap.compress(if (photo) Bitmap.CompressFormat.JPEG else Bitmap.CompressFormat.PNG, 80, output)
+                    bitmap.compress(if (lossless) Bitmap.CompressFormat.PNG else Bitmap.CompressFormat.JPEG, 80, output)
                 } finally { bitmap.recycle() }
                 val bytes = output.toByteArray()
                 if (bytes.size <= maximumBytes) return Base64.encodeToString(bytes, Base64.NO_WRAP)
@@ -155,17 +221,23 @@ class PhoneNotifications : NotificationListenerService() {
             (notification.extras.getInt(Notification.EXTRA_PROGRESS_MAX, 0) > 0 &&
                 notification.extras.getInt(Notification.EXTRA_PROGRESS, 0) <
                     notification.extras.getInt(Notification.EXTRA_PROGRESS_MAX, 0))
-    private fun eligible(sbn: StatusBarNotification): Boolean = NotificationForwardingPolicy.eligible(
+    private fun eligible(sbn: StatusBarNotification): Boolean {
+        if (ActivityNotification.isMedia(sbn.notification)) return false
+        if (ActivityNotification.isActivity(sbn.notification)) return NotificationForwardingPolicy.activityEligible(
+            sbn.packageName, packageName, sbn.tag, sbn.notification.flags, sbn.notification.visibility)
+        return NotificationForwardingPolicy.eligible(
         sbn.packageName, packageName, sbn.tag, sbn.notification.flags, sbn.notification.visibility) &&
         !NotificationForwardingPolicy.routine(sbn.packageName, sbn.notification.category,
             sbn.notification.channelId, hasProgress(sbn.notification))
+    }
     override fun onListenerConnected() {
         synchronized(this) { entries.clear() }
+        ActivityEmbeddedTimers.clear()
         live = this
-        activeNotifications?.filter(::eligible)?.takeLast(128)?.forEach { remember(it) }
+        snapshot().forEach { BridgeRuntime.live?.sendEvent(it) }
     }
-    override fun onListenerDisconnected() { live = null; cancelOpen(); synchronized(this) { entries.clear() } }
-    override fun onDestroy() { live = null; cancelOpen(); super.onDestroy() }
+    override fun onListenerDisconnected() { ActivityEmbeddedTimers.clear(); BridgeRuntime.live?.sendEvent(JSONObject().put("type", "activitiesReset")); live = null; cancelOpen(); synchronized(this) { entries.clear() } }
+    override fun onDestroy() { imageThread?.quitSafely(); imageAssets.clear(); ActivityEmbeddedTimers.clear(); live = null; cancelOpen(); super.onDestroy() }
     @Synchronized private fun remember(sbn: StatusBarNotification): Entry {
         val entry = Entry(sbn, UUID.randomUUID().toString())
         entries[id(sbn.key)] = entry
@@ -186,12 +258,14 @@ class PhoneNotifications : NotificationListenerService() {
         val actions = JSONArray()
         notification.actions?.take(3)?.forEachIndexed { index, action ->
             actions.put(JSONObject().put("id", index.toString()).put("title", bounded(action.title, 80))
-                .put("reply", action.remoteInputs?.count { it.allowFreeFormInput } == 1))
+                .put("reply", action.remoteInputs?.count { it.allowFreeFormInput } == 1)
+                .put("opensApp", Build.VERSION.SDK_INT >= 31 && action.actionIntent.isActivity))
         }
         val result = JSONObject().put("type", "notification").put("id", id(sbn.key)).put("version", entry.version)
             .put("postedAt", sbn.postTime)
             .put("silent", silent).put("package", sbn.packageName)
             .put("category", notification.category).put("channel", notification.channelId)
+            .put("channelName", bounded(ranking.channel?.name, 120))
             .put("progress", hasProgress(notification))
             .put("subtitle", bounded(notification.extras.getCharSequence(Notification.EXTRA_SUB_TEXT), 240))
             .put("ongoing", sbn.isOngoing)
@@ -200,6 +274,21 @@ class PhoneNotifications : NotificationListenerService() {
             .put("body", bounded(
                 notification.extras.getCharSequence(Notification.EXTRA_BIG_TEXT) ?: notification.extras.getCharSequence(Notification.EXTRA_TEXT), 1200))
             .put("actions", actions)
+        if (ActivityNotification.isActivity(notification)) {
+            val metadata = ActivityNotification.metadata(this, notification)
+            metadata.keys().forEach { key -> result.put(key, metadata.get(key)) }
+            if (Build.VERSION.SDK_INT >= 36) runCatching {
+                val style = Notification.Builder.recoverBuilder(this, notification).style as? Notification.ProgressStyle
+                mapOf("progressStartIcon" to style?.progressStartIcon,
+                    "progressEndIcon" to style?.progressEndIcon, "progressTrackerIcon" to style?.progressTrackerIcon)
+                    .forEach { (key, icon) -> icon?.loadDrawable(this)?.let { drawable ->
+                        encodeImage(drawable, false, 384)?.let { result.put(key, it) }
+                    } }
+            }
+            runCatching { notification.smallIcon?.loadDrawable(this) }.getOrNull()?.let {
+                encodeImage(it, false, 768)?.let { icon -> result.put("activityIcon", icon) }
+            }
+        }
         val conversationMessages = messages(notification)
         val latestMessage = conversationMessages.lastOrNull()
         val isMessage = latestMessage != null || notification.category == Notification.CATEGORY_MESSAGE
@@ -231,6 +320,7 @@ class PhoneNotifications : NotificationListenerService() {
             // Older Mac builds still get a useful latest-message fallback.
             result.put("body", ConversationPayload.boundedText(items.last().getString("text"), 512))
         }
+        ActivityEmbeddedTimers.attach(result, sbn.postTime)
         // AES-GCM + Base64 + the encrypted JSON envelope must fit the 8192-byte
         // fragment limit. Leave room for sequence numbers and snapshot metadata.
         val maximumPayloadBytes = 5200
@@ -252,18 +342,35 @@ class PhoneNotifications : NotificationListenerService() {
                 if (result.toString().toByteArray(Charsets.UTF_8).size > maximumPayloadBytes) result.remove("contentImage")
             }
         }
+        if (result.optBoolean("activity")) {
+            val imageKeys = listOf("appIcon", "activityIcon", "contactImage", "contentImage", "progressStartIcon", "progressEndIcon", "progressTrackerIcon")
+            val array = result.optJSONArray("customNodes")
+            val source = imageKeys.joinToString("\n") { result.optString(it) } +
+                (0 until (array?.length() ?: 0)).joinToString("\n") { array?.optJSONObject(it)?.optString("imageRevision").orEmpty() }
+            result.put("activityImageRevision", MessageDigest.getInstance("SHA-256").digest(source.toByteArray())
+                .joinToString("") { "%02x".format(it) })
+            entry.imageRevision = result.getString("activityImageRevision")
+        }
         if (result.toString().toByteArray(Charsets.UTF_8).size > 5400) {
             result.remove("contentImage")
             result.remove("contactImage")
             result.remove("appIcon")
+            listOf("progressStartIcon", "progressEndIcon", "progressTrackerIcon").forEach { result.remove(it) }
+        }
+        if (result.toString().toByteArray(Charsets.UTF_8).size > 5400) {
+            listOf("customNodes", "progressSegments", "progressPoints", "lines").forEach { result.remove(it) }
+        }
+        if (result.toString().toByteArray(Charsets.UTF_8).size > 5400) {
+            result.remove("embeddedTimers")
+            result.remove("timerSampleElapsedMs")
         }
         return result
     }
     override fun onNotificationPosted(sbn: StatusBarNotification) {
         if (!eligible(sbn)) {
-            // An update can turn a previously forwarded item into an ongoing
-            // service notification. Remove its Mac copy as well as its action.
+            // An update can make a previously forwarded item ineligible.
             val key = id(sbn.key)
+            ActivityEmbeddedTimers.forget(key)
             val removed = synchronized(this) { entries.remove(key) != null }
             if (removed) BridgeRuntime.live?.sendEvent(JSONObject().put("type", "removed").put("id", key))
             return
@@ -272,16 +379,27 @@ class PhoneNotifications : NotificationListenerService() {
     }
     override fun onNotificationRemoved(sbn: StatusBarNotification) {
         val key = id(sbn.key)
+        ActivityEmbeddedTimers.forget(key)
         synchronized(this) { entries.remove(key) }
         BridgeRuntime.live?.sendEvent(JSONObject().put("type", "removed").put("id", key))
     }
     @Synchronized fun snapshot(): List<JSONObject> {
-        // Purge Mac copies forwarded by older builds without removing Android's
-        // own notifications. Small tombstones precede the bounded snapshot.
-        val history = activeNotifications.orEmpty().filter {
-            !eligible(it)
-        }.take(16).map { JSONObject().put("type", "removed").put("id", id(it.key)) }
-        return history + entries.values.sortedBy { it.notification.postTime }.takeLast(16)
+        // Re-read Android's current state so listener restarts and dropped removals converge.
+        val current = activeNotifications.orEmpty()
+        val tombstones = current.filterNot(::eligible).take(16).map {
+            JSONObject().put("type", "removed").put("id", id(it.key))
+        }
+        val active = current.filter(::eligible).takeLast(128)
+        val keys = active.map { id(it.key) }.toSet()
+        entries.keys.retainAll(keys)
+        active.forEach { sbn ->
+            val old = entries[id(sbn.key)]
+            if (old == null || old.notification.postTime != sbn.postTime) remember(sbn)
+        }
+        val all = entries.values.sortedBy { it.notification.postTime }
+        val activities = all.filter { ActivityNotification.isActivity(it.notification.notification) }
+        val ordinary = all.filterNot { ActivityNotification.isActivity(it.notification.notification) }.takeLast(16)
+        val snapshot = (activities + ordinary)
             .map {
                 val p = payload(it).put("snapshot", true)
                 if (p.toString().toByteArray(Charsets.UTF_8).size > 5600) {
@@ -291,6 +409,28 @@ class PhoneNotifications : NotificationListenerService() {
                 }
                 p
             }
+        // Keep a full snapshot within the bounded BLE queue, leaving control headroom.
+        fun bytes() = snapshot.sumOf { it.toString().toByteArray(Charsets.UTF_8).size * 3 + 512 }
+        if (bytes() > 200000) snapshot.forEach { p ->
+            listOf("contentImage", "contactImage", "appIcon", "activityIcon", "messages").forEach { p.remove(it) }
+            p.put("body", ConversationPayload.boundedText(p.optString("body"), 120))
+            p.put("title", ConversationPayload.boundedText(p.optString("title"), 80))
+            p.put("subtitle", "")
+        }
+        if (bytes() > 200000) snapshot.forEach { p ->
+            val keep = setOf("type", "id", "version", "activity", "app", "title", "snapshot", "canOpen", "package")
+            p.keys().asSequence().toList().filterNot { it in keep }.forEach { p.remove(it) }
+            p.put("app", ConversationPayload.boundedText(p.optString("app"), 40))
+            p.put("title", ConversationPayload.boundedText(p.optString("title"), 40))
+        }
+        // Hash IDs are 64 bytes each; a full 128-item manifest needs two bounded messages.
+        val membership = activities.map { id(it.notification.key) }.chunked(64).ifEmpty { listOf(emptyList()) }
+        val generation = UUID.randomUUID().toString()
+        val manifest = membership.mapIndexed { index, ids ->
+            JSONObject().put("type", "activitiesReset").put("snapshot", generation)
+                .put("part", index).put("parts", membership.size).put("ids", JSONArray(ids))
+        }
+        return manifest + tombstones + snapshot
     }
     @Synchronized fun dismiss(command: JSONObject): Boolean = runCatching {
         val key = command.getString("id")

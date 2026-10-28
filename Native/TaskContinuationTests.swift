@@ -37,6 +37,21 @@ final class BLEController {
         precondition(continuation.item == nil)
         continuation.receive(event)
         precondition(continuation.item?.button?.image != nil)
+        precondition(continuation.item?.button?.image?.isTemplate == true)
+        let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 32, pixelsHigh: 32,
+            bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+            colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+        let icon = bitmap.representation(using: .png, properties: [:])!.base64EncodedString()
+        var iconEvent = event
+        iconEvent["appIcon"] = icon
+        continuation.receive(iconEvent)
+        precondition(continuation.item?.button?.image?.isTemplate == false)
+        precondition(continuation.item?.button?.image?.size == NSSize(width: 18, height: 18))
+        iconEvent["appIcon"] = String(repeating: "x", count: 3000)
+        continuation.receive(iconEvent)
+        precondition(continuation.item?.button?.image?.isTemplate == true)
+        continuation.receive(event)
+        precondition(continuation.item?.button?.image?.isTemplate == true)
         continuation.item?.button?.performClick(nil)
         precondition(opened?.absoluteString == event["url"] as? String)
         continuation.receive(["type": "taskContinuation"])

@@ -74,6 +74,10 @@ Support/DroidMirror/PhoneAppearance. The authorized Shizuku shell service reads
 the physical display record and a small home wallpaper preview. Classic L2CAP
 record type 4 carries a bounded JSON appearance record before video; the bridge
 keeps it out of the decoder and atomically merges it into the private cache.
+Appearance is read afresh at each stream start, after capture wakes the logical
+display. Live wallpapers use only a snapshot of the wallpaper layer, with bounded
+retries while it renders. If that layer is not visible, the last successful
+preview is retained; provider thumbnails and old static image files are not used.
 The renderer watches that cache, applies its geometry to loading and video, and
 uses a clamped Gaussian blur with a dark overlay for loading and stopped states.
 Connection headings use the phone's configured name (or the discovered name).

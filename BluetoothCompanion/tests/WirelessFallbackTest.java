@@ -61,6 +61,58 @@ public final class WirelessFallbackTest {
                 check(wire.upgrade(new ByteArrayOutputStream(),key,nonce,profile));
                 check(wire.fallback(expected.length));
             }
+            // Live fallback retires the entire Wi-Fi window without sending it
+            // on Classic, accepts delayed ACKs, and waits for new codec metadata.
+            ByteArrayOutputStream liveClassic=new ByteArrayOutputStream();
+            BluetoothWire live=new BluetoothWire(liveClassic);
+            VideoWindow liveWindow=new VideoWindow(8192,1000);
+            live.setVideoWindow(liveWindow);
+            live.videoFrameSent(new byte[]{1});
+            check(live.upgrade(new ByteArrayOutputStream(),key,nonce,profile));
+            live.enableWirelessThroughput(); live.video(expected);
+            check(live.fallbackLive(0));
+            check(liveClassic.size()==8+13); // magic + reset, zero replay bytes
+            DataInputStream reset=new DataInputStream(new ByteArrayInputStream(liveClassic.toByteArray()));
+            reset.skipNBytes(8); check(reset.readUnsignedByte()==8 && reset.readInt()==8);
+            check(reset.readLong()==expected.length);
+            liveWindow.acknowledge(100); // Old Wi-Fi ACK can cross recovery.
+            check(liveWindow.inFlightBytes()==0);
+            live.videoPacket(new byte[20]); check(liveClassic.size()==21);
+            byte[] session=new byte[12]; session[0]=(byte)0x80;
+            live.videoPacket(session);
+            check(liveClassic.size()==38);
+            liveWindow.acknowledge(expected.length+12);
+            check(!live.fallbackLive(expected.length+12));
+            // A sender interrupted mid-envelope must abandon the remainder of
+            // that whole packet instead of continuing it after the reset marker.
+            ByteArrayOutputStream interruptedClassic=new ByteArrayOutputStream();
+            BluetoothWire interrupted=new BluetoothWire(interruptedClassic);
+            interrupted.videoFrameSent(new byte[]{1});
+            BrokenSocket interruptedWifi=new BrokenSocket();
+            check(interrupted.upgrade(interruptedWifi,key,nonce,profile));
+            interruptedWifi.remaining=1000;
+            Future<?> interruptedSender=executor.submit(() -> {
+                try { interrupted.video(expected); }
+                catch(IOException error) { throw new RuntimeException(error); }
+            });
+            check(interruptedWifi.broken.await(2,TimeUnit.SECONDS));
+            check(interrupted.fallbackLive(995));
+            interruptedSender.get(2,TimeUnit.SECONDS);
+            check(interruptedClassic.size()==21);
+
+            ByteArrayOutputStream blockedClassic=new ByteArrayOutputStream();
+            BluetoothWire blocked=new BluetoothWire(blockedClassic);
+            VideoWindow blockedWindow=new VideoWindow(8192,1000);
+            blocked.setVideoWindow(blockedWindow); blocked.videoFrameSent(new byte[]{1});
+            check(blocked.upgrade(new ByteArrayOutputStream(),key,nonce,profile));
+            blocked.enableWirelessThroughput(); blocked.video(new byte[VideoWindow.WIRELESS_WINDOW_BYTES]);
+            Future<?> blockedSender=executor.submit(() -> {
+                try { blocked.video(expected); }
+                catch(IOException error) { throw new RuntimeException(error); }
+            });
+            Thread.sleep(30);
+            check(blocked.fallbackLive(0)); blockedSender.get(2,TimeUnit.SECONDS);
+            check(blockedClassic.size()==21 && blockedWindow.inFlightBytes()==0);
             // A full Wi-Fi backlog must respect Bluetooth credit during replay.
             ByteArrayOutputStream pacedClassic=new ByteArrayOutputStream();
             BluetoothWire pacedWire=new BluetoothWire(pacedClassic);

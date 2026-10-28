@@ -15,6 +15,28 @@ public final class TouchEventTimeTest {
         require(clock.resolve(3000, 2700) == -1);
         require(clock.resolve(0, 20000) == -1);
         require(clock.resolve(-1, 21000) == 21000); // Legacy ADB events retain arrival timestamps.
+        // A delayed DOWN must not be backdated beyond a long-press deadline.
+        TouchEventTime gesture = new TouchEventTime();
+        require(gesture.resolveGesture(1000, 1900, true) == 1800);
+        require(gesture.resolveGesture(1080, 1908, false) == 1880); // Buffered samples retain their 80 ms interval.
+        require(gesture.resolveGesture(2000, 2900, true) == 2800);
+        require(gesture.resolveGesture(2020, 2930, false) == 2820);
+        require(gesture.resolveGesture(2080, 3010, false) == 2880); // Preserve spacing when not in the future.
+        require(gesture.resolveGesture(3000, 3900, true) == 3800);
+        require(gesture.resolveGesture(3700, 4600, false) == 4500); // A real hold remains a hold.
+        require(gesture.resolveGesture(5000, 4900, true) == -1);
+        require(gesture.resolveGesture(0, 20000, true) == -1);
+        require(gesture.resolveGesture(-1, 21000, true) == 21000); // Wired ADB unchanged.
+        // A quick Home flick delivered together must retain velocity, while
+        // never backdating DOWN enough to become an immediate long press.
+        for (long delay : new long[] {20,100,900}) {
+            TouchEventTime flick = new TouchEventTime();
+            long down=flick.resolveGesture(1000,1080+delay,true);
+            long move=flick.resolveGesture(1040,1080+delay,false);
+            long up=flick.resolveGesture(1080,1080+delay,false);
+            require(move-down==40 && up-move==40);
+            require(1080+delay-down<=100 && up<=1080+delay);
+        }
         if (args.length>0) {
             ByteArrayOutputStream payload = new ByteArrayOutputStream();
             try (DataInputStream in = new DataInputStream(Files.newInputStream(Paths.get(args[0])))) {

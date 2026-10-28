@@ -130,6 +130,7 @@ sc_demuxer_parse_session(const uint8_t *header,
     session->video.width = sc_read32be(&header[4]);
     session->video.height = sc_read32be(&header[8]);
     session->video.client_resized = header[3] & 1;
+    session->video.low_latency = header[3] & 2;
 }
 
 static bool

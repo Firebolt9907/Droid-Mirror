@@ -93,6 +93,16 @@ class BridgeSettingsActivity : Activity() {
                 "Requires the background bridge and a paired Mac running DroidMirror. Runs four independent Bluetooth detectors in parallel: authenticated BLE link, passive Mac BLE beacon, active Mac GATT challenge, and Classic RFCOMM challenge. Pair the Mac in Android Bluetooth settings for Classic. Both apps need the matching update. Each posts its own numbered alert once per separation after that channel has first succeeded nearby; counts persist across restarts. Significant motion approximates travel, including walking or biking, but does not classify activity. Mac sleep or disabling Mac Bluetooth may cause false alerts. Closed-lid operation is experimental."
             else "Left-behind alerts are unavailable: this phone has no significant-motion sensor."
         })
+        repeat(app.droidmirror.bluetooth.LeftBehindExperiments.COUNT) { index ->
+            layout.addView(Switch(this).apply {
+                text = "#${index + 1} notifications${if (index == 0) " (noisy baseline; off by default)" else ""}"
+                isChecked = LeftBehindMonitor.alertsEnabled(this@BridgeSettingsActivity, index)
+                setOnCheckedChangeListener { _, enabled -> LeftBehindMonitor.setAlertsEnabled(this@BridgeSettingsActivity, index, enabled) }
+            })
+        }
+        layout.addView(TextView(this).apply {
+            text = "#2 hears the Mac beacon; #3 connects and verifies a fresh response. Both use the same alert threshold but may miss different rounds. Alerts remain after normal reconnection; bridge shutdown still clears them; the recent history records posts and recovery. Repeated posts can replace the same card. #4 probes only the Mac selected in pairing, and must succeed nearby before it can alert."
+        })
         experimentStats = TextView(this).apply {
             text = LeftBehindMonitor.stats(this@BridgeSettingsActivity)
             setTextIsSelectable(true)

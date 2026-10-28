@@ -6,4 +6,10 @@
     <string name="stream_minimize">Minimize</string>
     <string name="stream_disconnect">Stop Mirroring</string>
     <string name="stream_phone_fallback">this phone</string>
+    <string name="stream_connection_status">%1$s · %2$s video</string>
+    <string name="stream_connection_usb">USB</string>
+    <string name="stream_connection_wifi">Wi-Fi</string>
+    <string name="stream_connection_bluetooth">Bluetooth</string>
+    <string name="stream_connection_bluetooth_short">BT</string>
+    <string name="stream_connection_adb">ADB</string>
 </resources>

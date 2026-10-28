@@ -5,6 +5,7 @@
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
     <uses-permission android:name="android.permission.BLUETOOTH_SCAN" android:usesPermissionFlags="neverForLocation" />
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" android:maxSdkVersion="30" />
+    <uses-feature android:name="android.hardware.usb.accessory" android:required="false" />
     <uses-feature android:name="android.hardware.camera" android:required="false" />
     <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
@@ -30,6 +31,11 @@
         </intent>
     </queries>
     <application android:label="DroidMirror" android:theme="@android:style/Theme.Material.Light.NoActionBar" android:allowBackup="false">
+        <activity android:name=".UsbAccessoryActivity" android:exported="true"
+            android:theme="@style/SilentStartTheme" android:noHistory="true" android:excludeFromRecents="true">
+            <intent-filter><action android:name="android.hardware.usb.action.USB_ACCESSORY_ATTACHED" /></intent-filter>
+            <meta-data android:name="android.hardware.usb.action.USB_ACCESSORY_ATTACHED" android:resource="@xml/usb_accessory_filter" />
+        </activity>
         <provider android:name=".ClipboardFileProvider" android:authorities="${applicationId}.clipboard.files"
             android:exported="false" android:grantUriPermissions="true" />
         <service android:name=".bridge.MacMediaRouteProvider" android:exported="true"
@@ -42,6 +48,7 @@
                 <data android:scheme="wear" android:host="*" android:pathPrefix="/droidmirror/watch/" />
             </intent-filter>
         </service>
+        <receiver android:name=".bridge.LeftBehindFeedbackReceiver" android:exported="false" />
         <receiver android:name=".bridge.MediaControlReceiver" android:exported="false" />
         <activity android:name=".bridge.BridgeSettingsActivity" android:exported="false" />
         <service android:name=".bridge.PhoneNotifications" android:exported="true"
@@ -67,8 +74,11 @@
         <activity android:name=".CaptureActivity" android:exported="true">
             <intent-filter><action android:name="android.intent.action.MAIN" /><category android:name="android.intent.category.LAUNCHER" /></intent-filter>
         </activity>
-        <receiver android:name=".ReadyReceiver" android:exported="false">
-            <intent-filter><action android:name="android.intent.action.BOOT_COMPLETED" /></intent-filter>
+        <receiver android:name=".ReadyReceiver" android:exported="false" android:directBootAware="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />
+            </intent-filter>
         </receiver>
         <receiver android:name=".AutomationReceiver" android:exported="true">
             <intent-filter><action android:name="app.droidmirror.bluetooth.action.START_READY" /></intent-filter>

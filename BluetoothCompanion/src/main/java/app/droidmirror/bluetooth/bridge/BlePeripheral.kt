@@ -54,6 +54,7 @@ class BlePeripheral(
     private val indicationInFlight = ConcurrentHashMap.newKeySet<android.bluetooth.BluetoothDevice>()
     private val notificationMode = ConcurrentHashMap.newKeySet<android.bluetooth.BluetoothDevice>()
     private val pendingIndication = ConcurrentHashMap<android.bluetooth.BluetoothDevice, java.util.ArrayDeque<ByteArray>>()
+    private val activityDeltas = ConcurrentHashMap<android.bluetooth.BluetoothDevice, ActivityDeltas>()
     private val pendingMessages = ConcurrentHashMap<android.bluetooth.BluetoothDevice, BleOutboundQueue>()
     private val sessions = ConcurrentHashMap<android.bluetooth.BluetoothDevice, BleSecureSession>()
     private val fragments = ConcurrentHashMap<android.bluetooth.BluetoothDevice, BleFragments>()
@@ -178,7 +179,7 @@ class BlePeripheral(
         connected.clear()
         subscribed.clear()
         indicationInFlight.clear()
-        pendingMessages.clear()
+        pendingMessages.clear(); activityDeltas.clear()
         notificationMode.clear()
         pendingIndication.clear()
         sessions.clear(); fragments.clear()
@@ -249,8 +250,13 @@ class BlePeripheral(
         val queue = pendingMessages.getOrPut(device) { BleOutboundQueue() }
         // Preserve notification/update/removal order. Only file chunks yield to
         // control traffic; snapshots must not arrive after a newer tombstone.
-        val bulk = value.optString("type") == "clipboardFileChunk"
-        if (!queue.append(value.toString(), bulk, android.os.SystemClock.elapsedRealtime(), value.optString("type") == "pong")) {
+        val bulk = value.optString("type") in setOf("clipboardFileChunk", "activityImageChunk")
+        val haptic = value.optString("type") == "haptic"
+        if (!queue.append(value.toString(), bulk, android.os.SystemClock.elapsedRealtime(), haptic || value.optString("type") == "pong",
+                if (value.optString("type") == "notification" && value.optBoolean("activity") && !value.optBoolean("snapshot")) value.optString("id") else null,
+                if (haptic) 200L else 60000L)) {
+            if (value.optString("type") in setOf("activityImageChunk", "activityImageManifest")) return false
+            if (haptic) return false // Optional feedback must not revoke a healthy mirror link.
             revokeSession(device)
             return false
         }
@@ -265,7 +271,25 @@ class BlePeripheral(
         if (frames.isEmpty()) {
             val json = pendingMessages[device]?.next(android.os.SystemClock.elapsedRealtime()) ?: return
             val session = sessions[device]?.takeIf { it.authenticated } ?: return
-            val sealed = runCatching { session.seal(JSONObject(json)) }.getOrElse { revokeSession(device); return }
+            val sealed = runCatching {
+                val message = JSONObject(json)
+                val preparedAt = android.os.SystemClock.elapsedRealtime()
+                if (message.optString("type") == "notification" && message.optBoolean("chronometer") &&
+                    message.has("clockSampleElapsedMs")) {
+                    message.put("clockOffsetMs", NotificationClock.offsetAtSend(message.getLong("clockOffsetMs"),
+                        message.getLong("clockSampleElapsedMs"), preparedAt))
+                    message.remove("clockSampleElapsedMs")
+                }
+                ActivityEmbeddedTimers.prepareToSend(message, preparedAt)
+                val wire = activityDeltas.getOrPut(device) { ActivityDeltas() }.encode(message, preparedAt)
+                val fields = wire.optJSONObject("set")
+                if (wire.optString("type") == "pong" ||
+                    (wire.optString("type") == "notification" && (wire.optBoolean("chronometer") || wire.has("embeddedTimers"))) ||
+                    (wire.optString("type") == "activityPatch" && (fields?.has("clockOffsetMs") == true || fields?.has("embeddedTimers") == true))) {
+                    wire.put("clockSentElapsedMs", if (wire.optString("type") == "pong") android.os.SystemClock.elapsedRealtime() else preparedAt)
+                }
+                session.seal(wire)
+            }.getOrElse { revokeSession(device); return }
             frames.addAll(BleFragments.split(sealed, nextMessage++, BleLinkMtu.get(device.address) - 3))
         }
         val frame = frames.pollFirst() ?: return
@@ -277,6 +301,10 @@ class BlePeripheral(
         sessions.entries.filter { it.value.authenticated }.forEach { (device, session) ->
             runCatching { enqueueSecure(device, session, value) }.onFailure { revokeSession(device) }
         }
+    }
+    @Synchronized
+    fun canForwardHaptics(): Boolean = sessions.any { (device, session) ->
+        session.authenticated && subscribed[device] == true
     }
 
     @Synchronized
@@ -310,7 +338,7 @@ class BlePeripheral(
         subscribed.remove(device)
         indicationInFlight.remove(device)
         pendingIndication.remove(device)
-        pendingMessages.remove(device)
+        pendingMessages.remove(device); activityDeltas.remove(device)
         sessions.remove(device)
         fragments.remove(device)
     }
@@ -325,7 +353,7 @@ class BlePeripheral(
         presencePeers.clear()
         onPresenceReset()
         notificationMode.clear()
-        sessions.clear(); fragments.clear(); pendingIndication.clear(); pendingMessages.clear()
+        sessions.clear(); fragments.clear(); pendingIndication.clear(); pendingMessages.clear(); activityDeltas.clear()
         revokeClients()
     }
 
@@ -352,7 +380,7 @@ class BlePeripheral(
                 subscribed.remove(device)
                 indicationInFlight.remove(device)
                 pendingIndication.remove(device)
-                pendingMessages.remove(device)
+                pendingMessages.remove(device); activityDeltas.remove(device)
                 sessions.remove(device); fragments.remove(device)
             }
             Unit
@@ -420,7 +448,7 @@ class BlePeripheral(
                                 presencePeers.add(device)
                                 onPresence(device.address, true)
                                 android.util.Log.i("DroidMirrorNotifications", "BLE notification session authenticated")
-                                enqueueSecure(device, session, JSONObject().put("type", "ready").put("watchCompanion", 1).put("sessionHealth", 1).put("clipboard", 1).put("clipboardFiles", 1).put("taskUrls", 1).put("linkSharing", 1).put("media", 1)
+                                enqueueSecure(device, session, JSONObject().put("type", "ready").put("activityImages", 1).put("watchCompanion", 1).put("sessionHealth", 1).put("clipboard", 1).put("clipboardFiles", 1).put("taskUrls", 1).put("linkSharing", 1).put("media", 1)
                                     .put("hotspot", if (Build.VERSION.SDK_INT >= 30) 2 else 0))
                             }
                             else -> {
@@ -477,11 +505,13 @@ class BlePeripheral(
                                     "ping" -> {
                                         val request = command.getString("request")
                                         require(request.matches(Regex("[A-Za-z0-9-]{1,64}")))
-                                        enqueueSecure(device, session, JSONObject().put("type", "pong").put("request", request))
+                                        enqueueSecure(device, session, JSONObject().put("type", "pong").put("request", request)
+                                            .put("clockReceivedElapsedMs", android.os.SystemClock.elapsedRealtime()))
                                     }
                                     "get" -> publish(device, command.optLong("request"))
                                     "state" -> onCommand(if (command.optBoolean("connected")) "CONNECTED" else "DISCONNECTED")
                                     "subscribe" -> {
+                                        activityDeltas.getOrPut(device) { ActivityDeltas() }.enabled = command.optInt("activityDeltas") == 1
                                         val snapshot = PhoneNotifications.live?.snapshot()
                                         snapshot?.forEach { enqueueSecure(device, session, it) }
                                     }
@@ -528,6 +558,19 @@ class BlePeripheral(
                                             onTaskSubscription(false, ++taskGeneration)
                                         }
                                     }
+                                    "activityImageManifestRequest" -> {
+                                        val request = command.optString("request")
+                                        require(request.matches(Regex("[A-Za-z0-9-]{1,64}")))
+                                        PhoneNotifications.live?.imageManifest(command) { result -> synchronized(this@BlePeripheral) {
+                                            if (sessions[device] === session && session.authenticated) {
+                                                enqueueSecure(device, session, result.put("type", "activityImageManifest").put("request", request))
+                                            }
+                                        } } ?: enqueueSecure(device, session, JSONObject().put("type", "activityImageManifest").put("request", request).put("success", false))
+                                    }
+                                    "activityImageRequest" -> {
+                                        val result = PhoneNotifications.live?.imageChunk(command) ?: JSONObject().put("success", false)
+                                        enqueueSecure(device, session, result.put("type", "activityImageChunk").put("request", command.optString("request")))
+                                    }
                                     "dismiss" -> {
                                         val success = PhoneNotifications.live?.dismiss(command) == true
                                         enqueueSecure(device, session, JSONObject().put("type", "dismissResult")
@@ -535,7 +578,7 @@ class BlePeripheral(
                                     }
                                     "action" -> {
                                         val listener = PhoneNotifications.live
-                                        if (command.optString("action") == "open" && listener != null) {
+                                        if (listener != null && (command.optString("action") == "open" || listener.requiresMirror(command))) {
                                             listener.openAfterUnlock(command, { synchronized(this@BlePeripheral) {
                                                 sessions[device] === session && session.authenticated
                                             } }) { success -> synchronized(this@BlePeripheral) {

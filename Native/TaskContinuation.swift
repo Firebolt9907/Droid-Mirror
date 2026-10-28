@@ -3,6 +3,7 @@ import AppKit
 struct TaskContinuationState {
     private(set) var url: URL?
     private(set) var package = ""
+    private(set) var appIcon: Data?
     private var receivedAt = Date.distantPast
     static let lifetime: TimeInterval = 8
 
@@ -15,13 +16,14 @@ struct TaskContinuationState {
               let package = event["package"] as? String, !package.isEmpty, package.count <= 256 else { return }
         self.url = url
         self.package = package
+        appIcon = NotificationIconAttachment.validatedData(event["appIcon"] as? String)
         receivedAt = now
     }
     func currentURL(authenticated: Bool, now: Date = Date()) -> URL? {
         guard authenticated, now.timeIntervalSince(receivedAt) < Self.lifetime else { return nil }
         return url
     }
-    mutating func clear() { url = nil; package = ""; receivedAt = .distantPast }
+    mutating func clear() { url = nil; package = ""; appIcon = nil; receivedAt = .distantPast }
 }
 
 /// Only the background receiver owns this item, so there is one icon across hosts.
@@ -56,14 +58,21 @@ final class TaskContinuation: NSObject {
         }
         if item == nil {
             let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-            let image = NSImage(systemSymbolName: "iphone", accessibilityDescription: "Continue from phone")
-            image?.isTemplate = true
-            item.button?.image = image
             item.button?.target = self
             item.button?.action = #selector(openTask)
             item.button?.setAccessibilityLabel("Continue from phone in browser")
             self.item = item
         }
+        let image: NSImage?
+        if let data = state.appIcon, let icon = NSImage(data: data) {
+            icon.size = NSSize(width: 18, height: 18)
+            icon.isTemplate = false
+            image = icon
+        } else {
+            image = NSImage(systemSymbolName: "iphone", accessibilityDescription: "Continue from phone")
+            image?.isTemplate = true
+        }
+        item?.button?.image = image
         let app = state.package == "com.google.android.apps.docs.editors.docs" ? "Google Docs" : "phone"
         item?.button?.toolTip = "Continue from \(app) in your browser — \(url.host ?? "")"
     }

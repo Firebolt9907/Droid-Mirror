@@ -36,6 +36,11 @@ int main(int argc, char **argv) {
         DMBleInputQueue *queue=[DMBleInputQueue new];
         assert([queue appendRecords:Wheel(10,-120)] && [queue appendRecords:Wheel(-3,20)]);
         NSData *wheel=Drain(queue,488); assert([wheel isEqual:Wheel(7,-100)]);
+        assert([queue appendRecords:Wheel(0,1000)]);
+        assert([queue appendRecords:Wheel(0,0)]);
+        assert([queue appendRecords:Wheel(0,-100)]);
+        NSMutableData *reversed=[Wheel(0,0) mutableCopy]; [reversed appendData:Wheel(0,-100)];
+        assert([Drain(queue,488) isEqual:reversed]); // New gesture drops old unsent momentum.
         if (argc>2) assert([wheel writeToFile:[NSString stringWithUTF8String:argv[2]] atomically:YES]);
         // Edges are barriers, and partially transmitted commands are immutable.
         assert([queue appendRecords:Wheel(1,2)]);
@@ -86,6 +91,67 @@ int main(int argc, char **argv) {
             assert(x>previous && x-previous<=17); previous=x;
         }
         assert(previous==999); // Newest sample in every source bucket survives.
+        // Slow ATT fallback discards historical unsent motion immediately,
+        // including backlog created before the mode changed.
+        [queue clear]; now=0;
+        assert([queue appendRecords:Touch(0,0,1)]);
+        for (int i=0;i<1000;++i) {
+            now=i/1000.0; assert([queue appendRecords:Touch(2,(uint32_t)i,1)]);
+        }
+        queue.latestMotionOnly=YES;
+        assert([queue appendRecords:Touch(1,999,1)]);
+        NSMutableData *live=[Touch(0,0,1) mutableCopy];
+        for (NSNumber *position in @[@916,@933,@949,@966,@983,@999])
+            [live appendData:Touch(2,position.unsignedIntValue,1)];
+        [live appendData:Touch(1,999,1)];
+        assert([Drain(queue,488) isEqual:live]);
+        // Both pinch pointers survive; DOWN/UP still divide independent runs.
+        for (int i=0;i<100;++i) {
+            now+=0.02;
+            assert([queue appendRecords:Touch(2,(uint32_t)i,102)]);
+            assert([queue appendRecords:Touch(2,(uint32_t)i+1000,103)]);
+        }
+        NSData *latest=Drain(queue,488);
+        assert(latest.length>=4*74 && latest.length<=6*74);
+        assert([[latest subdataWithRange:NSMakeRange(latest.length-74,37)] isEqual:Touch(2,99,102)]);
+        assert([[latest subdataWithRange:NSMakeRange(latest.length-37,37)] isEqual:Touch(2,1099,103)]);
+        queue.latestMotionOnly=NO;
+        // Alternating pinch pointers must also remain bounded to 60 Hz per
+        // pointer under radio backpressure, with both final positions intact.
+        [queue clear];
+        for (int i=0;i<1000;++i) {
+            now=i/1000.0;
+            assert([queue appendRecords:Touch(2,(uint32_t)i,102)]);
+            assert([queue appendRecords:Touch(2,(uint32_t)i+1000,103)]);
+        }
+        assert(queue.pendingBytes==120*37);
+        now=2; NSData *pinch=Drain(queue,488);
+        assert(pinch.length==120*37);
+        for (NSUInteger i=0;i<60;++i) {
+            const uint8_t *pair=(const uint8_t *)pinch.bytes+i*74;
+            uint64_t left, right; uint32_t x, y;
+            memcpy(&left,pair+7,8); memcpy(&right,pair+44,8);
+            memcpy(&x,pair+15,4); memcpy(&y,pair+52,4);
+            assert(CFSwapInt64BigToHost(left)==102 && CFSwapInt64BigToHost(right)==103);
+            x=CFSwapInt32BigToHost(x); y=CFSwapInt32BigToHost(y);
+            assert(y==x+1000);
+            if (i==59) assert(x==999);
+        }
+        [queue clear];
+        assert([queue appendRecords:Touch(2,10,102)]);
+        assert([queue takePacket:488].length==37);
+        now+=0.001;
+        assert([queue appendRecords:Touch(2,20,103)]);
+        assert(queue.motionDelay==0 && [queue takePacket:488].length==37);
+        // A release between samples prevents coalescing across the boundary.
+        [queue clear];
+        NSMutableData *boundary=[Touch(2,10,102) mutableCopy];
+        [boundary appendData:Touch(2,20,103)];
+        [boundary appendData:Touch(1,20,103)];
+        [boundary appendData:Touch(2,30,102)];
+        assert([queue appendRecords:boundary]);
+        assert([Drain(queue,7) isEqual:boundary]);
+        [queue clear]; now=2;
         assert([queue appendRecords:Touch(2,1000,1)]);
         assert([queue takePacket:488].length==37);
         now=2.001; assert([queue appendRecords:Touch(2,1001,1)]);
@@ -118,6 +184,7 @@ int main(int argc, char **argv) {
 
             uint64_t timestamp=CFSwapInt64HostToBig((uint64_t)(5000+i));
             [raw appendBytes:&timestamp length:8];
+            [timedRaw appendData:Envelope(raw)];
             assert([queue appendRecords:Envelope(raw)]);
         }
         NSData *timed=Drain(queue,488); assert(timed.length>=7*45 && timed.length<=9*45);
@@ -131,7 +198,19 @@ int main(int argc, char **argv) {
         }
         assert(firstTime==1000 && lastTime==1101);
         if (argc==2) assert([timed writeToFile:[NSString stringWithUTF8String:argv[1]] atomically:YES]);
-        (void)timedRaw;
+        [queue clear]; queue.latestMotionOnly=YES;
+        assert([queue appendRecords:timedRaw]);
+        NSData *fling=Drain(queue,488); assert(fling.length>=6*45 && fling.length<=8*45);
+        const uint8_t *history=fling.bytes;
+        NSUInteger previousOffset=fling.length-135, lastOffset=fling.length-90, releaseOffset=fling.length-45;
+        assert(history[6]==0 && history[previousOffset+6]==2 && history[lastOffset+6]==2 && history[releaseOffset+6]==1);
+        uint64_t previousSample, lastSample, releaseSample;
+        memcpy(&previousSample,history+previousOffset+37,8); previousSample=CFSwapInt64BigToHost(previousSample);
+        memcpy(&lastSample,history+lastOffset+37,8); lastSample=CFSwapInt64BigToHost(lastSample);
+        memcpy(&releaseSample,history+releaseOffset+37,8); releaseSample=CFSwapInt64BigToHost(releaseSample);
+        assert(previousSample<lastSample && lastSample<releaseSample && releaseSample==1101);
+        assert(memcmp(history+previousOffset+19,history+lastOffset+19,4));
+        queue.latestMotionOnly=NO;
 
         // Do not coalesce moves across keys or distinct pointer/button states.
         [queue clear]; NSData *key=Text(20,3);

@@ -61,10 +61,12 @@ Bluetooth remembers the phone selected in DroidMirror. With auto-start enabled,
 launching the app starts that phone once; closing the mirror does not continually
 reopen it. An unavailable saved pairing does not select another device.
 
-**Automatic (Bluetooth → Wi-Fi)** is the default connection mode. On the first
+**Automatic (USB / Wi-Fi / Bluetooth)** is the default connection mode. On the first
 launch after updating to this version, any previously saved transport selection
 resets to Automatic. The remembered phone and other settings are retained;
-subsequent launches respect any new transport choice you make.
+subsequent launches respect any new transport choice you make. Automatic mode also
+prefers approved Android Open Accessory USB video without ADB; see
+[USB transport and live fallback](Native/USB-ACCESSORY.md) for setup and limits.
 
 The compiled test APK is `outputs/DroidMirror-Bluetooth-0.37-debug.apk`.
 The phone Live Activity includes **Minimize**, which uses the paired BLE
@@ -210,6 +212,7 @@ single, double and triple clicks, and Control-to-Home uses the same shorter dela
 - Optional device-screen-off, stay-awake, always-on-top, HEVC, and UHID keyboard modes
 - Native Back, Home, Recents, volume, and power controls (Esc for Back, Control for Home, double-tap Control for App Switcher)
 - Optional touch-style scrolling converts wheel/trackpad movement into real Android swipes, preserving overscroll and pull-to-refresh behavior
+- During Shizuku mirroring with an authenticated Bluetooth forwarding connection, haptic requests trigger a strong Force Touch trackpad tick through the dynamically loaded MultitouchSupport actuator API, falling back to AppKit's level-change tick if private feedback is unavailable or fails. Normal phone vibration is temporarily suppressed. The prior phone setting is saved durably and restored on stop, forwarding loss, tracing failure, app restart, or boot. A separate shell watchdog also restores it if the guard dies or stalls. If request tracing is unavailable or already in use, phone vibration stays enabled and motor-state ticks are used instead. Queued ticks expire after 200 ms. Requires a compatible trackpad with haptic feedback enabled; Android accessibility/privileged bypass effects may still vibrate the phone.
 - Drag files onto the scrcpy window to send them to Android's Downloads folder
 
 ## Build and run
@@ -281,3 +284,153 @@ The mirror itself is scrcpy's hardware-accelerated window. DroidMirror deliberat
 The ADB launch profile uses a borderless 430×860 window, H.264 at 12 Mbps, 1920 px maximum size, 60 fps, zero video buffering, 30 ms audio buffering, SDK mouse/keyboard input, screen-off mirroring, stay-awake, and macOS Command remapped to Android Control when chorded with another key (standalone Command presses are not forwarded).
 
 Wear OS companion: [privacy stop, battery glance and Find my Mac](Native/WEAR-OS.md).
+
+### Android activities in the Mac menu bar
+
+The background notification helper creates one status item per ongoing,
+non-clearable, foreground-service, or promoted Live Update notification. Music
+notifications are excluded by category, media-session token, and platform style;
+the existing playback integration owns music. Group summaries, secret content,
+DroidMirror's own notifications, and its remote-use audit remain excluded.
+
+`AndroidActivityRenderer.swift` renders native Mac cards using Android shade-style
+headers, typography, rounded surfaces, and controls. Standard, expanded text,
+picture, inbox, messaging, call, and progress bodies share the same renderer;
+Android 16 progress segments, milestones and tracker icons are carried as data.
+Embedded timers are recognized on Android from matching notification chronometer metadata
+or temporal observations of clock-shaped values. Per-notification/field histories
+normalize numerical runs in the surrounding template; a subsequent independent
+sample must move approximately one second per elapsed second to establish direction.
+This uses no app names, labels, verbs, or language-specific pause/countdown keywords.
+Secondary clocks can be learned independently of the main chronometer. Snapshots
+of the same notification are not new evidence; frozen values, discontinuities,
+changed context, removals and listener restarts invalidate/reset inference. Scores,
+times of day and single unclassified samples are not automatically extrapolated.
+Histories are bounded to 1024 samples. Up to six
+UTF-16 spans carry a source-text hash, original token, direction, format, and sampled
+seconds. Android corrects each span's queue age before encryption; macOS projects
+it from the first authenticated message fragment using the sleep-aware monotonic
+clock. SwiftUI updates tagged digits locally while preserving surrounding text,
+including custom-layout text and inbox lines. Hash and token validation discard
+spans after payload truncation; historical messaging content is not inferred.
+
+ProgressStyle follows the shade's left app-icon column, title with inline chronometer,
+subtitle above detail text, full-width progress track, and equal-width outlined actions.
+The outer glass, arrow, corner clipping and opening animation belong to NSPopover.
+Full-size content extends an appearance-aware neutral legibility tint through the
+chevron and corners, leaving the native blur/refraction beneath it. The popover
+and SwiftUI content share the Mac app's effective appearance. Reduce Transparency
+uses an opaque surface; Increase Contrast strengthens the tint. Neutral custom
+RemoteViews text follows Mac foreground ink instead of Android's black/white ink.
+Custom RemoteViews are adapted from their public inflated hierarchy to bounded
+native text/image/progress primitives. No screenshot stream or executable view
+code is sent to the Mac. Custom controls that are absent from Android's public
+notification actions are not synthesized. This matches Android's layout conventions;
+OEM SystemUI decorations and arbitrary custom widgets can still differ.
+
+Android 17 MetricStyle timers and stopwatches use the public TimeDifference metric
+API, resolved at runtime to retain compile SDK 36. The public isTimer/isStopwatch
+flags carry direction explicitly. Running values carry a monotonic zero-point
+offset (a deadline for countdowns, a start for stopwatches); paused values carry a
+fixed `clockPausedMs` duration and retain direction-specific rounding. Expired
+countdowns clamp at zero. Chronometer values follow Android's countdown/count-up
+rounding; inferred text spans preserve their sampled-value formatting. Metric labels supply the title when the ordinary
+notification title is empty. Other metric value types are not guessed to be clocks.
+
+Activity buttons advertise `opensApp` from public PendingIntent.isActivity metadata.
+Those buttons and the card's open control request the normal mirror window and wait
+for the authenticated host's first rendered, visible video-frame signal before
+sending the action. Broadcast/service buttons remain direct. While video starts,
+a pending click can adopt a newer authenticated notification version only when
+its advertised action specification is unchanged; changed actions cancel. Android
+revalidates notification/session identity and waits for unlock before performing
+an app-opening PendingIntent. Live activity opens use the ordinary mirror startup
+path without requesting a legacy wireless-ADB connection.
+
+Settings → Live activities lists sources by app and Android notification channel.
+Its switches are independent of ordinary notification switches. Disabling a source
+closes its card and removes its status items immediately; re-enabling requests a
+fresh authenticated snapshot. The source catalog and exclusions survive restarts.
+Phone notifications are never dismissed by a local settings change.
+
+Live activity images arrive progressively. The compact notification remains the
+wire baseline; after it renders, a capability-negotiated manifest request asks for
+content-addressed image assets. Android prepares assets on a dedicated worker,
+including app/small icons, avatars, pictures, ProgressStyle icons and retained custom
+RemoteViews images. Drawable/vector graphics are rendered directly at Retina-sized
+resolution into lossless PNG (96px icons, 160px avatars, 64px progress icons,
+up to 512px custom images); picture bitmaps use up to 1024px JPEG at quality 92.
+Source rasters are not enlarged beyond available pixels. Every asset is capped at
+128 KiB; the Android cache is capped at 4 MiB/128 assets.
+
+The Mac pulls one 768-byte chunk at a time, validating offsets, totals, SHA-256 and
+image dimensions before replacement. Artwork replies are bulk traffic; controls,
+heartbeats and live content retain priority. Failed optional transfers preserve
+previews and never reset the BLE session. An 8 MiB/128-asset Mac cache deduplicates
+shared images; unchanged preview/revision signatures do not request manifests on
+every timer update. High-resolution images overlay rendered cards independently
+of delta baselines, preserving timer anchors, the newest action version and stable
+popover identity. Removal, source disabling, pairing changes and session loss
+cancel stale upgrades. Older companions skip the image feature through capability
+negotiation. Large original assets are bounded/downscaled rather than forwarded
+without limits; vector XML and executable RemoteViews are never sent to the Mac.
+
+Live activity transport negotiates `activityDeltas: 1` on subscribe. Each authenticated
+connection keeps up to 128 baselines. Initial/reconnect snapshots remain full;
+subsequent `activityPatch` messages contain the exact base version, changed fields,
+and deleted-field names. Unchanged images and layout data stay on the Mac. Patches
+are calculated immediately before encryption, after queue-age correction. Pending
+updates for the same activity coalesce without crossing snapshot/removal/control
+boundaries; already-framed messages are never replaced. A missing baseline triggers
+a rate-limited snapshot request instead of applying a patch to the wrong card.
+Older Mac clients retain full-message compatibility.
+
+Predictable chronometers omit their clock offset while within 250 ms of the
+existing deadline. Embedded timers omit their state and retain their original text
+template when the surrounding text/format matches and the value remains within
+1.05 seconds of the local prediction (allowing whole-second text rounding). Pauses,
+format/direction/context changes and corrections send fresh state. Separate local
+receipt anchors for chronometers and embedded spans prevent other patches from
+restarting timers. Action-version metadata can still change while timer state is
+omitted; action identity/version checks remain intact. Regression fixtures measure
+JSON bytes before encryption, not a guaranteed whole-link bandwidth reduction.
+
+Opening an activity shows its native card. Updates preserve the status item,
+SwiftUI label, observable model and hosting controller. Timers and changing numerical
+text use SwiftUI numeric transitions in the card and menu bar, respecting Reduce
+Motion. Embedded text flows as stable literal runs and independent numeric runs;
+only the digits transition. Confirmed timer spans use local timelines aligned to their
+own second boundaries, rather than the instant the popover opened,
+retaining explicit newlines, word wrapping, text baselines and an intact accessibility
+label. Ordinary numeric runs animate on received changes without clock extrapolation. Chronometers tick locally on a sleep-aware monotonic clock. Android subtracts
+notification queue age immediately before encryption, and the Mac anchors the
+remaining duration to the first received fragment, excluding reassembly delay.
+Authenticated heartbeat replies carry Android receive/send monotonic timestamps.
+The Mac timestamps its first request write and the first reply fragment, subtracts
+phone queue time, and uses the lowest network-RTT sample from a bounded recent
+window to map Android elapsed time onto the Mac's sleep-aware clock. One startup
+probe precedes the initial activity snapshot; subsequent calibration reuses existing
+heartbeats. Activity timer changes carry their Android reference timestamp, allowing
+both chronometers and embedded timers to exclude transit time before the first
+fragment. Better calibration reanchors cached activities locally without requesting
+new activity state. Reconnects clear calibration; old companions retain receipt-time
+fallback. Diagnostics report calibration RTT and estimated activity transit time.
+Neither device needs its wall clock synchronized with the other. Delayed heartbeat
+or endpoint replies do not reset a link while authenticated traffic is still arriving;
+the existing stale-link watchdog and all encryption/sequence checks remain active.
+Source actions retain authenticated transport,
+opaque notification identity and version checks.
+
+Snapshots carry bounded membership manifests (up to two 64-ID messages) so only
+missing activities are removed. A brief disconnect suspends controls while retaining
+items for up to 30 seconds; cards remain openable with a reconnecting message while
+phone controls are disabled. Fresh authenticated updates restore controls in place.
+Repeated resets cannot extend that deadline. Removal, settings changes, trust changes
+and shutdown still clear the relevant items immediately. Snapshots retain the
+128-item bound and shed optional details to leave queue room for manifests/control traffic.
+
+The parsing adapts public-field logic from the local `dynamic-island` project.
+Run `bash Native/test-android-activities.sh` and `bash Native/test-notification-apps.sh`
+from a macOS session with window-server access. The optional
+`AndroidActivityRendererPreview.swift` executable generates native-rendered layout
+fixtures for visual QA without connecting to a phone.

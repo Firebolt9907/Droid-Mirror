@@ -49,7 +49,7 @@ struct NotificationAppsView: View {
                     Text("1. On Android, open DroidMirror → Optional features and recovery → Notification forwarding setup and background features. Enable the background bridge and pair this Mac once.")
                     Text("2. Open notification access, select DroidMirror and enable Allow notification access. Check that the setup screen says the listener is connected. Allowing DroidMirror’s own status notifications is a separate permission.")
                     Text("3. On this Mac, allow notifications for DroidMirror Notifications in System Settings → Notifications. Choose Banners or Alerts and check Focus if banners are missing. Keep DroidMirror’s background receiver running; enable startup at login above to receive after logging in.")
-                    Text("4. Enable the source app below, then send a new message to the phone. Existing and silent notifications may appear only in Notification Center. Ongoing service, progress and secret notifications are filtered.")
+                    Text("4. Enable the source app below, then send a new message to the phone. Existing and silent notifications may appear only in Notification Center. Ongoing activities appear separately in the menu bar and can be managed under Live activities. Secret notifications are filtered.")
                     Text("Mirroring can work before notification forwarding is ready. Shizuku and wireless debugging are not required for notification forwarding.")
                     Button("Open macOS Notification Settings…") {
                         if let url = URL(string: "x-apple.systempreferences:com.apple.Notifications-Settings.extension") {
@@ -70,6 +70,63 @@ struct NotificationAppsView: View {
                     VStack(alignment: .leading) {
                         Text(model.apps[package] ?? package)
                         Text(package).font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+            }
+        }.onAppear { model.reload() }
+    }
+}
+
+@MainActor
+private final class ActivityAppsModel: NSObject, ObservableObject {
+    @Published var sources = [String: [String: String]]()
+    @Published var excluded = Set<String>()
+    private let preferences = ActivityAppPreferences(defaults: .standard)
+    override init() {
+        super.init()
+        DistributedNotificationCenter.default().addObserver(self, selector: #selector(reload),
+            name: ActivityAppPreferences.catalogChanged, object: nil)
+        reload()
+    }
+    deinit { DistributedNotificationCenter.default().removeObserver(self) }
+    @objc func reload() {
+        UserDefaults.standard.synchronize()
+        sources = preferences.sources
+        excluded = preferences.excluded
+    }
+    func setAllowed(_ allowed: Bool, source: String) {
+        preferences.setAllowed(allowed, source: source)
+        reload()
+        DistributedNotificationCenter.default().postNotificationName(NotificationAppPreferences.changed,
+            object: nil, userInfo: nil, deliverImmediately: true)
+    }
+    var keys: [String] {
+        sources.keys.sorted {
+            let first = (sources[$0]?["app"] ?? "") + (sources[$0]?["name"] ?? "")
+            let second = (sources[$1]?["app"] ?? "") + (sources[$1]?["name"] ?? "")
+            return first == second ? $0 < $1 : first.localizedStandardCompare(second) == .orderedAscending
+        }
+    }
+}
+
+struct ActivityAppsView: View {
+    @StateObject private var model = ActivityAppsModel()
+    var body: some View {
+        Section("Live activities") {
+            Text("Choose which Android live activities and persistent notifications appear in the menu bar. Each Android notification has its own item. Turning a source off removes its items from this Mac; your phone and regular notification settings stay unchanged.")
+                .font(.caption).foregroundStyle(.secondary)
+            if model.sources.isEmpty {
+                Text("No live activities received yet. Start an activity on your phone while connected to this Mac.")
+                    .foregroundStyle(.secondary)
+            }
+            ForEach(model.keys, id: \.self) { source in
+                let row = model.sources[source] ?? [:]
+                Toggle(isOn: Binding(get: { !model.excluded.contains(source) },
+                    set: { model.setAllowed($0, source: source) })) {
+                    VStack(alignment: .leading) {
+                        Text(row["app"] ?? "Android app")
+                        Text((row["name"] ?? "").isEmpty ? (row["package"] ?? "") : (row["name"] ?? ""))
+                            .font(.caption).foregroundStyle(.secondary)
                     }
                 }
             }

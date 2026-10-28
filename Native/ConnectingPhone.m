@@ -189,6 +189,8 @@ static NSWindow *DMNativePhone(void) {
         SDL_PROP_WINDOW_COCOA_WINDOW_POINTER, NULL);
 }
 
+NSWindow *DMConnectingPhoneWindow(void) { return DMNativePhone(); }
+
 static void DMSetChrome(BOOL streaming) {
     void (*chrome)(NSWindow *, BOOL) = dlsym(RTLD_DEFAULT, "DroidMirrorSessionChrome");
     if (chrome) chrome(DMNativePhone(), streaming);
@@ -350,8 +352,16 @@ void DroidMirrorVideoSurfaceReady(void) {
     // SDL may insert/reinsert its Metal view while creating or presenting the
     // first drawable. Cover that empty drawable in the same main-thread turn.
     DMConnectingPhoneView *overlay = (DMConnectingPhoneView *)DMLoadingSurface;
-    if (!overlay || overlay.revealingVideo || !overlay.superview) return;
+    if (!overlay || !overlay.superview) return;
     NSView *screen = overlay.superview;
+    // SDL can reinsert the Metal view during a drawable/size change, including
+    // while the entrance is running. Preserve coverage for the whole reveal.
+    CGFloat top = 0;
+    for (NSView *view in screen.subviews)
+        if (view != overlay) top = MAX(top, view.layer.zPosition);
+    [CATransaction begin]; [CATransaction setDisableActions:YES];
+    overlay.layer.zPosition = top + 1;
+    [CATransaction commit];
     if (screen.subviews.lastObject != overlay)
         [screen addSubview:overlay positioned:NSWindowAbove relativeTo:nil];
 }
@@ -362,7 +372,7 @@ static void DMFinishConnectingPhoneWithMotion(BOOL animate) {
     NSView *screen = overlay.superview;
     // SDL creates its Metal view after the loading page. Restore the overlay
     // above that opaque video view before fading it, or the reveal is invisible.
-    [screen addSubview:overlay positioned:NSWindowAbove relativeTo:nil];
+    DroidMirrorVideoSurfaceReady();
     screen.window.movableByWindowBackground = NO;
     DMApplyDeviceCorners(screen);
     [overlay.layer removeAllAnimations];

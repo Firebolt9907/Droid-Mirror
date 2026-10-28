@@ -6,12 +6,18 @@
 @property(nonatomic) NSEventPhase inputPhase;
 @property(nonatomic) CGFloat inputMagnification;
 @property(nonatomic) NSPoint inputPoint;
+@property(nonatomic) CGFloat inputDeltaX;
+@property(nonatomic) CGFloat inputDeltaY;
 @end
 @implementation DMPhoneGestureTestEvent
 - (NSEventType)type { return self.inputType; }
 - (NSEventPhase)phase { return self.inputPhase; }
 - (CGFloat)magnification { return self.inputMagnification; }
 - (NSPoint)locationInWindow { return self.inputPoint; }
+- (BOOL)hasPreciseScrollingDeltas { return YES; }
+- (NSEventPhase)momentumPhase { return NSEventPhaseNone; }
+- (CGFloat)scrollingDeltaX { return self.inputDeltaX; }
+- (CGFloat)scrollingDeltaY { return self.inputDeltaY; }
 @end
 
 static SDL_Event Next(Uint32 type, SDL_FingerID finger) {
@@ -57,6 +63,23 @@ int main(void) {
         SDL_Event spread = Next(SDL_EVENT_FINGER_MOTION, 102);
         Next(SDL_EVENT_FINGER_MOTION, 103);
         assert(spread.tfinger.x < left.tfinger.x);
+        event.inputType = NSEventTypeScrollWheel;
+        event.inputDeltaX = 12;
+        event.inputDeltaY = 8;
+        CGFloat radius = controller.pinchRadius;
+        [controller handleScrollEvent:event];
+        SDL_Event translated = Next(SDL_EVENT_FINGER_MOTION, 102);
+        Next(SDL_EVENT_FINGER_MOTION, 103);
+        assert(translated.tfinger.x > spread.tfinger.x);
+        assert(translated.tfinger.y > spread.tfinger.y);
+        assert(controller.pinchRadius == radius);
+        assert(!SDL_PollEvent(&unused));
+        event.inputDeltaX = 10000;
+        event.inputDeltaY = -10000;
+        [controller handleScrollEvent:event];
+        Next(SDL_EVENT_FINGER_MOTION, 102);
+        Next(SDL_EVENT_FINGER_MOTION, 103);
+        event.inputType = NSEventTypeMagnify;
         event.inputPhase = NSEventPhaseChanged;
         event.inputMagnification = -0.5;
         [controller handlePhoneGestureEvent:event];
@@ -90,6 +113,6 @@ int main(void) {
         controller.sdlWindow = NULL;
         SDL_DestroyWindow(window);
         SDL_Quit();
-        puts("PASS: right-click holds a stationary touch; pinch spreads/contracts two fingers and releases on end/cancel");
+        puts("PASS: long press; simultaneous pinch and pan; bounded contacts; release on end/cancel");
     }
 }

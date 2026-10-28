@@ -45,6 +45,7 @@ class BridgeRuntime(private val context: Context, private val onChanged: Runnabl
         }
     }
     private var leftBehind: LeftBehindMonitor? = null
+    fun suspendPresenceProbes() { handler.post { if (!destroyed) leftBehind?.suspendRadioProbes() } }
     fun refreshLeftBehind() { handler.post { if (!destroyed) leftBehind?.refresh() } }
     private lateinit var finder: AdbEndpointFinder
     private var clipboard: app.droidmirror.bluetooth.ClipboardSyncClient? = null
@@ -60,6 +61,7 @@ class BridgeRuntime(private val context: Context, private val onChanged: Runnabl
         return id
     }
     fun cancelSharedLink(id: String) { sharedLinks.remove(id) }
+    private var taskGeneration = 0L
     private var taskUrls: app.droidmirror.bluetooth.TaskUrlClient? = null
     private var hotspot: app.droidmirror.bluetooth.HotspotClient? = null
     private lateinit var ble: BlePeripheral
@@ -114,8 +116,8 @@ class BridgeRuntime(private val context: Context, private val onChanged: Runnabl
                 if (!destroyed && authorized()) media?.receive(event)
             } },
             onTaskSubscription = { enabled, generation -> handler.post {
-                taskUrls?.close(); taskUrls = null
-                if (enabled && !destroyed) taskUrls = app.droidmirror.bluetooth.TaskUrlClient(context) { ble.sendTaskEvent(it, generation) }
+                taskGeneration = generation
+                taskUrls?.setSubscribed(enabled && !destroyed)
             } },
             onShareLinkResult = { id, success -> handler.post { sharedLinks.remove(id)?.accept(success) } },
             onOpenLink = { url, authorized, reply -> handler.post {
@@ -127,6 +129,7 @@ class BridgeRuntime(private val context: Context, private val onChanged: Runnabl
                 if (!destroyed && authorized()) hotspot?.setEnabled(enabled) { reply(it) }
             } }
         )
+        taskUrls = app.droidmirror.bluetooth.TaskUrlClient(context) { ble.sendTaskEvent(it, taskGeneration) }
         runCatching { ble.start { update(it, details) } }
             .onFailure { update("Bluetooth unavailable", "Check Nearby Devices permission and try again.") }
         val filter = IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED)
@@ -148,6 +151,7 @@ class BridgeRuntime(private val context: Context, private val onChanged: Runnabl
     }
 
     fun sendEvent(value: org.json.JSONObject) { ble.sendEvent(value) }
+    fun canForwardHaptics(): Boolean = ble.canForwardHaptics()
     fun resetTrust() { ble.revokeTrust() }
 
     @JvmOverloads fun findEndpoint(enableWirelessDebugging: Boolean = false) {

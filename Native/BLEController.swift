@@ -13,6 +13,8 @@ final class BLEController: NSObject, ObservableObject {
     private let requests = BLERequests()
     private var outbound = BLEOutboundQueue()
     private var supportsSessionHealth = false
+    private var clockSync = ActivityClockSync()
+    private var activityTransitMilliseconds: Int?
     private var heartbeatPending = false
     private var writeStartedAt: TimeInterval?
     // ADB is an explicit legacy action, independent of the idle BLE session.
@@ -23,8 +25,10 @@ final class BLEController: NSObject, ObservableObject {
     private var assembledMessages = 0
     private var staleFrames = 0
     private var acknowledgedWrites = 0
-    var diagnostics: String { "rx=\(receivedFrames) assembled=\(assembledMessages) stale=\(staleFrames) written=\(acknowledgedWrites) queued=\(writes.count) messages=\(outbound.count) requests=\(requests.count)" }
+    var diagnostics: String { "rx=\(receivedFrames) assembled=\(assembledMessages) stale=\(staleFrames) written=\(acknowledgedWrites) queued=\(writes.count) messages=\(outbound.count) requests=\(requests.count) clockRTT=\(clockSync.roundTripMilliseconds.map(String.init) ?? "unknown")ms activityTransit=\(activityTransitMilliseconds.map(String.init) ?? "unknown")ms" }
     private var session: BLESecureSession?
+    private var activityDeltas = ActivityDeltaReceiver()
+    private var lastActivityResync: TimeInterval = -.infinity
     private var fragments = BLEFragments()
     private var writes = [Data]()
     private var writing = false
@@ -33,6 +37,7 @@ final class BLEController: NSObject, ObservableObject {
     private(set) var supportsClipboard = false
     private(set) var supportsClipboardFiles = false
     private(set) var supportsWearCompanion = false
+    private(set) var supportsActivityImages = false
     private(set) var supportsMedia = false
     private(set) var supportsTaskURLs = false
     private(set) var supportsHotspot = false
@@ -252,8 +257,15 @@ final class BLEController: NSObject, ObservableObject {
 
         if let started = pendingRequestStartedAt,
            Date().timeIntervalSince(started) > 12 {
-            rebuildBLESession(phone)
-            return
+            if authenticated, let last = lastEndpointResponseAt, Date().timeIntervalSince(last) <= 25 {
+                // An endpoint reply can also sit behind notification fragments.
+                // Retry discovery without discarding a healthy authenticated session.
+                pendingRequestID = nil
+                pendingRequestStartedAt = nil
+            } else {
+                rebuildBLESession(phone)
+                return
+            }
         }
 
         let reference = lastEndpointResponseAt ?? bleAttemptStartedAt ?? Date()
@@ -269,10 +281,12 @@ final class BLEController: NSObject, ObservableObject {
         if authenticated && supportsSessionHealth {
             guard !heartbeatPending else { return }
             heartbeatPending = true
-            request(["type": "ping"], expecting: "pong", timeout: 12) { [weak self] outcome in
+            request(["type": "ping"], expecting: "pong", timeout: 12) { [weak self] _ in
                 guard let self else { return }
                 self.heartbeatPending = false
-                if case .timedOut = outcome, let current = self.phone { self.rebuildBLESession(current) }
+                // A large authenticated notification can take longer than a ping deadline.
+                // The existing 25-second authenticated-traffic watchdog decides whether
+                // the link is stale; a delayed pong alone must not disable every activity.
             }
         } else {
             // Older companions answer endpoint requests even without an ADB endpoint.
@@ -445,7 +459,10 @@ final class BLEController: NSObject, ObservableObject {
         let hadSession = session != nil
         supportsWearCompanion = false; supportsLinkSharing = false; supportsMedia = false; supportsClipboard = false
         supportsClipboardFiles = false; supportsTaskURLs = false; supportsHotspot = false
+        supportsActivityImages = false
         supportsSessionHealth = false; heartbeatPending = false
+        clockSync = ActivityClockSync(); activityTransitMilliseconds = nil
+        activityDeltas = ActivityDeltaReceiver(); lastActivityResync = -.infinity
         session = nil; fragments = BLEFragments(); writes.removeAll(); outbound.reset()
         writing = false; writeStartedAt = nil
         requests.reset()
@@ -500,7 +517,14 @@ final class BLEController: NSObject, ObservableObject {
         let streaming = authenticated && endpointCharacteristic.properties.contains(.writeWithoutResponse)
         repeat {
             if writes.isEmpty {
+                if streaming && !phone.canSendWriteWithoutResponse {
+                    if writeStartedAt == nil { writeStartedAt = uptime }
+                    return
+                }
                 guard authenticated, let session, let message = outbound.next(now: uptime) else { return }
+                if message.object["type"] as? String == "ping", let id = message.object["request"] as? String {
+                    clockSync.begin(id, now: ActivityClock.now)
+                }
                 do { try queue(session.seal(message.object), startWriting: false) }
                 catch { rebuildBLESession(phone); return }
             }
@@ -529,12 +553,34 @@ final class BLEController: NSObject, ObservableObject {
                 status = "Verifying phone authentication challenge…"
                 try queue(JSONSerialization.data(withJSONObject: session.challenge(object))); return
             }
-            let plain = try session.open(object)
+            var plain = try session.open(object)
+            // Local timing metadata is attached only after authentication and overwrites wire input.
+            plain["_activityReceivedAt"] = fragments.lastMessageStartedAt ?? ActivityClock.now
             lastEndpointResponseAt = Date()
+            let first = fragments.lastMessageStartedAt ?? ActivityClock.now
+            plain.removeValue(forKey: "_activitySourceAt")
+            if plain["type"] as? String == "pong", clockSync.accept(plain, receivedAt: first) {
+                for refreshed in activityDeltas.reanchor(using: clockSync) { onEvent?(refreshed) }
+            }
+            if let stamp = plain["clockSentElapsedMs"] as? NSNumber,
+               let source = clockSync.localTime(phoneMilliseconds: stamp.doubleValue) {
+                // An offset estimate can be ahead by its uncertainty; never anchor in the future.
+                plain["_activitySourceAt"] = min(first, source)
+                if plain["type"] as? String != "pong" { activityTransitMilliseconds = Int(max(0, first-source) * 1000) }
+            }
+            guard let reconstructed = activityDeltas.receive(plain) else {
+                if activityDeltas.needsSnapshot && uptime - lastActivityResync >= 10 {
+                    lastActivityResync = uptime
+                    send(["type": "subscribe", "activityDeltas": 1])
+                }
+                return
+            }
+            plain = reconstructed
             requests.receive(plain, now: uptime)
             switch plain["type"] as? String {
             case "ready":
                 if let phone, let key = BLETrust.key() { BLEDiscovery.remember(phone.identifier, key: key) }
+                supportsActivityImages = plain["activityImages"] as? Int == 1
                 supportsSessionHealth = plain["sessionHealth"] as? Int == 1
                 supportsClipboard = plain["clipboard"] as? Int == 1
                 supportsClipboardFiles = plain["clipboardFiles"] as? Int == 1
@@ -545,9 +591,10 @@ final class BLEController: NSObject, ObservableObject {
                 supportsLinkSharing = plain["linkSharing"] as? Int == 1
                 status = "Authenticated phone connected"
                 if wantsADB || !supportsSessionHealth { requestEndpoint() }
-                send(["type": "subscribe"]); onAuthenticated?()
-            case "pong": break
-            case "watchPhoneBattery", "watchFindMac", "shareLink", "openLinkResult", "mediaState", "mediaCommand", "mediaArtworkRequest", "mediaArtworkChunk", "mediaStatus", "notification", "removed", "actionResult", "dismissResult", "minimizeMirror", "clipboard", "clipboardStatus", "clipboardResult", "clipboardFileBegin", "clipboardFileChunk", "clipboardFileAck", "clipboardFileCancel", "taskContinuation", "hotspotResult": onEvent?(plain)
+                if supportsSessionHealth { request(["type": "ping"], expecting: "pong", timeout: 12) { _ in } }
+                send(["type": "subscribe", "activityDeltas": 1]); onAuthenticated?()
+            case "pong", "activityImageManifest", "activityImageChunk": break
+            case "haptic", "watchPhoneBattery", "watchFindMac", "shareLink", "openLinkResult", "mediaState", "mediaCommand", "mediaArtworkRequest", "mediaArtworkChunk", "mediaStatus", "notification", "activitiesReset", "removed", "actionResult", "dismissResult", "minimizeMirror", "clipboard", "clipboardStatus", "clipboardResult", "clipboardFileBegin", "clipboardFileChunk", "clipboardFileAck", "clipboardFileCancel", "taskContinuation", "hotspotResult": onEvent?(plain)
             default: accept(try JSONSerialization.data(withJSONObject: plain))
             }
         } catch {

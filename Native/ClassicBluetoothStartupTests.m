@@ -395,10 +395,17 @@ static void TestActiveServiceRecovery(void) {
     CBMutableService *old=RecoveryService();
     ble.inputService=old; ble.returning=old.characteristics[2];
     ble.ready=YES; ble.proofVerified=YES; ble.readPending=YES;
+    // Reproduce service invalidation after only 20 of 39 framed bytes.
+    NSMutableData *partial=[NSMutableData dataWithLength:39];
+    ((uint8_t *)partial.mutableBytes)[1]=37;
+    ble.commandFrame=partial; ble.commandOffset=20;
+    NSData *outstanding=[partial subdataWithRange:NSMakeRange(2,37)];
     NSData *lostReturn=[ble testReturnPacket];
     CBMutableCharacteristic *returning=(CBMutableCharacteristic *)ble.returning;
     [ble peripheral:(CBPeripheral *)peer didModifyServices:@[old]];
     assert(!ble.ready && ble.recovering && !ble.failure && peer.discoveries==1);
+    assert(!ble.commandFrame && !ble.commandOffset && [ble.inFlightPacket isEqual:outstanding]);
+    assert(ble.reliableAfterFragmentRecovery); // Older phones may retain their partial buffer.
     NSTimeInterval deadline=ble.recoveryDeadline;
     [ble peripheral:(CBPeripheral *)peer didModifyServices:@[old]];
     assert(ble.recoveryDeadline==deadline); // Repeated invalidations cannot extend recovery.
@@ -409,7 +416,23 @@ static void TestActiveServiceRecovery(void) {
     CBMutableService *fresh=RecoveryService(); peer.services=@[fresh];
     [ble peripheral:(CBPeripheral *)peer didDiscoverServices:nil];
     [ble peripheral:(CBPeripheral *)peer didDiscoverCharacteristicsForService:fresh error:nil];
+    // The server may still be notifying while the Mac reads the replacement
+    // nonce. A reused characteristic must not route that return to proof parsing.
+    CBMutableCharacteristic *earlyReturn=(CBMutableCharacteristic *)ble.returning;
+    earlyReturn.value=lostReturn;
+    [ble peripheral:(CBPeripheral *)peer didUpdateValueForCharacteristic:earlyReturn error:nil];
+    CBMutableCharacteristic *earlyClock=(CBMutableCharacteristic *)ble.clockCharacteristic;
+    earlyClock.value=[NSMutableData dataWithLength:40];
+    [ble peripheral:(CBPeripheral *)peer didUpdateValueForCharacteristic:earlyClock error:nil];
+    assert(!ble.failure && ble.recovering && !ble.proofVerified && ble.receiveSequence==23 && !ble.delivered);
     CBMutableCharacteristic *nonce=(CBMutableCharacteristic *)ble.nonceCharacteristic;
+    [ble peripheral:(CBPeripheral *)peer didUpdateValueForCharacteristic:nonce
+        error:[NSError errorWithDomain:CBATTErrorDomain code:CBATTErrorInvalidHandle userInfo:nil]];
+    assert(ble.recovering && !ble.failure && ble.nextDiscovery>0 && ble.recoveryDeadline==deadline);
+    [ble retryDiscoveryAtTime:ble.nextDiscovery+0.01];
+    [ble peripheral:(CBPeripheral *)peer didDiscoverServices:nil];
+    [ble peripheral:(CBPeripheral *)peer didDiscoverCharacteristicsForService:fresh error:nil];
+    nonce=(CBMutableCharacteristic *)ble.nonceCharacteristic;
     nonce.value=ble.sessionNonce;
     [ble peripheral:(CBPeripheral *)peer didUpdateValueForCharacteristic:nonce error:nil];
     assert(ble.challenge.length==16 && ble.sequence==17 && ble.receiveSequence==23);
@@ -793,8 +816,196 @@ static void TestColdPeerConnection(BOOL slow, BOOL initial) {
     puts("Cold Iroh startup: delayed challenge survives discovery, authenticates and preserves video cutoff");
 }
 
+static int testUSBConnected(void *context) { return context==(void *)1; }
+@interface DMUSBSelectionBridge : DMStartupBridge
+@property(nonatomic) uint16_t probedPort;
+@property(nonatomic) NSUInteger recoveries;
+@end
+@implementation DMUSBSelectionBridge
+- (void)probeWiFi:(uint16_t)port { self.probedPort=port; }
+- (void)fallbackToBluetooth { self.recoveries++; }
+@end
+@interface DMFlowControlledPeripheral : DMStartupPeripheral
+@property(nonatomic) BOOL credit;
+@property(nonatomic) CBCharacteristicWriteType lastType;
+@property(nonatomic) NSUInteger commandLimit;
+@property(nonatomic, strong) NSMutableData *submitted;
+@end
+@implementation DMFlowControlledPeripheral
+- (BOOL)canSendWriteWithoutResponse { return self.credit; }
+- (NSUInteger)maximumWriteValueLengthForType:(CBCharacteristicWriteType)type { return type==CBCharacteristicWriteWithoutResponse && self.commandLimit ? self.commandLimit : 182; }
+- (void)writeValue:(NSData *)value forCharacteristic:(id)characteristic type:(CBCharacteristicWriteType)type {
+    [super writeValue:value forCharacteristic:characteristic type:type];
+    self.lastType=type; self.credit=NO; [self.submitted appendData:value];
+}
+@end
+static void testStreamingInputFlowControl(void) {
+    DMRecoveryTransport *ble=[DMRecoveryTransport new];
+    DMFlowControlledPeripheral *peer=[DMFlowControlledPeripheral new];
+    ble.peripheral=(CBPeripheral *)peer; ble.pending=[DMBleInputQueue new];
+    ble.queue=dispatch_get_main_queue(); ble.sessionNonce=[NSMutableData dataWithLength:32];
+    CBMutableCharacteristic *nonce=[[CBMutableCharacteristic alloc] initWithType:[CBUUID UUIDWithString:DMInputKey]
+        properties:CBCharacteristicPropertyRead value:ble.sessionNonce permissions:CBAttributePermissionsReadable];
+    ble.nonceCharacteristic=nonce;
+    [ble peripheral:(CBPeripheral *)peer didUpdateValueForCharacteristic:nonce error:nil];
+    ble.input=[[CBMutableCharacteristic alloc] initWithType:[CBUUID UUIDWithString:DMInputCharacteristic]
+        properties:CBCharacteristicPropertyWrite|CBCharacteristicPropertyWriteWithoutResponse value:nil permissions:CBAttributePermissionsWriteable];
+    ble.ready=YES; ble.sequence=1; ble.drainEnabled=YES;
+    ble.returnIndications=YES; peer.writes=0;
+    [ble.pending acknowledgeVideo:1024]; [ble drain];
+    assert(peer.writes==0 && ble.sequence==1 && ble.pending.hasWork);
+    peer.credit=YES; [ble peripheralIsReadyToSendWriteWithoutResponse:(CBPeripheral *)peer];
+    assert(peer.writes==1 && peer.lastType==CBCharacteristicWriteWithoutResponse);
+    assert(ble.sequence==2 && !ble.writePending && !ble.inFlightPacket);
+    DMBleInputKeys keys=[ble testKeys:NO]; uint8_t plain[13];
+    assert(dm_ble_input_open(&keys,1,peer.lastWrite.bytes,peer.lastWrite.length,plain));
+    [ble.pending acknowledgeVideo:2048]; [ble drain];
+    assert(peer.writes==1 && ble.sequence==2);
+    peer.credit=YES; [ble peripheralIsReadyToSendWriteWithoutResponse:(CBPeripheral *)peer];
+    assert(peer.writes==2 && ble.sequence==3 && !ble.pending.hasWork);
+    assert(dm_ble_input_open(&keys,2,peer.lastWrite.bytes,peer.lastWrite.length,plain));
+    // A missing readiness callback must not leave unsent input stranded until
+    // the lease/watchdog expires. The fallback seals a fresh reliable record.
+    [ble.pending acknowledgeVideo:3072];
+    ble.creditWaitSince=NSDate.timeIntervalSinceReferenceDate-0.5;
+    [ble drain];
+    assert(peer.writes==3 && peer.lastType==CBCharacteristicWriteWithResponse && ble.writePending);
+    assert(dm_ble_input_open(&keys,3,peer.lastWrite.bytes,peer.lastWrite.length,plain));
+    [ble peripheral:(CBPeripheral *)peer didWriteValueForCharacteristic:ble.input error:nil];
+    assert(!ble.writePending && !ble.inFlightPacket);
+    // A minimum-MTU link transports the same authenticated record as ordered
+    // 20-byte commands, pausing mid-frame when radio credits run out.
+    peer.commandLimit=20; peer.submitted=[NSMutableData data];
+    [ble.pending acknowledgeVideo:4096]; peer.credit=YES; [ble drain];
+    assert(ble.commandFrame.length && !ble.writePending && ble.sequence==5);
+    NSUInteger partialWrites=peer.writes; [ble drain]; assert(peer.writes==partialWrites);
+    while (ble.commandFrame.length) {
+        peer.credit=YES; [ble peripheralIsReadyToSendWriteWithoutResponse:(CBPeripheral *)peer];
+        assert(peer.lastWrite.length<=20 && peer.lastType==CBCharacteristicWriteWithoutResponse);
+    }
+    assert(peer.submitted.length==39);
+    uint16_t framed; memcpy(&framed,peer.submitted.bytes,2); assert(CFSwapInt16BigToHost(framed)==37);
+    assert(dm_ble_input_open(&keys,4,(const uint8_t *)peer.submitted.bytes+2,37,plain));
+    ble.closed=YES;
+    puts("Streaming BLE input: respects radio credits, resumes on readiness, preserves encrypted sequence and never retries uncertain input");
+}
+static void testUSBSelection(void) {
+    DMUSBSelectionBridge *bridge=[DMUSBSelectionBridge new];
+    bridge.usbConnected=testUSBConnected; bridge.usbHandle=(void *)1; bridge.usbPort=12345;
+    bridge.wifiSocket=-1;
+    [bridge pollUSB]; assert(bridge.probedPort==12345);
+    bridge.probedPort=0; bridge.wifiRecovering=YES;
+    [bridge pollUSB]; assert(!bridge.probedPort);
+    bridge.wifiRecovering=NO; bridge.wifiSocket=42; bridge.wifiActive=YES;
+    [bridge pollUSB]; assert(bridge.recoveries==1);
+    bridge.wifiIsUSB=YES;
+    [bridge pollUSB]; assert(bridge.recoveries==1);
+    bridge.usbHandle=NULL; bridge.wifiSocket=-1;
+    [bridge pollUSB]; assert(!bridge.probedPort);
+    puts("Automatic USB: prefers available USB, recovers network before switching, waits for recovery, and preserves active USB");
+}
+
+static void testAcknowledgedReturns(void) {
+    DMRecoveryTransport *ble=[DMRecoveryTransport new];
+    DMFlowControlledPeripheral *peer=[DMFlowControlledPeripheral new];
+    ble.peripheral=(CBPeripheral *)peer; ble.pending=[DMBleInputQueue new];
+    ble.queue=dispatch_get_main_queue();
+    ble.pairingKey=[NSMutableData dataWithLength:32]; ble.sessionNonce=[NSMutableData dataWithLength:32];
+    CBMutableCharacteristic *nonce=[[CBMutableCharacteristic alloc] initWithType:[CBUUID UUIDWithString:DMInputKey]
+        properties:CBCharacteristicPropertyRead value:ble.sessionNonce permissions:CBAttributePermissionsReadable];
+    ble.nonceCharacteristic=nonce;
+    [ble peripheral:(CBPeripheral *)peer didUpdateValueForCharacteristic:nonce error:nil];
+    ble.input=[[CBMutableCharacteristic alloc] initWithType:[CBUUID UUIDWithString:DMInputCharacteristic]
+        properties:CBCharacteristicPropertyWriteWithoutResponse value:nil permissions:CBAttributePermissionsWriteable];
+    CBMutableCharacteristic *output=[[CBMutableCharacteristic alloc] initWithType:[CBUUID UUIDWithString:DMInputReturn]
+        properties:CBCharacteristicPropertyNotify value:nil permissions:CBAttributePermissionsReadable];
+    ble.returning=output; ble.ready=YES; ble.returnIndications=YES;
+    ble.sequence=1; ble.receiveSequence=1; ble.drainEnabled=YES;
+    peer.writes=0; // Exclude the authentication challenge from transport writes.
+    NSData *packet=[ble testReturnPacket]; output.value=packet;
+    // Exhausted radio credits retain the ACK; delivery still happens once.
+    [ble peripheral:(CBPeripheral *)peer didUpdateValueForCharacteristic:output error:nil];
+    assert(ble.receiveSequence==2 && ble.delivered.length==1 && peer.writes==0);
+    assert(ble.pendingReturnAcknowledgement.unsignedLongLongValue==1);
+    peer.credit=YES; [ble peripheralIsReadyToSendWriteWithoutResponse:(CBPeripheral *)peer];
+    DMBleInputKeys keys=[ble testKeys:NO]; uint8_t plain[13];
+    assert(dm_ble_input_open(&keys,1,peer.lastWrite.bytes,peer.lastWrite.length,plain));
+    const uint8_t expected[]={3,0,0,0,8,0,0,0,0,0,0,0,1};
+    assert(!memcmp(plain,expected,sizeof(expected)));
+    // Simulate a lost ACK and missing Android completion: exact retransmission
+    // is re-ACKed under a NEW input nonce, without delivering its action again.
+    ble.delivered=nil; peer.credit=YES;
+    [ble peripheral:(CBPeripheral *)peer didUpdateValueForCharacteristic:output error:nil];
+    assert(!ble.delivered && ble.receiveSequence==2 && peer.writes==2);
+    assert(dm_ble_input_open(&keys,2,peer.lastWrite.bytes,peer.lastWrite.length,plain));
+    assert(!memcmp(plain,expected,sizeof(expected)));
+    // A queued control/lease envelope can share the ACK's authenticated packet.
+    [ble.pending acknowledgeVideo:1234];
+    output.value=[ble testReturnPacket]; peer.credit=YES;
+    [ble peripheral:(CBPeripheral *)peer didUpdateValueForCharacteristic:output error:nil];
+    uint8_t combined[26];
+    assert(ble.receiveSequence==3 && peer.writes==3 && ble.delivered.length==1);
+    assert(dm_ble_input_open(&keys,3,peer.lastWrite.bytes,peer.lastWrite.length,combined));
+    assert(combined[0]==3 && combined[4]==8 && combined[12]==2);
+    assert(combined[13]==1 && combined[17]==8 && !ble.pending.hasWork);
+    ble.delivered=nil;
+    // A modified old record is never accepted as a duplicate.
+    NSMutableData *tampered=[packet mutableCopy]; ((uint8_t *)tampered.mutableBytes)[8]^=1;
+    output.value=tampered;
+    [ble peripheral:(CBPeripheral *)peer didUpdateValueForCharacteristic:output error:nil];
+    assert(ble.failure && !ble.delivered && ble.receiveSequence==3 && peer.writes==3);
+    puts("BLE acknowledged returns: lost ACK retried, action delivered once, fresh ACK nonces, flow control and tamper rejection passed");
+}
+
+static void testLiveVideoRecovery(void) {
+    DMClassicBridge *bridge=[DMClassicBridge new];
+    bridge.client=-1; bridge.pending=[NSMutableData data]; bridge.videoStartupRemaining=69;
+    uint8_t startup[69]={0}; assert([bridge receiveVideo:startup length:69]);
+    [bridge.pending setLength:0];
+    uint8_t packet[16]={0}; packet[11]=4; packet[12]=1; packet[13]=2;
+    assert([bridge receiveVideo:packet length:14]);
+    assert(bridge.pending.length==0 && bridge.videoPacket.length==14);
+    bridge.wifiNonce=[NSMutableData dataWithLength:32];
+    DMClassicWire recovery; dm_classic_wire_init_video_only(&recovery);
+    recovery.reset_video=DMResetVideo;
+    const uint8_t reset[]={ 'D','M','B','T','0','0','0','6',8,0,0,0,8,0,0,0,0,0,0,3,232 };
+    for (size_t i=0;i<sizeof(reset);i++)
+        assert(dm_classic_wire_feed(&recovery,reset+i,1,DMVideo,DMEvent,(__bridge void *)bridge));
+    assert(bridge.videoPacket.length==0 && bridge.videoReceived==1000);
+    uint8_t session[12]={0x80,0,0,0,0,0,1,64,0,0,2,128};
+    for (size_t i=0;i<12;i++) assert([bridge receiveVideo:session+i length:1]);
+    assert(bridge.pending.length==12);
+    [bridge.pending setLength:0]; bridge.wifiIsUSB=YES; bridge.wifiSocket=42;
+    assert([bridge receiveVideo:session length:12]);
+    assert(((const uint8_t *)bridge.pending.bytes)[3]&2);
+    bridge.wifiIsUSB=NO;
+    [bridge.pending setLength:0];
+    assert([bridge receiveVideo:session length:12]);
+    assert(!(((const uint8_t *)bridge.pending.bytes)[3]&2));
+    for (size_t i=0;i<16;i++) assert([bridge receiveVideo:packet+i length:1]);
+    assert(bridge.pending.length==28 && bridge.videoReceived==1052);
+    assert(!DMResetVideo((__bridge void *)bridge,999));
+    [bridge.pending setLength:0];
+    NSMutableData *large=[NSMutableData dataWithLength:256*1024+12];
+    uint8_t *largeHeader=large.mutableBytes; largeHeader[9]=4; // 256 KiB IDR
+    for (NSUInteger offset=0;offset<large.length;) {
+        NSUInteger count=MIN((NSUInteger)16384,large.length-offset);
+        assert([bridge receiveVideo:largeHeader+offset length:count]); offset+=count;
+    }
+    assert(bridge.pending.length==large.length && !bridge.videoPacket.length);
+    puts("Live fallback: partial codec packet discarded, fresh session/frame delivered, cumulative offset validated");
+}
+
 int main(int argc, const char *argv[]) {
     @autoreleasepool {
+        assert(DMInputPacketLimit(512,20)==128);
+        assert(DMInputPacketLimit(512,182)==182);
+        assert(DMInputPacketLimit(512,512)==512);
+        assert(DMInputPacketLimit(100,182)==100);
+        testLiveVideoRecovery();
+        testUSBSelection();
+        testStreamingInputFlowControl();
+        testAcknowledgedReturns();
         TestWirelessStartupAppearance();
         if (argc==2 && !strcmp(argv[1],"--wire-only")) return 0;
         // A loading client may already have consumed/closed the listener before

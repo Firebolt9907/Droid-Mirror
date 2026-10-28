@@ -8,13 +8,19 @@
 static struct sc_key_event last_key;
 static uint64_t last_ack;
 static unsigned clipboard_updates;
+static bool synthetic_paste;
 static struct sc_hid_keyboard hid;
 static struct sc_hid_input report;
 
 char *test_clipboard_text(void) { return SDL_strdup("test fixture, not the user's clipboard"); }
 bool test_push_msg(struct sc_controller *controller, const struct sc_control_msg *msg) {
     assert(msg->type == SC_CONTROL_MSG_TYPE_SET_CLIPBOARD);
-    assert(msg->set_clipboard.sequence == 1 && !msg->set_clipboard.paste);
+    if (synthetic_paste) {
+        assert(msg->set_clipboard.sequence == SC_SEQUENCE_INVALID && msg->set_clipboard.paste);
+        assert(!strcmp(msg->set_clipboard.text, "😀 https://example.com/"));
+    } else {
+        assert(msg->set_clipboard.sequence == 1 && !msg->set_clipboard.paste);
+    }
     ++clipboard_updates;
     free(msg->set_clipboard.text);
     return true;
@@ -60,5 +66,16 @@ int main(void) {
     event.type = SDL_EVENT_KEY_DOWN; event.key = SDLK_RCTRL; event.scancode = SDL_SCANCODE_RCTRL; event.mod = SDL_KMOD_RCTRL;
     sc_input_manager_process_key(&im, &event);
     assert(report.data[0] == SC_HID_MOD_RIGHT_GUI);
+    synthetic_paste = true;
+    SDL_Event text = { .type = SC_EVENT_SYNTHETIC_TEXT };
+    text.user.data1 = strdup("😀 https://example.com/");
+    sc_input_manager_handle_event(&im, &text);
+    assert(clipboard_updates == 2);
+    // Text injection must not emit a physical A (or any other HID key).
+    assert(last_key.scancode == SC_SCANCODE_RGUI);
+    im.disconnected = true;
+    text.user.data1 = strdup("discard while disconnected");
+    sc_input_manager_handle_event(&im, &text);
+    assert(clipboard_updates == 2);
     puts("PASS: real input handler and HID reports, Cmd+C, Cmd+V clipboard synchronization/ack, modifier release, Ctrl→GUI, default Super shortcut bypass");
 }

@@ -5,6 +5,7 @@
 @property(nonatomic, readonly) NSUInteger pendingBytes;
 @property(nonatomic, readonly) BOOL hasWork;
 @property(nonatomic, readonly) NSTimeInterval motionDelay;
+@property(nonatomic) BOOL latestMotionOnly;
 - (instancetype)initWithClock:(NSTimeInterval (^)(void))clock;
 - (void)synchronizePhoneClock:(uint64_t)phone macClock:(uint64_t)mac;
 - (BOOL)appendRecords:(NSData *)bytes;

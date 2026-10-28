@@ -145,7 +145,7 @@ struct OnboardingView: View {
             Text(model.devices.isEmpty ? "No phones found yet. Finish system Bluetooth pairing, then find paired phones again." : "Choose the same Mac in the phone app when asked.")
                 .font(.callout).foregroundStyle(.secondary)
             if model.preferences.transport != .bluetoothClassic {
-                Text("Choose Find paired phones to use Automatic (Bluetooth → Wi-Fi) for this setup.").font(.callout)
+                Text("Choose Find paired phones to use Automatic (USB / Wi-Fi / Bluetooth) for this setup.").font(.callout)
             }
             if busy { Text("Finish or stop the current connection before changing pairing.").foregroundStyle(.secondary) }
             if !model.isRefreshing { Text(model.status).font(.caption).foregroundStyle(.secondary) }
@@ -195,7 +195,7 @@ struct OnboardingView: View {
             } else {
                 instruction("1", "Enable the background bridge", "On the phone’s Pair DroidMirror step, tap Enable background bridge. Leave it enabled for future sessions.")
                 instruction("2", "Lock your phone", "Press the phone’s power button before starting. Mirroring waits while the phone is unlocked and in use.")
-                instruction("3", "Press Mirror my phone", "Bluetooth starts the connection. On the same Wi-Fi, video can upgrade automatically. Wireless debugging is optional.")
+                instruction("3", "Press Mirror my phone", "Bluetooth starts the connection. Plug in USB for video without ADB and approve the Android accessory prompt, or use the same Wi-Fi for automatic video upgrades. Wireless debugging is optional.")
             }
             if model.isStarting { ProgressView("Connecting to your phone…") }
             Text(model.status).font(.callout).foregroundStyle(.secondary)

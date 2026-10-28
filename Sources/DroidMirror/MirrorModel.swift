@@ -313,6 +313,8 @@ final class MirrorModel: ObservableObject {
         classicBluetooth.onEvent = { [weak self] event in
             guard let self else { return }
             switch event {
+            case .usbActive:
+                self.status = "USB video · no added playback buffer · Bluetooth controls"
             case .wirelessActive:
                 let resolution = wifiMaxSize == 0 ? "native resolution" : "\(wifiMaxSize) px"
                 self.status = "Peer video · \(resolution) · up to \(wifiFPS) fps · \(wifiBitRate) Mbps target"

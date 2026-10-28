@@ -6,12 +6,12 @@ import java.io.IOException;
 public final class VideoWindow {
     private int capacity;
     private final long timeoutMillis;
-    private long sent, acknowledged;
+    private long sent, acknowledged, discarded;
     private long waitNanos;
     private long progressNanos = System.nanoTime();
     // Mac detects silent ADB loss after four seconds, then signals over BLE.
     private static final long WIRELESS_RECOVERY_MILLIS = 12000;
-    // Every unacknowledged byte must be replayed over Classic after Wi-Fi loss.
+    // Bound Wi-Fi backlog before live recovery discards unacknowledged video.
     // With 40 ms ACKs this still admits the default 12 Mbps Wi-Fi profile while
     // avoiding megabytes of stale video ahead of the restored Bluetooth encoder.
     public static final int WIRELESS_WINDOW_BYTES = 128 * 1024;
@@ -32,9 +32,16 @@ public final class VideoWindow {
         awaitCredit(sent + count, 0);
         sent += count;
     }
+    public synchronized boolean reserve(int count, java.util.function.BooleanSupplier current) throws IOException {
+        if (count<=0 || count>capacity) throw new IOException("Invalid video reservation");
+        awaitCredit(sent+count,0);
+        if (!current.getAsBoolean()) return false;
+        sent+=count;
+        return true;
+    }
     private void awaitCredit(long end, long received) throws IOException {
         long startedWaiting = System.nanoTime();
-        while (!closed && end - Math.max(acknowledged, received) > capacity) {
+        while (!closed && end - Math.max(Math.max(acknowledged, discarded), received) > capacity) {
             long timeout = wireless ? Math.max(timeoutMillis, WIRELESS_RECOVERY_MILLIS) : timeoutMillis;
             long remaining = timeout * 1_000_000 - (System.nanoTime() - Math.max(startedWaiting, progressNanos));
             if (remaining <= 0) throw new IOException("Mac video acknowledgement stalled");
@@ -54,7 +61,7 @@ public final class VideoWindow {
         if (count < acknowledged || count > sent) throw new IOException("Invalid video acknowledgement");
         if (count > acknowledged) progressNanos = System.nanoTime();
         acknowledged = count;
-        if (!wireless && bluetoothBudget != null)
+        if (!wireless && bluetoothBudget != null && count>=discarded)
             capacity = bluetoothBudget.acknowledge(count, System.nanoTime() / 1000000);
         notifyAll();
     }
@@ -65,11 +72,17 @@ public final class VideoWindow {
         capacity = WIRELESS_WINDOW_BYTES;
         notifyAll();
     }
+    public synchronized long discardPending() {
+        discarded=sent;
+        progressNanos=System.nanoTime();
+        notifyAll();
+        return sent;
+    }
     public synchronized long acknowledgedBytes() { return acknowledged; }
     public synchronized void useBluetoothCapacity() {
         wireless = false;
         progressNanos = System.nanoTime();
-        if (bluetoothBudget != null) bluetoothBudget.reset(acknowledged);
+        if (bluetoothBudget != null) bluetoothBudget.reset(Math.max(acknowledged,discarded));
         capacity = BluetoothWire.VIDEO_WINDOW_BYTES;
         notifyAll();
     }
@@ -79,5 +92,5 @@ public final class VideoWindow {
     public synchronized long deliveredBytesPerSecond() {
         return bluetoothBudget == null || wireless ? 0 : bluetoothBudget.deliveredBytesPerSecond();
     }
-    public synchronized long inFlightBytes() { return sent - acknowledged; }
+    public synchronized long inFlightBytes() { return sent - Math.max(acknowledged,discarded); }
 }

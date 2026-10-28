@@ -83,6 +83,12 @@ static NSData *DMUpgradeProof(NSData *key, const char *direction, const uint8_t 
 @property(nonatomic) NSTimeInterval latencyBadSince;
 @property(nonatomic) NSTimeInterval latencyRetryAfter;
 @property(nonatomic) BOOL wifiIsPeer;
+@property(nonatomic) BOOL wifiIsUSB;
+@property(nonatomic) void *usbLibrary;
+@property(nonatomic) void *usbHandle;
+@property(nonatomic) uint16_t usbPort;
+@property(nonatomic) int (*usbConnected)(void *);
+@property(nonatomic) void (*usbStop)(void *);
 @property(nonatomic) BOOL wifiInitial;
 @property(nonatomic) int wifiSocket;
 @property(nonatomic) BOOL probingWiFi;
@@ -138,6 +144,8 @@ static NSData *DMUpgradeProof(NSData *key, const char *direction, const uint8_t 
 @property(nonatomic, strong) id classicPeer;
 @property(nonatomic) NSTimeInterval lastHeartbeatSent;
 @property(nonatomic) uint64_t videoReceived;
+@property(nonatomic, strong) NSMutableData *videoPacket;
+@property(nonatomic) NSUInteger videoStartupRemaining;
 @property(nonatomic) uint64_t lastVideoAcknowledged;
 @property(nonatomic) NSTimeInterval pendingSince;
 @property(nonatomic) NSTimeInterval lastData;
@@ -165,6 +173,13 @@ static NSData *DMUpgradeProof(NSData *key, const char *direction, const uint8_t 
 
 static bool DMVideo(void *context, const uint8_t *bytes, size_t length) {
     return [(__bridge DMClassicBridge *)context receiveVideo:bytes length:length];
+}
+static bool DMResetVideo(void *context, uint64_t offset) {
+    DMClassicBridge *bridge=(__bridge DMClassicBridge *)context;
+    if (bridge.wifiActive || !bridge.wifiNonce || offset<bridge.videoReceived || bridge.videoStartupRemaining) return false;
+    [bridge.videoPacket setLength:0];
+    bridge.videoReceived=offset;
+    return true;
 }
 static bool DMAppearance(void *context, const uint8_t *bytes, size_t length) {
     return [(__bridge DMClassicBridge *)context receiveAppearance:bytes length:length];
@@ -198,8 +213,27 @@ static void DMWirelessLatency(void *context, uint64_t timestamp) {
         } else _latencyBadSince=0;
     }
 }
+- (void)startUSB {
+    NSString *executable=NSProcessInfo.processInfo.arguments.firstObject;
+    NSString *library=[[[executable stringByDeletingLastPathComponent] stringByDeletingLastPathComponent]
+        stringByAppendingPathComponent:@"Frameworks/libdroidmirror_usb.dylib"];
+    _usbLibrary=dlopen(library.fileSystemRepresentation,RTLD_NOW|RTLD_LOCAL);
+    void *(*start)(uint16_t *)=_usbLibrary ? dlsym(_usbLibrary,"dm_usb_start") : NULL;
+    _usbConnected=_usbLibrary ? dlsym(_usbLibrary,"dm_usb_connected") : NULL;
+    _usbStop=_usbLibrary ? dlsym(_usbLibrary,"dm_usb_stop") : NULL;
+    if (start && _usbConnected && _usbStop) { uint16_t port=0; _usbHandle=start(&port); _usbPort=port; }
+}
+- (void)pollUSB {
+    if (!_usbHandle || !_usbConnected(_usbHandle) || _failing || _benchmark || _probingWiFi) return;
+    if (_wifiSocket>=0) {
+        if (!_wifiIsUSB && _wifiActive) [self fallbackToBluetooth];
+        return;
+    }
+    if (!_wifiRecovering) [self probeWiFi:_usbPort];
+}
 - (void)probePeer {
     if (_failing || _benchmark || _wifiActive || _wifiRecovering || _probingWiFi || _wifiSocket >= 0) return;
+    if (_usbHandle && _usbConnected(_usbHandle)) { [self pollUSB]; return; }
     if (!_peerHandle) {
         NSString *executable=NSProcessInfo.processInfo.arguments.firstObject;
         NSString *library=[[[executable stringByDeletingLastPathComponent] stringByDeletingLastPathComponent]
@@ -230,16 +264,20 @@ static void DMWirelessLatency(void *context, uint64_t timestamp) {
     [self probeWiFi:_peerPort];
 }
 - (void)stopPeer {
+    if (_usbHandle && _usbStop) _usbStop(_usbHandle);
+    _usbHandle=NULL; _usbPort=0;
     if (_peerHandle && _peerStop) _peerStop(_peerHandle);
     _peerHandle=NULL; _peerPort=0; _peerAudioPort=0;
     // Rust threads are stopped before the dylib may be unloaded at process exit.
 }
 - (void)probeWiFi:(uint16_t)port {
     if (_probingWiFi || _wifiSocket >= 0 || _wifiRecovering || _benchmark) return;
+    if (port!=_usbPort && _usbHandle && _usbConnected(_usbHandle)) { [self pollUSB]; return; }
     _probingWiFi=YES;
     _candidateLatency=(DMLatencySamples){0};
     _latencyBadSince=0;
     BOOL isPeer=port == _peerPort;
+    BOOL isUSB=port == _usbPort && _usbPort!=0;
     if (_videoProbeAttempts++ < 3) fprintf(stderr,"Trying %s video\n",port == _peerPort ? "direct IP (LAN/VPN)" : "wireless ADB");
     NSData *key=_pairingKey;
     NSData *profile=_wirelessProfile;
@@ -342,6 +380,7 @@ static void DMWirelessLatency(void *context, uint64_t timestamp) {
             fcntl(fd,F_SETFL,O_NONBLOCK);
             fprintf(stderr,"Video handoff authenticated over %s\n",port == self.peerPort ? "direct IP (LAN/VPN)" : "wireless ADB");
             self.wifiIsPeer=isPeer;
+            self.wifiIsUSB=isUSB;
             self.wifiInitial=initial;
             self.audioForwardPort=[self.audioForwards[@(port)] unsignedShortValue];
             self.wifiNonce=nonce;
@@ -445,18 +484,19 @@ static void DMWirelessLatency(void *context, uint64_t timestamp) {
             return;
         }
         if (!_wifiInitial && !dm_classic_wire_complete(&_wire)) [self fail:@"Wi-Fi handoff split a Bluetooth record"];
-        const uint8_t ready=1;
+        const uint8_t ready=_wifiIsUSB ? 2 : 1;
         ssize_t sent=send(_wifiSocket,&ready,1,0);
         if (sent < 0 && (errno==EAGAIN || errno==EWOULDBLOCK || errno==EINTR)) return;
         if (sent != 1) { [self fallbackToBluetooth]; return; }
         _wifiActive=YES;
         const uint8_t audioExtension=4;
         if (send(_wifiSocket,&audioExtension,1,0) != 1) { [self fallbackToBluetooth]; return; }
-        printf("EVENT WIFI_ACTIVE\n"); fflush(stdout);
+        printf("EVENT %s\n",_wifiIsUSB ? "USB_ACTIVE" : "WIFI_ACTIVE"); fflush(stdout);
     }
     // Drain enough per tick for the Wi-Fi bitrate, while bounding queued video
     // and yielding to BLE input and the main run loop.
     for (size_t total=0; total<512*1024;) {
+        if (_pending.length>=DMQueueLimit) return;
         size_t capacity=MIN((NSUInteger)16384,DMQueueLimit-_pending.length);
         if (!capacity) return;
         uint8_t buffer[16384]; n=recv(_wifiSocket,buffer,capacity,0);
@@ -540,6 +580,11 @@ static void DMWirelessLatency(void *context, uint64_t timestamp) {
         id value = [NSJSONSerialization JSONObjectWithData:_appearanceBuffer options:0 error:nil];
         if (![value isKindOfClass:NSDictionary.class]) return NO;
         DMCachePhoneAppearance(value);
+        id wallpaper = value[@"wallpaper"];
+        if ([wallpaper isKindOfClass:NSString.class] && [wallpaper length])
+            fprintf(stderr, "Phone appearance: received fresh wallpaper (%lu encoded bytes)\n", (unsigned long)[wallpaper length]);
+        else
+            fprintf(stderr, "Phone appearance: no wallpaper received; retaining cached preview\n");
         [_appearanceBuffer setLength:0];
     }
     return YES;
@@ -757,9 +802,45 @@ static void DMWirelessLatency(void *context, uint64_t timestamp) {
     return YES;
 }
 - (BOOL)receiveVideo:(const uint8_t *)data length:(size_t)length {
-    if (length > DMQueueLimit - _pending.length) return NO;
-    if (!_pending.length) _pendingSince = NSDate.timeIntervalSinceReferenceDate;
-    [_pending appendBytes:data length:length]; [self flush]; _videoReceived += length; return YES;
+    _videoReceived += length;
+    while (length) {
+        if (_videoStartupRemaining) {
+            size_t take=MIN(length,_videoStartupRemaining);
+            [_pending appendBytes:data length:take];
+            _videoStartupRemaining-=take; data+=take; length-=take;
+            continue;
+        }
+        if (!_videoPacket) _videoPacket=[NSMutableData data];
+        NSUInteger target=12;
+        if (_videoPacket.length>=12) {
+            const uint8_t *h=_videoPacket.bytes;
+            uint32_t size=(uint32_t)h[8]<<24 | (uint32_t)h[9]<<16 | (uint32_t)h[10]<<8 | h[11];
+            if (!(h[0]&0x80)) {
+                if (!size || size>8*1024*1024) return NO;
+                target+=size;
+            }
+        }
+        size_t take=MIN(length,target-_videoPacket.length);
+        [_videoPacket appendBytes:data length:take]; data+=take; length-=take;
+        if (_videoPacket.length<12) continue;
+        const uint8_t *h=_videoPacket.bytes;
+        uint32_t size=(uint32_t)h[8]<<24 | (uint32_t)h[9]<<16 | (uint32_t)h[10]<<8 | h[11];
+        if (!(h[0]&0x80) && _videoPacket.length==12) {
+            if (!size || size>8*1024*1024) return NO;
+            continue;
+        }
+        if (_videoPacket.length==target) {
+            if (_pending.length>DMQueueLimit || _videoPacket.length>8*1024*1024+12) return NO;
+            if (h[0]&0x80) {
+                uint8_t *header=_videoPacket.mutableBytes;
+                // Local renderer extension: bypass its optional jitter delay on USB.
+                if (_wifiIsUSB && _wifiSocket>=0) header[3]|=2;
+            }
+            [_pending appendData:_videoPacket]; [_videoPacket setLength:0];
+        }
+    }
+    if (_pending.length && !_pendingSince) _pendingSince=NSDate.timeIntervalSinceReferenceDate;
+    [self flush]; return YES;
 }
 - (void)receiveEvent:(uint8_t)event {
     if (event == 6) return; // Peer heartbeat keeps lastData fresh without log growth.
@@ -865,7 +946,9 @@ static void DMWirelessLatency(void *context, uint64_t timestamp) {
             [bridge publishAudioState];
         }];
     _pending = [NSMutableData data];
+    _videoStartupRemaining=69;
     dm_classic_wire_init_video_only(&_wire);
+    _wire.reset_video=DMResetVideo;
     dm_classic_wire_init(&_returnWire);
     const uint8_t returnMagic[]="DMBT0005";
     dm_classic_wire_feed_ble(&_returnWire,returnMagic,8,DMReject,DMEvent,DMControl,DMPeerAddress,(__bridge void *)self);
@@ -918,7 +1001,7 @@ static void DMWirelessLatency(void *context, uint64_t timestamp) {
         // A quiet period ends the bounded diagnostic; the script also requires
         // exact agreement with the sender's total before accepting the sample.
         if (self.benchmark && self.benchmarkBytes && now-self.benchmarkLast > 2.0) [self finishBenchmark];
-        [self flush]; [self pollControl]; [self pollWiFi];
+        [self flush]; [self pollControl]; [self pollWiFi]; [self pollUSB];
         if (self.outgoingSince && now - self.outgoingSince > 1.0) [self fail:@"Bluetooth input stalled"];
         if (self.controlSince && now - self.controlSince > 1.0) [self fail:@"Control response stalled"];
         if (self.pendingSince && now - self.pendingSince > 1.0) [self fail:@"Video bridge stalled for one second; reconnect"];
@@ -935,7 +1018,7 @@ static void DMWirelessLatency(void *context, uint64_t timestamp) {
                 [self fail:@"Video client closed"];
         }
     }];
-    if (!_benchmark) [self probePeer];
+    if (!_benchmark) { [self startUSB]; [self pollUSB]; [self probePeer]; }
     _connectionStage = @"initializing the Mac Bluetooth framework";
     // New macOS IOBluetooth shims initialize their Classic manager asynchronously.
     // Opening in start(), before the run loop runs, reports powered-off API misuse.

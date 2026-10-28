@@ -170,6 +170,15 @@ int main(void) {
         // A second frame must not restart or extend the reveal.
         DMFinishConnectingPhone();
         assert([overlay.layer animationForKey:@"firstFrameReveal"]);
+        // SDL may reinsert the drawable while the animation is running.
+        NSView *metalView = native.contentView.subviews.firstObject;
+        [native.contentView addSubview:metalView positioned:NSWindowAbove relativeTo:nil];
+        metalView.layer.zPosition = overlay.layer.zPosition + 3;
+        DroidMirrorVideoSurfaceReady();
+        assert(native.contentView.subviews.lastObject == overlay);
+        assert(overlay.layer.zPosition > metalView.layer.zPosition);
+        assert([overlay.layer animationForKey:@"firstFrameReveal"]);
+        metalView.layer.zPosition = 0;
         // A failure/retry during the fade cancels its stale completion.
         PresentState(statePath, @"Disconnected during reveal", NO);
         assert(![overlay.layer animationForKey:@"firstFrameReveal"] && overlay.layer.opacity == 1);

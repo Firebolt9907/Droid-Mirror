@@ -1,6 +1,6 @@
 package com.genymobile.scrcpy.control;
 
-/** Mouse-wheel-only local touch playback; no sleeps, input queue, or network reads. */
+/** Relative scroll playback; native trackpad momentum is already in the deltas. */
 public final class WheelScroll {
     public interface Sink { void touch(int action, int x, int y); }
     private final int width, height, anchorX, anchorY;
@@ -34,7 +34,8 @@ public final class WheelScroll {
         dx *= scale; dy *= scale;
         if (Math.abs(dx) > 0.001 || Math.abs(dy) > 0.001) {
             if (x+dx < 1 || x+dx > width-2 || y+dy < 1 || y+dy > height-2) {
-                // Re-anchor long wheel bursts locally; no extra Bluetooth traffic.
+                // Commit the completed drag before re-anchoring. CANCEL makes
+                // pagers roll back the page transition instead of completing it.
                 sink.touch(1, (int)Math.round(x), (int)Math.round(y));
                 // Stay as close to the cursor as possible while leaving room
                 // for this step, including when the cursor is at the border.
@@ -53,10 +54,15 @@ public final class WheelScroll {
         }
         // Let the final position settle so a wheel burst does not add an
         // unintended touchscreen fling after the wheel itself has stopped.
-        if (Math.abs(pendingX) < 0.001 && Math.abs(pendingY) < 0.001 && now-lastCommand >= 80 && now-lastMove >= 50) cancel();
+        if (Math.abs(pendingX) < 0.001 && Math.abs(pendingY) < 0.001 && now-lastCommand >= 80 && now-lastMove >= 50) finish();
+    }
+    private void finish() {
+        if (active) sink.touch(1,(int)Math.round(x),(int)Math.round(y));
+        active = false; pendingX = pendingY = 0;
     }
     public void cancel() {
-        if (active) sink.touch(1,(int)Math.round(x),(int)Math.round(y));
+        // Reserve CANCEL for actual interruptions, never successful scrolling.
+        if (active) sink.touch(3,(int)Math.round(x),(int)Math.round(y));
         active = false; pendingX = pendingY = 0;
     }
 }

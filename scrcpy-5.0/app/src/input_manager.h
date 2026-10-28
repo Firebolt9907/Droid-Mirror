@@ -38,6 +38,9 @@ struct sc_input_manager {
 
     uint8_t mouse_buttons_state; // OR of enum sc_mouse_button values
 
+    double wheel_remainder_x;
+    double wheel_remainder_y;
+
     // Tracks the number of identical consecutive shortcut key down events.
     // Not to be confused with event->repeat, which counts the number of
     // system-generated repeated key presses.

@@ -55,8 +55,10 @@ static BOOL DMSamePointerMove(NSData *previous, NSData *next) {
     NSTimeInterval (^_clock)(void);
     NSTimeInterval _lastMotion;
     uint64_t _lastMotionBucket;
+    NSData *_lastMotionBytes;
     BOOL _clockReady;
     int64_t _phoneClockOffset;
+    BOOL _latestMotionOnly;
 }
 - (instancetype)init {
     return [self initWithClock:^{ return NSProcessInfo.processInfo.systemUptime; }];
@@ -74,6 +76,9 @@ static BOOL DMSamePointerMove(NSData *previous, NSData *next) {
     if (_active || _ackPending || _fallback || !_records.count || !_records.firstObject.motion || _lastMotion < 0) return 0;
     // Flush the final position before a release/key/other state transition.
     if (_records.count > 1 || _records.firstObject.motionBucket != _lastMotionBucket) return 0;
+    // The second pointer of a pinch belongs to the same sample. Do not
+    // throttle it for another frame after transmitting the first pointer.
+    if (!DMSamePointerMove(_lastMotionBytes, _records.firstObject.bytes)) return 0;
     return MAX(0, _lastMotion + 1.0 / 60.0 - _clock());
 }
 - (BOOL)appendRecords:(NSData *)bytes {
@@ -112,7 +117,8 @@ static BOOL DMSamePointerMove(NSData *previous, NSData *next) {
             NSMutableData *record = [NSMutableData dataWithBytes:&type length:1];
             [record appendBytes:&size length:4]; [record appendBytes:raw+offset length:count];
             DMBleQueuedRecord *queued = [DMBleQueuedRecord new]; queued.bytes = record;
-            queued.wheel = messageStart && length == 21 && raw[0] == 24;
+            queued.wheel = messageStart && length == 21 && raw[0] == 24
+                && (DMRead32(raw+13) || DMRead32(raw+17));
             queued.motion = messageStart && ((length == 32 && raw[0] == 2) || (length == 40 && raw[0] == 23))
                 && (raw[1] == 2 || raw[1] == 7);
             uint64_t sourceTime = (uint64_t)(_clock() * 1000);
@@ -130,12 +136,57 @@ static BOOL DMSamePointerMove(NSData *previous, NSData *next) {
         consumed += length;
     }
     [input replaceBytesInRange:NSMakeRange(0, consumed) withBytes:NULL length:0]; _input = input; _remainingControl = remaining;
-    for (DMBleQueuedRecord *record in records) {
-        // Replace unsent moves only within one 60 Hz source-time bucket.
-        // Retain samples from earlier buckets even during BLE backpressure.
-        // Keep the same pointer/state requirement; DOWN/UP, keys, scrolling and other pointers are barriers.
-        if (_records.count && _records.lastObject.motion && record.motion && _records.lastObject.motionBucket == record.motionBucket && DMSamePointerMove(_records.lastObject.bytes, record.bytes)) {
-            _pendingBytes -= _records.lastObject.bytes.length; [_records removeLastObject];
+    for (DMBleQueuedRecord *record in records) [self enqueueRecord:record];
+    return YES;
+}
+- (BOOL)latestMotionOnly { return _latestMotionOnly; }
+- (void)setLatestMotionOnly:(BOOL)value {
+    if (_latestMotionOnly==value) return;
+    _latestMotionOnly=value;
+    if (!value) return;
+    NSArray *queued=[_records copy]; [_records removeAllObjects];
+    for (DMBleQueuedRecord *record in queued) {
+        _pendingBytes-=record.bytes.length;
+        [self enqueueRecord:record];
+    }
+}
+- (void)enqueueRecord:(DMBleQueuedRecord *)record {
+        const uint8_t *payload=(const uint8_t *)record.bytes.bytes+5;
+        if (record.bytes.length==26 && payload[0]==24 && !DMRead32(payload+13) && !DMRead32(payload+17)) {
+            // A fresh trackpad gesture cancels unsent momentum, but never
+            // edits a partly transmitted envelope or crosses other input.
+            while (_records.lastObject.wheel) {
+                _pendingBytes-=_records.lastObject.bytes.length;
+                [_records removeLastObject];
+            }
+        }
+        // Keep a short source-time velocity history under backpressure (six
+        // 60 Hz buckets). Two arbitrarily close samples yield a noisy fling.
+        // Preserve edges, state barriers and _active.
+        // Pinches alternate pointers. Search trailing compatible moves so each
+        // pointer retains its current position. DOWN/UP, keys and scrolling
+        // remain barriers; in normal mode earlier source buckets do too. Never
+        // modify a record which has already started transmission (_active).
+        if (record.motion) {
+            for (NSUInteger i = _records.count; i > 0; --i) {
+                DMBleQueuedRecord *previous = _records[i - 1];
+                if (!previous.motion || (!_latestMotionOnly && previous.motionBucket != record.motionBucket)) break;
+                if (DMSamePointerMove(previous.bytes, record.bytes)) {
+                    if (_latestMotionOnly && previous.motionBucket<record.motionBucket
+                            && record.motionBucket-previous.motionBucket<6) {
+                        continue;
+                    }
+                    _pendingBytes -= previous.bytes.length;
+                    [_records removeObjectAtIndex:i - 1];
+                    if (!_latestMotionOnly) break;
+                    continue;
+                }
+                // Different button/pressure/screen states must not be crossed.
+                const uint8_t *a = (const uint8_t *)previous.bytes.bytes + 5;
+                const uint8_t *b = (const uint8_t *)record.bytes.bytes + 5;
+                if (previous.bytes.length != record.bytes.length || a[0] != b[0]
+                    || a[1] != b[1] || memcmp(a + 18, b + 18, 14)) break;
+            }
         }
         if (_records.count && _records.lastObject.wheel && record.wheel) {
             const uint8_t *a = (const uint8_t *)_records.lastObject.bytes.bytes + 5;
@@ -147,13 +198,11 @@ static BOOL DMSamePointerMove(NSData *previous, NSData *next) {
                     NSMutableData *merged=[_records.lastObject.bytes mutableCopy];
                     uint32_t x=CFSwapInt32HostToBig((uint32_t)(int32_t)dx), y=CFSwapInt32HostToBig((uint32_t)(int32_t)dy);
                     memcpy((uint8_t *)merged.mutableBytes+18,&x,4); memcpy((uint8_t *)merged.mutableBytes+22,&y,4);
-                    _records.lastObject.bytes=merged; continue;
+                    _records.lastObject.bytes=merged; return;
                 }
             }
         }
         [_records addObject:record]; _pendingBytes += record.bytes.length;
-    }
-    return YES;
 }
 - (void)synchronizePhoneClock:(uint64_t)phone macClock:(uint64_t)mac {
     _phoneClockOffset = (int64_t)phone - (int64_t)mac; _clockReady = YES;
@@ -181,7 +230,7 @@ static BOOL DMSamePointerMove(NSData *previous, NSData *next) {
             } else if (_records.count) {
                 if (self.motionDelay > 0) break;
                 DMBleQueuedRecord *record = _records.firstObject;
-                _active = record.bytes; if (record.motion) { _lastMotion = _clock(); _lastMotionBucket = record.motionBucket; }
+                _active = record.bytes; if (record.motion) { _lastMotion = _clock(); _lastMotionBucket = record.motionBucket; _lastMotionBytes = record.bytes; }
                 [_records removeObjectAtIndex:0];
             } else break;
             _offset = 0;

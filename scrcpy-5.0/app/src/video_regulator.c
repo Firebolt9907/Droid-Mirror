@@ -48,6 +48,7 @@ run_buffering(void *data) {
     struct sc_video_regulator *vr = data;
 
     assert(vr->delay > 0);
+    bool low_latency = false;
 
     for (;;) {
         sc_mutex_lock(&vr->mutex);
@@ -71,7 +72,7 @@ run_buffering(void *data) {
             sc_tick pts = SC_TICK_FROM_US(dpacket.frame->pts);
 
             bool timed_out = false;
-            while (!vr->stopped && !timed_out) {
+            while (!vr->stopped && !timed_out && !low_latency) {
                 sc_tick deadline = sc_clock_to_system_time(&vr->clock, pts)
                                  + vr->delay;
                 if (deadline > max_deadline) {
@@ -99,6 +100,7 @@ run_buffering(void *data) {
                                                 dpacket.frame);
         } else {
             assert(dpacket.type == SC_DELAYED_PACKET_TYPE_SESSION);
+            low_latency = dpacket.session.video.low_latency;
             sc_mutex_unlock(&vr->mutex);
             result = sc_frame_source_sinks_push_session(&vr->frame_source,
                                                         &dpacket.session);

@@ -19,6 +19,7 @@ final class ClassicBluetoothTransport {
         case phoneOn = "PHONE_ON", sessionEnded = "SESSION_ENDED", phoneLocalUse = "PHONE_LOCAL_USE"
         case streamStarted = "STREAM_STARTED", captureFailed = "CAPTURE_FAILED", phoneInUse = "PHONE_IN_USE"
         case pinPaused = "PIN_PAUSED", pinFailed = "PIN_FAILED"
+        case usbActive = "USB_ACTIVE"
         case wirelessActive = "WIFI_ACTIVE", bluetoothActive = "BLUETOOTH_ACTIVE", wirelessRecovering = "WIFI_RECOVERING"
     }
     private func pollEvents() {
@@ -31,7 +32,7 @@ final class ClassicBluetoothTransport {
                 if line.hasPrefix("EVENT "), let event = Event(rawValue: String(line.dropFirst(6))) {
                     if event == .streamStarted { attemptWirelessUpgrade() }
                     if event == .wirelessRecovering { upgradeTask?.cancel(); upgradeTask=nil }
-                    if event == .wirelessActive { wirelessActive = true; upgradeTask?.cancel(); upgradeTask=nil }
+                    if event == .wirelessActive || event == .usbActive { wirelessActive = true; upgradeTask?.cancel(); upgradeTask=nil }
                     if event == .bluetoothActive { wirelessActive=false; attemptWirelessUpgrade() }
                     onEvent?(event)
                 }
@@ -235,7 +236,28 @@ final class ClassicBluetoothTransport {
         if process?.isRunning == true { process?.terminate() }
         process = nil
         try? outputHandle?.close(); outputHandle = nil
-        if let outputURL { try? FileManager.default.removeItem(at: outputURL) }
+        if let outputURL {
+            // Keep the original file (including any final helper writes after
+            // termination) so a disconnect does not erase its own diagnostics.
+            let files = FileManager.default
+            let directory = files.homeDirectoryForCurrentUser
+                .appendingPathComponent("Library/Logs/DroidMirror/Connections", isDirectory: true)
+            do {
+                try files.createDirectory(at: directory, withIntermediateDirectories: true)
+                try files.moveItem(at: outputURL, to: directory.appendingPathComponent(outputURL.lastPathComponent))
+                let logs = try files.contentsOfDirectory(at: directory,
+                    includingPropertiesForKeys: [.contentModificationDateKey])
+                    .filter { $0.lastPathComponent.hasPrefix("DroidMirror-Bluetooth-") && $0.pathExtension == "log" }
+                    .sorted {
+                        ((try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast)
+                            > ((try? $1.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast)
+                    }
+                for old in logs.dropFirst(20) { try? files.removeItem(at: old) }
+            } catch {
+                // Leave the temporary log intact if archiving fails.
+                NSLog("Could not archive connection log %@: %@", outputURL.path, error.localizedDescription)
+            }
+        }
         outputURL = nil
     }
 }

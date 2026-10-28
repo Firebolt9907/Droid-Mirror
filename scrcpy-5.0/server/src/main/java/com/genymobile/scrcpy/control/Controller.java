@@ -119,6 +119,7 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
 
     private static final long POINTER_ID_WHEEL = -4;
     private WheelScroll wheelScroll;
+    private boolean loggedRelativeScroll;
     private java.util.concurrent.ScheduledFuture<?> wheelTask;
     private Size wheelSize;
     private final java.util.Set<Long> directPointers = new java.util.HashSet<>();
@@ -127,7 +128,7 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
 
     private long lastTouchDown;
     private final TouchEventTime touchEventTime = new TouchEventTime();
-    private long traceDown, traceArrival, traceLast, traceGap, tracePointer;
+    private long traceDown, traceSourceDown, traceArrival, traceLast, traceGap, tracePointer;
     private int traceMoves, traceGestures;
     private boolean traceOutside;
     private final PointersState pointersState = new PointersState();
@@ -774,15 +775,20 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
 
     private synchronized void handleWheelScroll(ControlMessage message) {
         if (pillStopped || !directPointers.isEmpty()) return;
+        if (!loggedRelativeScroll) {
+            loggedRelativeScroll = true;
+            Ln.i("Relative scroll playback v70: commit completed drags; cancel interruptions only");
+        }
         Position anchor = message.getPosition(); Size size = anchor.getScreenSize();
         int dx = (int)message.getHScroll(), dy = (int)message.getVScroll();
         if (size.getWidth() < 4 || size.getHeight() < 4 || getEventPointAndDisplayId(anchor) == null
                 || Math.abs((long)dx) > size.getWidth()*8L || Math.abs((long)dy) > size.getHeight()*8L) return;
+        if (dx == 0 && dy == 0) { stopWheelScroll(); return; }
         if (wheelScroll == null || !size.equals(wheelSize)) {
             stopWheelScroll(); wheelSize = size;
             wheelScroll = new WheelScroll(size.getWidth(),size.getHeight(),anchor.getPoint().getX(),anchor.getPoint().getY(),
                 (action,x,y) -> injectTouch(action,POINTER_ID_WHEEL,new Position(new Point(x,y),size),
-                    action == MotionEvent.ACTION_UP ? 0f : 1f,0,0,-1));
+                    action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL ? 0f : 1f,0,0,-1));
         }
         cancelPillClicks();
         wheelScroll.add(dx,dy,SystemClock.uptimeMillis());
@@ -799,7 +805,8 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
 
     private boolean injectTouch(int action, long pointerId, Position position, float pressure, int actionButton, int buttons, long eventTime) {
         long received = SystemClock.uptimeMillis();
-        long now = pointerId == POINTER_ID_WHEEL ? received : touchEventTime.resolve(eventTime, received);
+        long now = pointerId == POINTER_ID_WHEEL ? received : touchEventTime.resolveGesture(eventTime, received,
+                action == MotionEvent.ACTION_DOWN && pointersState.isEmpty());
         if (now < 0) { Ln.w("Ignoring stale or invalid timestamped touch"); return false; }
 
         Pair<Point, Integer> pair = getEventPointAndDisplayId(position);
@@ -809,20 +816,23 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
 
         Point point = pair.first;
         int targetDisplayId = pair.second;
+        if (eventTime >= 0 && traceGestures == 0 && action == MotionEvent.ACTION_DOWN) {
+            Ln.i("Source-timed touch playback v70: bounded 100 ms gesture history");
+        }
         if (eventTime >= 0 && traceGestures < 20) {
             Point raw = position.getPoint(); Size bounds = position.getScreenSize();
             boolean outside = raw.getX() < 0 || raw.getY() < 0 || raw.getX() >= bounds.getWidth() || raw.getY() >= bounds.getHeight();
             if (action == MotionEvent.ACTION_DOWN) {
-                tracePointer = pointerId; traceDown = traceLast = now; traceArrival = received;
+                tracePointer = pointerId; traceDown = traceLast = now; traceSourceDown = eventTime; traceArrival = received;
                 traceMoves = 0; traceGap = 0; traceOutside = outside;
-                Ln.i("Timed gesture DOWN; deliveryAgeMs=" + (received - now));
+                Ln.i("Timed gesture DOWN; deliveryAgeMs=" + (received - eventTime));
             } else if (pointerId == tracePointer) {
                 traceOutside |= outside;
                 if (action == MotionEvent.ACTION_MOVE) { ++traceMoves; traceGap = Math.max(traceGap, now - traceLast); traceLast = now; }
                 if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
-                    Ln.i("Timed gesture UP; sourceDurationMs=" + (now - traceDown) + " arrivalDurationMs=" + (received - traceArrival)
+                    Ln.i("Timed gesture UP; sourceDurationMs=" + (eventTime - traceSourceDown) + " injectedDurationMs=" + (now - traceDown) + " arrivalDurationMs=" + (received - traceArrival)
                         + " moves=" + traceMoves + " maxSourceGapMs=" + traceGap + " outside=" + traceOutside
-                        + " deliveryAgeMs=" + (received - now));
+                        + " deliveryAgeMs=" + (received - eventTime));
                     ++traceGestures;
                 }
             }
@@ -850,7 +860,7 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
             source = InputDevice.SOURCE_TOUCHSCREEN;
             // Buttons must not be set for touch events
             buttons = 0;
-            pointer.setUp(action == MotionEvent.ACTION_UP);
+            pointer.setUp(action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL);
         }
 
         int pointerCount = pointersState.update(pointerProperties, pointerCoords);

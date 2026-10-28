@@ -30,6 +30,24 @@ struct NotificationAppPreferencesTests {
         restarted.setAllowed(true, package: "com.example.chat")
         precondition(restarted.allows(chat))
         precondition(!restarted.allows(other), "Re-enabling one app preserves other choices")
-        print("Notification app preference tests passed")
+        let activities = ActivityAppPreferences(defaults: defaults)
+        let timer: [String: Any] = ["package": "com.example.chat", "app": "Chat", "channel": "timer", "channelName": "Timers"]
+        let navigation: [String: Any] = ["package": "com.example.chat", "app": "Chat", "channel": "navigation"]
+        precondition(activities.record(timer))
+        precondition(activities.record(navigation))
+        let source = ActivityAppPreferences.source(timer)!
+        activities.setAllowed(false, source: source)
+        precondition(!activities.allows(timer))
+        precondition(activities.allows(navigation), "Activity types from one app have independent controls")
+        precondition(restarted.allows(chat), "Activity controls do not change regular notification controls")
+        restarted.setAllowed(false, package: "com.example.chat")
+        precondition(activities.allows(navigation), "Regular notification controls do not disable live activities")
+        let activityRestart = ActivityAppPreferences(defaults: UserDefaults(suiteName: domain)!)
+        precondition(!activityRestart.allows(timer), "Activity exclusions survive receiver restart")
+        precondition(activityRestart.sources[source]?["name"] == "Timers")
+        precondition(!activityRestart.record(timer), "Catalog updates do not reset exclusions")
+        activityRestart.setAllowed(true, source: source)
+        precondition(activityRestart.allows(timer))
+        print("Notification and activity preference tests passed")
     }
 }

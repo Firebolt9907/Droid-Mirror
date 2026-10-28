@@ -19,6 +19,17 @@ public final class NotificationForwardingPolicy {
             && visibility != Notification.VISIBILITY_SECRET;
     }
 
+    /** Persistent activities have a separate menu-bar destination, not banner delivery. */
+    public static boolean activityEligible(String sourcePackage, String ownPackage, String tag, int flags, int visibility) {
+        return !ownPackage.equals(sourcePackage) && !remoteUseAudit(sourcePackage, tag)
+            && (flags & Notification.FLAG_GROUP_SUMMARY) == 0 && visibility != Notification.VISIBILITY_SECRET;
+    }
+
+    public static boolean media(String category, String template, boolean mediaSession) {
+        return Notification.CATEGORY_TRANSPORT.equals(category) || mediaSession
+            || (template != null && (template.endsWith("MediaStyle") || template.endsWith("DecoratedMediaCustomViewStyle")));
+    }
+
     public static boolean routine(String sourcePackage, String category, String channel, boolean progress) {
         if (Notification.CATEGORY_SERVICE.equals(category) || Notification.CATEGORY_TRANSPORT.equals(category)
                 || progress) return true;

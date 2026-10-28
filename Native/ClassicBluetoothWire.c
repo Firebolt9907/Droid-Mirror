@@ -34,7 +34,7 @@ bool dm_classic_wire_feed_ble(DMClassicWire *wire, const uint8_t *bytes, size_t 
             wire->type = wire->header[0]; wire->header_used = 0;
             wire->remaining = (uint32_t)wire->header[1] << 24 | (uint32_t)wire->header[2] << 16
                             | (uint32_t)wire->header[3] << 8 | wire->header[4];
-            if ((wire->video_only && wire->type != 0 && wire->type != 1 && wire->type != 4 && wire->type != 5 && wire->type != 6 && wire->type != 7)
+            if ((wire->video_only && wire->type != 0 && wire->type != 1 && wire->type != 4 && wire->type != 5 && wire->type != 6 && wire->type != 7 && wire->type != 8)
                     || (wire->type == 0 && (!wire->remaining || wire->remaining > 16384))
                     || (wire->type == 1 && wire->remaining != 1)
                     || (wire->type == 2 && (!wire->control || !control || !wire->remaining || wire->remaining > 16384))
@@ -43,7 +43,8 @@ bool dm_classic_wire_feed_ble(DMClassicWire *wire, const uint8_t *bytes, size_t 
                     || (wire->type == 5 && (!wire->video_only || wire->remaining != 8))
                     || (wire->type == 6 && (!wire->video_only || !wire->audio || wire->remaining != 1))
                     || (wire->type == 7 && (!wire->video_only || !wire->audio || wire->remaining < 12 || wire->remaining > 4104 || wire->remaining % 4))
-                    || wire->type > 7) return false;
+                    || (wire->type == 8 && (!wire->video_only || !wire->reset_video || wire->remaining != 8))
+                    || wire->type > 8) return false;
         }
         size_t take = wire->remaining;
         if (take > length) take = length;
@@ -56,14 +57,15 @@ bool dm_classic_wire_feed_ble(DMClassicWire *wire, const uint8_t *bytes, size_t 
                 wire->audio_used = 0;
             }
         }
-        else if (wire->type == 5) {
+        else if (wire->type == 5 || wire->type == 8) {
             memcpy(wire->latency_bytes+wire->latency_used, bytes, take);
             wire->latency_used+=take;
             if (wire->latency_used==8) {
                 uint64_t timestamp=0;
                 for (size_t i=0;i<8;i++) timestamp=(timestamp<<8)|wire->latency_bytes[i];
                 wire->latency_used=0;
-                if (wire->latency) wire->latency(context,timestamp);
+                if (wire->type == 8) { if (!wire->reset_video(context,timestamp)) return false; }
+                else if (wire->latency) wire->latency(context,timestamp);
             }
         }
         else if (wire->type == 0) { if (!video(context, bytes, take)) return false; }

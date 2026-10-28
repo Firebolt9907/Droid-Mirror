@@ -21,12 +21,13 @@ done
 swiftc -swift-version 6 -module-cache-path /private/tmp/droidmirror-swift-module-cache \
     "${sources[@]}" Native/RendererLifecycleTests.swift -o "$app/Contents/MacOS/RendererLifecycleTests"
 ffmpeg -v error -f lavfi -i color=c=blue:s=360x800:r=1 -frames:v 1 -c:v libx264 -preset ultrafast -tune zerolatency -f h264 "$work/frame.h264"
-python3 Native/renderer-stream-fixture.py "$work/frame.h264" "$work/port" &
+ffmpeg -v error -f lavfi -i color=c=black:s=360x800:r=1 -frames:v 1 -c:v libx264 -preset ultrafast -tune zerolatency -f h264 "$work/black.h264"
+python3 Native/renderer-stream-fixture.py "$work/frame.h264" "$work/port" "$work/black.h264" &
 fixture_pid=$!
 trap 'kill "$fixture_pid" 2>/dev/null || true; rm -rf "$work"' EXIT
 for attempt in {1..100}; do
     [[ -f "$work/port" ]] && break
     sleep 0.02
 done
-"$app/Contents/MacOS/RendererLifecycleTests" "$(cat "$work/port")"
+"$app/Contents/MacOS/RendererLifecycleTests" "$(cat "$work/port")" --delayed-content
 wait "$fixture_pid"

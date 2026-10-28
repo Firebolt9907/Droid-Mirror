@@ -31,9 +31,14 @@ classpath="$task_build:$classes:$stdlib:$json"
   "$root/BluetoothCompanion/tests/SharedPairingTest.java"
 "$task_java/bin/java" -cp "$task_build" BackgroundBridgePreferencesTest
 "$task_java/bin/java" -cp "$task_build" SharedPairingTest
+"$task_java/bin/javac" -cp "$classpath" -d "$task_build" "$root/BluetoothCompanion/tests/ActivityDeltasTest.java"
+"$task_java/bin/java" -cp "$classpath" ActivityDeltasTest "$task_build/activity-deltas.json"
+xcrun swiftc -module-cache-path /private/tmp/droidmirror-swift-module-cache \
+  "$root/Native/ActivityClock.swift" "$root/Native/ActivityDeltasTests.swift" -o "$task_build/activity-deltas"
+"$task_build/activity-deltas" "$task_build/activity-deltas.json"
 clang -I"$root/Native" "$root/Native/BleInputCrypto.c" "$root/Native/BleInputCryptoTests.c" -o "$task_build/input-crypto-tests"
 "$task_build/input-crypto-tests"
 xcrun swiftc -module-cache-path /private/tmp/droidmirror-swift-module-cache \
-  "$root/Native/BLESession.swift" "$root/Native/BLESecurity.swift" "$root/Native/BLESecurityTests.swift" \
+  "$root/Native/BLESession.swift" "$root/Native/ActivityClock.swift" "$root/Native/BLESecurity.swift" "$root/Native/BLESecurityTests.swift" \
   -o "$task_build/security-tests"
 "$task_build/security-tests" "$task_java/bin/java" "$classpath"

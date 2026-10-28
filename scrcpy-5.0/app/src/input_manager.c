@@ -8,6 +8,7 @@
 #include "android/input.h"
 #include "android/keycodes.h"
 #include "events.h"
+#include "droidmirror_text_event.h"
 #include "wheel_protocol.h"
 #include <math.h>
 #include "input_events.h"
@@ -56,6 +57,7 @@ sc_input_manager_init(struct sc_input_manager *im,
     im->vfinger_invert_y = false;
 
     im->mouse_buttons_state = 0;
+    im->wheel_remainder_x = im->wheel_remainder_y = 0;
 
     im->last_keycode = SDLK_UNKNOWN;
     im->last_mod = 0;
@@ -1080,15 +1082,30 @@ sc_input_manager_process_mouse_wheel(struct sc_input_manager *im,
         return;
     }
 
-    if (event->which == SC_DROIDMIRROR_WHEEL_MOUSE_ID && im->controller) {
-        // Only tagged discrete wheels use phone-side playback. Trackpads never
-        // receive this tag, so their normal touch/scroll path stays untouched.
+    if ((event->which == SC_DROIDMIRROR_WHEEL_MOUSE_ID
+            || event->which == SC_DROIDMIRROR_TRACKPAD_MOUSE_ID
+            || event->which == SC_DROIDMIRROR_TRACKPAD_RESET_ID) && im->controller) {
+        // Relative pixel playback avoids deriving a second Android fling from
+        // delayed trackpad samples. A zero-distance reset starts a new gesture.
         if (im->mouse_buttons_state || !isfinite(event->x) || !isfinite(event->y)) return;
         struct sc_position anchor = sc_input_manager_get_position(im,event->mouse_x,event->mouse_y);
-        struct sc_position target = sc_input_manager_get_position(im,event->mouse_x + event->x*24,event->mouse_y + event->y*24);
+        if (event->which == SC_DROIDMIRROR_TRACKPAD_RESET_ID) {
+            im->wheel_remainder_x = im->wheel_remainder_y = 0;
+        }
+        // Measure the window-to-frame transform over a long basis so integer
+        // coordinate conversion cannot erase small native momentum samples.
+        // This also preserves rotation and mirroring of both scroll axes.
+        struct sc_position basis_x = sc_input_manager_get_position(im,event->mouse_x+1024,event->mouse_y);
+        struct sc_position basis_y = sc_input_manager_get_position(im,event->mouse_x,event->mouse_y+1024);
+        double dx = event->x*24.0, dy = event->y*24.0;
         struct sc_control_msg msg = {.type=SC_CONTROL_MSG_TYPE_WHEEL_SCROLL,
-            .wheel_scroll={.position=anchor,.dx=target.point.x-anchor.point.x,.dy=target.point.y-anchor.point.y}};
-        if (msg.wheel_scroll.dx || msg.wheel_scroll.dy) sc_controller_push_msg(im->controller,&msg);
+            .wheel_scroll={.position=anchor,
+                .dx=sc_wheel_take_pixels(&im->wheel_remainder_x,
+                    (dx*(basis_x.point.x-anchor.point.x)+dy*(basis_y.point.x-anchor.point.x))/1024.0),
+                .dy=sc_wheel_take_pixels(&im->wheel_remainder_y,
+                    (dx*(basis_x.point.y-anchor.point.y)+dy*(basis_y.point.y-anchor.point.y))/1024.0)}};
+        if (msg.wheel_scroll.dx || msg.wheel_scroll.dy || event->which == SC_DROIDMIRROR_TRACKPAD_RESET_ID)
+            sc_controller_push_msg(im->controller,&msg);
         return;
     }
 
@@ -1246,6 +1263,20 @@ void
 sc_input_manager_handle_event(struct sc_input_manager *im,
                               const SDL_Event *event) {
     switch (event->type) {
+        case SC_EVENT_SYNTHETIC_TEXT: {
+            char *text = event->user.data1;
+            if (!im->camera && im->kp && im->controller &&
+                    !im->screen->paused && !im->disconnected) {
+                struct sc_control_msg msg = { .type = SC_CONTROL_MSG_TYPE_SET_CLIPBOARD };
+                msg.set_clipboard.sequence = SC_SEQUENCE_INVALID;
+                msg.set_clipboard.paste = true;
+                msg.set_clipboard.text = text;
+                if (sc_controller_push_msg(im->controller, &msg)) break;
+                LOGW("Could not paste synthetic text");
+            }
+            free(text);
+            break;
+        }
         case SDL_EVENT_TEXT_INPUT:
             sc_input_manager_process_text_input(im, &event->text);
             break;

@@ -15,3 +15,18 @@ before replacing/restarting components, or implement bounded rediscovery and
 reauthentication if a BLE service changes during a session. Preserve authentication
 and sequence checks during recovery. Do not assume that an atomic bundle update
 alone makes replacing components during active mirroring seamless.
+
+## Shizuku user-service version bumps
+
+When changing code loaded by a Shizuku user service, bump that service's
+`Shizuku.UserServiceArgs.version(...)` value. For the display guard and its
+embedded capture, encoder, and scrcpy control/gesture code, bump the version in
+`ShizukuDisplayClient.arguments(...)`. Apply the same requirement to other
+Shizuku user services when their loaded code changes.
+
+Daemonized Shizuku processes can survive APK replacement and continue executing
+old classes. A successful build or APK install does not prove that the new code
+is running. End active mirror sessions gracefully before replacing the service,
+then verify that the old process was replaced and that runtime logs or behavior
+identify the updated implementation before evaluating the fix. Do not count
+observations from a surviving old process as validation of the new code.

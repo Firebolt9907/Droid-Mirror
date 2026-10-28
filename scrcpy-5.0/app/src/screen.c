@@ -407,7 +407,7 @@ sc_screen_render(struct sc_screen *screen, bool update_content_rect) {
 end:
     if (!sc_sdl_render_present(renderer)) ok = false;
 #ifdef __APPLE__
-    if (!screen->reported_visible) {
+    {
         void (*cover)(void) = dlsym(RTLD_DEFAULT, "DroidMirrorVideoSurfaceReady");
         if (cover) cover();
     }
@@ -596,6 +596,7 @@ sc_screen_init(struct sc_screen *screen,
     screen->reported_visible = false;
     screen->startup_reveal = (struct sc_startup_reveal){0};
     screen->startup_content = false;
+    screen->startup_unknown = false;
     screen->secure_black_frame = false;
     screen->secure_request_pending = false;
     screen->secure_check_at = 0;
@@ -1093,12 +1094,18 @@ static void
 sc_screen_update_startup_reveal(struct sc_screen *screen) {
     if (screen->reported_visible) return;
     enum sc_startup_reveal_action action = sc_startup_reveal_update(
-        &screen->startup_reveal, SDL_GetTicks(), screen->startup_content);
+        &screen->startup_reveal, SDL_GetTicks(), screen->startup_content,
+        screen->startup_unknown);
     if (action == SC_REVEAL_WAIT) return;
     const char *hook = action == SC_REVEAL_ANIMATE
         ? "DroidMirrorFrameVisible" : "DroidMirrorFrameVisibleWithoutAnimation";
     void (*visible)(void) = (void (*)(void)) dlsym(RTLD_DEFAULT, hook);
-    if (visible) { visible(); screen->reported_visible = true; }
+    if (visible) {
+        LOGI("Startup reveal: %s", action == SC_REVEAL_ANIMATE
+            ? "confirmed content" : "uninspectable format fallback");
+        fflush(stdout);
+        visible(); screen->reported_visible = true;
+    }
 }
 #endif
 
@@ -1108,7 +1115,7 @@ sc_screen_tick(struct sc_screen *screen) {
         sc_screen_render(screen, false);
 #ifdef __APPLE__
     // A static screen may send no further frames. Confirm the last presented
-    // content (or expire the black fallback) without waiting for another frame.
+    // content (or expire the unknown-format fallback) without another frame.
     if (screen->startup_reveal.started) sc_screen_update_startup_reveal(screen);
 #endif
 }
@@ -1195,9 +1202,9 @@ sc_screen_set_frame_size(struct sc_screen *screen, struct sc_size new_frame_size
 
 #ifdef __APPLE__
 static enum sc_frame_content
-sc_screen_frame_content(const AVFrame *frame) {
+sc_screen_frame_content(const AVFrame *frame, bool for_reveal) {
     if (frame->format != AV_PIX_FMT_VIDEOTOOLBOX) {
-        return sc_frame_content(frame);
+        return for_reveal ? sc_frame_reveal_content(frame) : sc_frame_content(frame);
     }
     // Read the shared IOSurface directly during startup confirmation, then
     // at most five times/second for secure-window checks. Do not
@@ -1218,14 +1225,15 @@ sc_screen_frame_content(const AVFrame *frame) {
         cpu.data[plane] = CVPixelBufferGetBaseAddressOfPlane(buffer, plane);
         cpu.linesize[plane] = CVPixelBufferGetBytesPerRowOfPlane(buffer, plane);
     }
-    enum sc_frame_content content = sc_frame_content(&cpu);
+    enum sc_frame_content content = for_reveal
+        ? sc_frame_reveal_content(&cpu) : sc_frame_content(&cpu);
     CVPixelBufferUnlockBaseAddress(buffer, kCVPixelBufferLock_ReadOnly);
     return content;
 }
 
 static bool
 sc_screen_is_secure_black_frame(const AVFrame *frame) {
-    return sc_screen_frame_content(frame) == SC_FRAME_BLACK;
+    return sc_screen_frame_content(frame, false) == SC_FRAME_BLACK;
 }
 #endif
 
@@ -1274,7 +1282,15 @@ sc_screen_apply_frame(struct sc_screen *screen, bool can_resize) {
     }
 #ifdef __APPLE__
     if (!screen->reported_visible) {
-        screen->startup_content = sc_screen_frame_content(frame) == SC_FRAME_CONTENT;
+        enum sc_frame_content content = sc_screen_frame_content(frame, true);
+        if (!screen->startup_reveal.started
+                || screen->startup_content != (content == SC_FRAME_CONTENT)
+                || screen->startup_unknown != (content == SC_FRAME_UNKNOWN)) {
+            LOGI("Startup surface: format=%d content=%d", frame->format, content);
+            fflush(stdout);
+        }
+        screen->startup_content = content == SC_FRAME_CONTENT;
+        screen->startup_unknown = content == SC_FRAME_UNKNOWN;
         sc_screen_update_startup_reveal(screen);
     }
     Uint64 now = SDL_GetTicks();
