@@ -1,0 +1,18 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-feature android:name="android.hardware.type.watch" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <application android:label="DroidMirror" android:icon="@drawable/ic_privacy" android:allowBackup="false" android:dataExtractionRules="@xml/data_extraction_rules"
+        android:theme="@android:style/Theme.Material.NoActionBar" android:supportsRtl="true">
+        <meta-data android:name="com.google.android.wearable.standalone" android:value="false" />
+        <uses-library android:name="com.google.android.wearable" android:required="false" />
+        <activity android:name=".MainActivity" android:exported="true" android:launchMode="singleTop" android:taskAffinity="">
+            <intent-filter><action android:name="android.intent.action.MAIN" /><category android:name="android.intent.category.LAUNCHER" /></intent-filter>
+        </activity>
+        <service android:name=".WatchListenerService" android:exported="true">
+            <intent-filter>
+                <action android:name="com.google.android.gms.wearable.MESSAGE_RECEIVED" />
+                <data android:scheme="wear" android:host="*" android:pathPrefix="/droidmirror/watch/" />
+            </intent-filter>
+        </service>
+    </application>
+</manifest>

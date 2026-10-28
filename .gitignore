@@ -29,3 +29,12 @@ __pycache__/
 *.py[cod]
 
 /BluetoothCompanion/wear/build/
+
+# Vendored scrcpy build state
+/scrcpy-5.0/build/
+/scrcpy-5.0/.gradle/
+
+# Generated previews and one-off build staging
+/outputs/activity-renderer-preview/
+/outputs/aod-overlay-preview/
+/outputs/paste-fix/
