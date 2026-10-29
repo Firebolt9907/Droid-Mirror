@@ -37,9 +37,12 @@ final class BLEController: NSObject, ObservableObject {
     private(set) var supportsClipboard = false
     private(set) var supportsClipboardFiles = false
     private(set) var supportsWearCompanion = false
+    private(set) var supportsChangePush = false
     private(set) var supportsActivityImages = false
     private(set) var supportsMedia = false
     private(set) var supportsTaskURLs = false
+    private(set) var supportsAppLibrary = false
+    private(set) var supportsAppLibraryIroh = false
     private(set) var supportsHotspot = false
     private(set) var supportsLinkSharing = false
     var authenticated: Bool { session?.authenticated == true }
@@ -70,7 +73,7 @@ final class BLEController: NSObject, ObservableObject {
     private var pendingRequestStartedAt: Date?
     private var nextRequestID: UInt64 = 1
     private static let savedIPKey = "DroidMirror.BLE.host"
-    private var presenceRadio: PresenceRadioServer?
+    private var presenceRadio: PresenceBeaconAdvertiser?
     private var stopped = false
 
     override init() {
@@ -80,7 +83,7 @@ final class BLEController: NSObject, ObservableObject {
         if wantsADB { adbStatus = "Waiting for Android endpoint…" }
         super.init()
         if !tailscaleIP.isEmpty { NotificationRuntime.preferences.set(tailscaleIP, forKey: Self.savedIPKey) }
-        presenceRadio = PresenceRadioServer()
+        presenceRadio = PresenceBeaconAdvertiser()
         central = CBCentralManager(delegate: self, queue: nil)
         startHealthMonitor()
         startEndpointMonitor()
@@ -277,7 +280,7 @@ final class BLEController: NSObject, ObservableObject {
             return
         }
 
-        if wantsADB { requestEndpoint() }
+        if wantsADB && !supportsChangePush { requestEndpoint() }
         if authenticated && supportsSessionHealth {
             guard !heartbeatPending else { return }
             heartbeatPending = true
@@ -457,8 +460,8 @@ final class BLEController: NSObject, ObservableObject {
 
     private func resetSecurity() {
         let hadSession = session != nil
-        supportsWearCompanion = false; supportsLinkSharing = false; supportsMedia = false; supportsClipboard = false
-        supportsClipboardFiles = false; supportsTaskURLs = false; supportsHotspot = false
+        supportsChangePush = false; supportsWearCompanion = false; supportsLinkSharing = false; supportsMedia = false; supportsClipboard = false
+        supportsClipboardFiles = false; supportsTaskURLs = false; supportsAppLibrary = false; supportsAppLibraryIroh = false; supportsHotspot = false
         supportsActivityImages = false
         supportsSessionHealth = false; heartbeatPending = false
         clockSync = ActivityClockSync(); activityTransitMilliseconds = nil
@@ -480,9 +483,10 @@ final class BLEController: NSObject, ObservableObject {
         return true
     }
 
-    /// Short-lived watch status must not sit behind queued clipboard traffic for a minute.
+    /// Change-only state is connection-scoped; action tickets still have short deadlines.
     @discardableResult func sendCompanion(_ object: [String: Any]) -> Bool {
-        enqueue(object, deadline: uptime + 5)
+        let state = object["type"] as? String == "watchMacState" && object["changeOnly"] as? Bool == true
+        return enqueue(object, deadline: uptime + (state ? 60 : 5))
     }
 
     /// Replies are correlated by UUID and type. No automatic retry of side effects.
@@ -584,17 +588,20 @@ final class BLEController: NSObject, ObservableObject {
                 supportsSessionHealth = plain["sessionHealth"] as? Int == 1
                 supportsClipboard = plain["clipboard"] as? Int == 1
                 supportsClipboardFiles = plain["clipboardFiles"] as? Int == 1
+                supportsChangePush = plain["changePush"] as? Int == 1
                 supportsWearCompanion = plain["watchCompanion"] as? Int == 1
                 supportsMedia = plain["media"] as? Int == 1
                 supportsTaskURLs = plain["taskUrls"] as? Int == 1
+                supportsAppLibrary = plain["appLibrary"] as? Int == 1
+                supportsAppLibraryIroh = plain["appLibraryIroh"] as? Int == 1
                 supportsHotspot = (plain["hotspot"] as? Int ?? 0) >= 2
                 supportsLinkSharing = plain["linkSharing"] as? Int == 1
                 status = "Authenticated phone connected"
                 if wantsADB || !supportsSessionHealth { requestEndpoint() }
                 if supportsSessionHealth { request(["type": "ping"], expecting: "pong", timeout: 12) { _ in } }
                 send(["type": "subscribe", "activityDeltas": 1]); onAuthenticated?()
-            case "pong", "activityImageManifest", "activityImageChunk": break
-            case "haptic", "watchPhoneBattery", "watchFindMac", "shareLink", "openLinkResult", "mediaState", "mediaCommand", "mediaArtworkRequest", "mediaArtworkChunk", "mediaStatus", "notification", "activitiesReset", "removed", "actionResult", "dismissResult", "minimizeMirror", "clipboard", "clipboardStatus", "clipboardResult", "clipboardFileBegin", "clipboardFileChunk", "clipboardFileAck", "clipboardFileCancel", "taskContinuation", "hotspotResult": onEvent?(plain)
+            case "pong", "activityImageManifest", "activityImageChunk", "appCatalogResult", "appIconResult", "appLaunchResult", "appLibraryOfferResult": break
+            case "appCatalogChanged", "haptic", "watchTicketRequest", "watchPhoneBattery", "watchFindMac", "shareLink", "openLinkResult", "mediaState", "mediaCommand", "mediaArtworkRequest", "mediaArtworkChunk", "mediaStatus", "notification", "activitiesReset", "removed", "actionResult", "dismissResult", "minimizeMirror", "clipboard", "clipboardStatus", "clipboardResult", "clipboardFileBegin", "clipboardFileChunk", "clipboardFileAck", "clipboardFileCancel", "taskContinuation", "hotspotResult": onEvent?(plain)
             default: accept(try JSONSerialization.data(withJSONObject: plain))
             }
         } catch {

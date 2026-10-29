@@ -4,6 +4,7 @@ struct TaskContinuationState {
     private(set) var url: URL?
     private(set) var package = ""
     private(set) var appIcon: Data?
+    private var connectionScoped = false
     private var receivedAt = Date.distantPast
     static let lifetime: TimeInterval = 8
 
@@ -14,16 +15,17 @@ struct TaskContinuationState {
         guard authenticated, event["type"] as? String == "taskContinuation",
               let raw = event["url"] as? String, let url = Self.browserURL(raw),
               let package = event["package"] as? String, !package.isEmpty, package.count <= 256 else { return }
+        connectionScoped = event["changeOnly"] as? Bool == true
         self.url = url
         self.package = package
         appIcon = NotificationIconAttachment.validatedData(event["appIcon"] as? String)
         receivedAt = now
     }
     func currentURL(authenticated: Bool, now: Date = Date()) -> URL? {
-        guard authenticated, now.timeIntervalSince(receivedAt) < Self.lifetime else { return nil }
+        guard authenticated, (connectionScoped || now.timeIntervalSince(receivedAt) < Self.lifetime) else { return nil }
         return url
     }
-    mutating func clear() { url = nil; package = ""; appIcon = nil; receivedAt = .distantPast }
+    mutating func clear() { url = nil; package = ""; appIcon = nil; connectionScoped = false; receivedAt = .distantPast }
 }
 
 /// Only the background receiver owns this item, so there is one icon across hosts.
@@ -44,7 +46,7 @@ final class TaskContinuation: NSObject {
     func connected() {
         clear()
         guard controller?.supportsTaskURLs == true else { return }
-        controller?.send(["type": "taskSubscribe", "enabled": true])
+        controller?.send(["type": "taskSubscribe", "enabled": true, "changeOnly": true])
     }
     func receive(_ event: [String: Any]) {
         state.receive(event, authenticated: controller?.authenticated == true)

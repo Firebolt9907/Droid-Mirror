@@ -3,6 +3,23 @@ import Foundation
 @main
 struct NotificationPresentationTests {
     static func main() {
+        for text in ["Your verification code is 012345", "Use 4821 as your security code", "Your OTP: A1B2C3"] {
+            precondition(NotificationVerificationCode.detect(["body": text]) != nil)
+        }
+        for text in ["Your parcel 123456 is arriving", "Call 1234567890 to verify", "Verification code 123456 or 654321"] {
+            precondition(NotificationVerificationCode.detect(["body": text]) == nil)
+        }
+        let otp: [String: Any] = ["body": "Your verification code is 012345"]
+        precondition(NotificationVerificationCode.detect(otp) == "012345")
+        for flag in ["snapshot", "silent", "fromMe"] {
+            var stale = otp; stale[flag] = true
+            precondition(NotificationVerificationCode.detect(stale) == nil)
+        }
+        precondition(NotificationVerificationCode.detect(["messages": [
+            ["text": "Verification code 123456"], ["text": "Hello"]]]) == nil,
+            "Old conversation codes must not be copied")
+        precondition(NotificationVerificationCode.detect(["messages": [
+            ["text": "Verification code 123456", "outgoing": true]]]) == nil)
         var policy = NotificationPresentationPolicy()
         var weather: [String: Any] = ["id": "weather", "app": "Google", "body": "Weather", "snapshot": true]
         precondition(policy.quiet(identity: "phone", event: weather))

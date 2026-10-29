@@ -8,6 +8,7 @@ struct WearCompanionCommandGate {
     mutating func reset() { self = Self() }
     mutating func ticket(now: TimeInterval) -> String {
         tickets = tickets.filter { now - $0.value >= 0 && now - $0.value < 35 }
+        if tickets.count >= 128, let oldest = tickets.min(by: { $0.value < $1.value })?.key { tickets.removeValue(forKey: oldest) }
         let value = UUID().uuidString
         tickets[value] = now
         return value

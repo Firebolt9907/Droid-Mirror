@@ -12,6 +12,8 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.util.Base64
 import java.io.ByteArrayOutputStream
+import android.media.AudioManager
+import android.media.AudioDeviceInfo
 import android.media.MediaDescription
 import android.media.MediaMetadata
 import android.media.VolumeProvider
@@ -46,6 +48,7 @@ class PhoneMediaSync(private val context: Context, private val send: (JSONObject
     private val artwork = MediaArtworkTransfer()
     private val remoteQueue = RemoteMediaQueue()
     private val publication = MediaSessionPublication()
+    private val wire = MediaStateWire()
     private val route = if (Build.VERSION.SDK_INT >= 30) MacMediaRoute(context) { controllerId ->
         // System UI maps remote playback to the selected route through this ID.
         proxy.setPlaybackToRemote(object : VolumeProvider(VOLUME_CONTROL_FIXED, 1, 1, controllerId) {})
@@ -102,6 +105,18 @@ class PhoneMediaSync(private val context: Context, private val send: (JSONObject
     private fun playing(controller: MediaController?) = controller?.playbackState?.state in
         listOf(PlaybackState.STATE_PLAYING, PlaybackState.STATE_BUFFERING, PlaybackState.STATE_CONNECTING)
 
+    private fun externalAudioConnected(): Boolean = runCatching {
+        context.getSystemService(AudioManager::class.java).getDevices(AudioManager.GET_DEVICES_OUTPUTS).any {
+            it.type in setOf(AudioDeviceInfo.TYPE_WIRED_HEADSET, AudioDeviceInfo.TYPE_WIRED_HEADPHONES,
+                AudioDeviceInfo.TYPE_BLUETOOTH_A2DP, AudioDeviceInfo.TYPE_BLUETOOTH_SCO,
+                AudioDeviceInfo.TYPE_USB_DEVICE, AudioDeviceInfo.TYPE_USB_ACCESSORY, AudioDeviceInfo.TYPE_USB_HEADSET,
+                AudioDeviceInfo.TYPE_HDMI, AudioDeviceInfo.TYPE_HDMI_ARC, AudioDeviceInfo.TYPE_HDMI_EARC,
+                AudioDeviceInfo.TYPE_LINE_ANALOG, AudioDeviceInfo.TYPE_LINE_DIGITAL,
+                AudioDeviceInfo.TYPE_HEARING_AID, AudioDeviceInfo.TYPE_BLE_HEADSET,
+                AudioDeviceInfo.TYPE_BLE_SPEAKER, AudioDeviceInfo.TYPE_BLE_BROADCAST)
+        }
+    }.getOrDefault(false)
+
     private fun refresh() {
         val query = runCatching {
             manager.getActiveSessions(ComponentName(context, PhoneNotifications::class.java))
@@ -127,7 +142,7 @@ class PhoneMediaSync(private val context: Context, private val send: (JSONObject
             event.put("id", localId).put("title", metadata?.getString(MediaMetadata.METADATA_KEY_TITLE).orEmpty().take(240))
                 .put("artist", metadata?.getString(MediaMetadata.METADATA_KEY_ARTIST).orEmpty().take(240))
                 .put("album", metadata?.getString(MediaMetadata.METADATA_KEY_ALBUM).orEmpty().take(240))
-                .put("playing", playing(selected)).put("duration", (metadata?.getLong(MediaMetadata.METADATA_KEY_DURATION) ?: 0L).coerceAtLeast(0) / 1000.0)
+                .put("externalAudio", externalAudioConnected()).put("playing", playing(selected)).put("duration", (metadata?.getLong(MediaMetadata.METADATA_KEY_DURATION) ?: 0L).coerceAtLeast(0) / 1000.0)
                 .put("position", position / 1000.0).put("actions", JSONArray(actions(selected).keys.toList()))
         }
         if (selected != null) {
@@ -141,11 +156,13 @@ class PhoneMediaSync(private val context: Context, private val send: (JSONObject
                 event.put("artwork", it)
             }
         }
-        send(artwork.prepare(event))
+        wire.prepare(artwork.prepare(event), SystemClock.elapsedRealtime())?.let(send)
+        if (remote != null && remoteFresh()) requestArtwork()
         render()
     }
-    fun receive(event: JSONObject) {
+    fun receive(message: JSONObject) {
         if (closed) return
+        val event = if (message.optString("type") == "mediaState") wire.receive(message) ?: return else message
         when (event.optString("type")) {
             "mediaState" -> {
                 remote = event.takeIf { MediaSyncProtocol.validSnapshot(it) }
@@ -157,14 +174,14 @@ class PhoneMediaSync(private val context: Context, private val send: (JSONObject
                 render()
             }
             "mediaQueue" -> {
-                if (remote == null || !MediaSyncProtocol.fresh(remoteAt, SystemClock.elapsedRealtime()) || !remoteQueue.receive(event)) return
+                if (remote == null || !remoteFresh() || !remoteQueue.receive(event)) return
                 render()
             }
             "mediaArtworkRequest" -> {
                 if (local != null) artwork.reply(event)?.let(send)
             }
             "mediaArtworkChunk" -> {
-                if (remote == null || !MediaSyncProtocol.fresh(remoteAt, SystemClock.elapsedRealtime()) || !artwork.receive(event)) return
+                if (remote == null || !remoteFresh() || !artwork.receive(event)) return
                 updateRemoteArtwork(artwork.completed)
                 requestArtwork(); render()
             }
@@ -192,8 +209,9 @@ class PhoneMediaSync(private val context: Context, private val send: (JSONObject
             }
         }
     }
+    private fun remoteFresh() = !closed && (wire.peerSupportsLocalTimeline || MediaSyncProtocol.fresh(remoteAt, SystemClock.elapsedRealtime()))
     private fun usableRemote(): JSONObject? = remote?.takeIf {
-        MediaSyncProtocol.fresh(remoteAt, SystemClock.elapsedRealtime()) && !playing(local)
+        remoteFresh() && !playing(local)
     }
     fun controlRemote(action: String, position: Double? = null, expectedId: String? = null, queueItemId: Long? = null) {
         if (closed) return

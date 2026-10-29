@@ -6,6 +6,8 @@ final class WearCompanion: NSObject {
     weak var controller: BLEController?
     private var gate = WearCompanionCommandGate()
     private var lastSent = -Double.infinity
+    private var lastState: NSDictionary?
+    private var phoneChangeOnly = false
     private var phoneAt = -Double.infinity
     private var phoneLevel = -1
     private var phoneCharging = false
@@ -13,32 +15,50 @@ final class WearCompanion: NSObject {
     private var panel: NSPanel?
     private var soundTimeout: Timer?
     private var lastRing = -Double.infinity
-    private var uptime: TimeInterval { ProcessInfo.processInfo.systemUptime }
+    private let clock: () -> TimeInterval
+    private let readBattery: () -> [String: Any]
+    init(clock: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
+         readBattery: @escaping () -> [String: Any] = { WearCompanion.battery() }) {
+        self.clock = clock; self.readBattery = readBattery; super.init()
+    }
+    private var uptime: TimeInterval { clock() }
     var batteryStatus: String {
-        guard controller?.authenticated == true, uptime - phoneAt < 35 else { return "Phone battery unavailable" }
+        guard controller?.authenticated == true, (phoneChangeOnly || uptime - phoneAt < 35) else { return "Phone battery unavailable" }
         return phoneLevel >= 0 ? "Phone battery: \(phoneLevel)%\(phoneCharging ? " · charging" : "")" : "Phone battery unavailable"
     }
     func connected() { clear(); tick() }
     func clear() {
+        lastState = nil; phoneChangeOnly = false
         gate.reset(); lastSent = -Double.infinity; phoneAt = -Double.infinity
         phoneLevel = -1; stopSound()
     }
     func tick() {
-        guard controller?.authenticated == true, controller?.supportsWearCompanion == true,
-              uptime - lastSent >= 10 else { return }
-        var event = Self.battery()
+        guard controller?.authenticated == true, controller?.supportsWearCompanion == true else { return }
+        let changeOnly = controller?.supportsChangePush == true
+        var event = readBattery()
+        event["name"] = Host.current().localizedName ?? "Mac"
+        let state = event as NSDictionary
+        if changeOnly {
+            guard lastState != state else { return }
+        } else if uptime - lastSent < 10 { return }
         event["type"] = "watchMacState"; event["id"] = gate.id
         event["ticket"] = gate.ticket(now: uptime)
-        event["name"] = Host.current().localizedName ?? "Mac"
-        if controller?.sendCompanion(event) == true { lastSent = uptime }
+        if changeOnly { event["changeOnly"] = true }
+        if controller?.sendCompanion(event) == true { lastSent = uptime; lastState = state }
     }
     func receive(_ event: [String: Any]) {
         guard controller?.authenticated == true, event["id"] as? String == gate.id else { return }
         switch event["type"] as? String {
+        case "watchTicketRequest":
+            guard controller?.supportsChangePush == true, let request = event["request"] as? String,
+                  UUID(uuidString: request) != nil else { return }
+            controller?.sendCompanion(["type": "watchMacTicket", "id": gate.id,
+                "request": request, "ticket": gate.ticket(now: uptime)])
         case "watchPhoneBattery":
             guard let level = event["level"] as? Int, (-1...100).contains(level),
                   let charging = event["charging"] as? Bool else { return }
             phoneLevel = level; phoneCharging = charging; phoneAt = uptime
+            phoneChangeOnly = event["changeOnly"] as? Bool == true
         case "watchFindMac":
             guard gate.accept(event, now: uptime) else { return }
             var success = false

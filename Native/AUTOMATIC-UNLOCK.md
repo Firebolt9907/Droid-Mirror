@@ -41,7 +41,13 @@ Binder handshake in parallel with encoder preparation; its PIN entry can be visi
 physical phone until the client turns the panel off. Both paths open Android's
 credential bouncer, clear partial input, enter digits once, submit only if still
 locked, and require keyguard dismissal before video begins. Keyguard state is
-checked before every key to stop if another unlock occurs. Normal Android unlock
+checked before every key to stop if another unlock occurs. Preparation sends SPACE
+twice, 700 ms apart, before clearing or entering credentials. Unlike MENU, SPACE
+does not depend on the lock-screen MENU-enable configuration. This also handles
+an already-on lock screen or an expanded lock-screen notification shade: the first key can
+be consumed by the asynchronous wake/AOD transition. This is a bounded settling
+window, not a guarantee of readiness on every OEM. After the single PIN submission,
+keyguard dismissal has a four-second deadline; no credentials are retried. Normal Android unlock
 sounds/haptics follow the phone settings. OEM credential screens, lockout timers,
 SIM locks, and managed-device restrictions can prevent automatic entry; there is
 no claim of universal lock-screen compatibility.
@@ -50,7 +56,8 @@ no claim of universal lock-screen compatibility.
 
 Run `bash Native/test-pin-unlock.sh` for leading zeros, validation, already-unlocked
 phones, explicit and automatic confirmation, early biometric dismissal, one failed
-attempt and bounded timeout. Build the companion with `./gradlew assembleDebug`
+attempt and bounded timeout, a wake transition that consumes the first SPACE,
+an awake lock screen with MENU disabled, slow keyguard dismissal, and biometric dismissal during preparation. Build the companion with `./gradlew assembleDebug`
 and rebuild the bundled scrcpy server for ADB support.
 
 On a test phone, verify save/replace/remove, credential cancellation, rotation and

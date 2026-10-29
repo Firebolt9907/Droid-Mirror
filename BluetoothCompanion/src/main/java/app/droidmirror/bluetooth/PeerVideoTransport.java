@@ -37,8 +37,8 @@ final class PeerVideoTransport implements AutoCloseable {
     }
 
     private static native long nativeStart(android.content.Context context, byte[] key) throws IOException;
-    private static native void nativeStop(long handle);
-    private static native String nativeAddresses(long handle);
+    static native void nativeStop(long handle);
+    static native String nativeAddresses(long handle);
 
     private synchronized String addresses() { return handle == 0 ? "" : nativeAddresses(handle); }
 

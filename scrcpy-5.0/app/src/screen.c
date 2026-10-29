@@ -1281,6 +1281,8 @@ sc_screen_apply_frame(struct sc_screen *screen, bool can_resize) {
         return false;
     }
 #ifdef __APPLE__
+    void (*shortcut_frame)(int64_t) = dlsym(RTLD_DEFAULT, "DMShortcutRevealFramePresented");
+    if (shortcut_frame) shortcut_frame(frame->pts);
     if (!screen->reported_visible) {
         enum sc_frame_content content = sc_screen_frame_content(frame, true);
         if (!screen->startup_reveal.started

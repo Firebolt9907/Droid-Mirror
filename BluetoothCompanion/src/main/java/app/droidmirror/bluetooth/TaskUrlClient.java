@@ -23,11 +23,14 @@ public final class TaskUrlClient implements AutoCloseable {
     private volatile ITaskUrlBridge remote;
     private volatile boolean closed;
     private volatile boolean subscribed;
+    private volatile boolean changeOnly;
+    private String lastTask = "";
+    private long lastTaskGeneration = -1;
     private final Context context;
     private String lastDiagnostic = "";
     private long nextDiagnostic;
     private volatile long subscriptionGeneration;
-    public void setSubscribed(boolean enabled) { subscriptionGeneration++; subscribed = enabled; }
+    public void setSubscribed(boolean enabled, boolean changeOnly) { subscriptionGeneration++; this.changeOnly = changeOnly; subscribed = enabled; }
 
     private boolean binding;
     private final ServiceConnection connection = new ServiceConnection() {
@@ -42,7 +45,7 @@ public final class TaskUrlClient implements AutoCloseable {
         this.context = context.getApplicationContext();
         this.packageManager = context.getApplicationContext().getPackageManager();
         args = new Shizuku.UserServiceArgs(new ComponentName(context.getPackageName(), TaskUrlBridgeService.class.getName()))
-                .daemon(false).processNameSuffix("task_urls").debuggable(false).version(4);
+                .daemon(false).processNameSuffix("task_urls").debuggable(false).version(8);
         main.post(this::connect);
         work.scheduleWithFixedDelay(this::poll, 0, 2, TimeUnit.SECONDS);
     }
@@ -85,9 +88,16 @@ public final class TaskUrlClient implements AutoCloseable {
                 if (event.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8).length > 5200)
                     event.remove("appIcon");
             }
+            if (changeOnly) event.put("changeOnly", true);
             JSONObject snapshot = event;
-            // Refresh even unchanged URLs so the Mac can expire interrupted connections.
-            main.post(() -> { if (!closed && subscribed && generation == subscriptionGeneration) events.accept(snapshot); });
+            String fingerprint = event.toString();
+            // Change-only peers clear connection-scoped state on disconnect; legacy peers need leases.
+            main.post(() -> {
+                if (closed || !subscribed || generation != subscriptionGeneration) return;
+                if (changeOnly && generation == lastTaskGeneration && fingerprint.equals(lastTask)) return;
+                events.accept(snapshot);
+                lastTask = fingerprint; lastTaskGeneration = generation;
+            });
         } catch (org.json.JSONException ignored) {}
     }
     private void recordDiagnostics() {
@@ -146,6 +156,23 @@ public final class TaskUrlClient implements AutoCloseable {
     public void openBrowser(String url, java.util.function.BooleanSupplier authorized, Consumer<Boolean> reply) {
         if (closed) { reply.accept(false); return; }
         openBrowserAttempt(url, authorized, reply, 12);
+    }
+    /** No queue or retry: the listener has just checked session, version and unlock. */
+    public boolean notificationReady() { return !closed && remote != null && ShizukuDisplayClient.authorized(); }
+    public boolean openLauncher(String component) {
+        ITaskUrlBridge service = remote;
+        if (!notificationReady() || service == null) return false;
+        try { return service.openLauncher(component); }
+        catch (Exception unavailable) { return false; }
+    }
+    public boolean openNotification(android.app.PendingIntent intent) {
+        ITaskUrlBridge service = remote;
+        if (closed || service == null || !ShizukuDisplayClient.authorized()) return false;
+        try { return service.openNotification(intent); }
+        catch (Exception unavailable) {
+            android.util.Log.w("DroidMirrorNotifications", "Notification bridge dispatch failed: " + unavailable.getClass().getSimpleName());
+            return false;
+        }
     }
     private void openBrowserAttempt(String url, java.util.function.BooleanSupplier authorized, Consumer<Boolean> reply, int remaining) {
         work.schedule(() -> {

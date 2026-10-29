@@ -3,7 +3,10 @@ import AppKit
 final class LinkShareDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) { stopDroidMirrorBLE() }
     func application(_ application: NSApplication, open urls: [URL]) {
-        urls.forEach { shareDroidMirrorLink($0) }
+        urls.forEach { url in
+            if url.scheme == "droidmirror-app" { openDroidMirrorPhoneApp(url) }
+            else { shareDroidMirrorLink(url) }
+        }
     }
 }
 

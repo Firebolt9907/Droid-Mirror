@@ -62,7 +62,11 @@ class BridgeRuntime(private val context: Context, private val onChanged: Runnabl
     }
     fun cancelSharedLink(id: String) { sharedLinks.remove(id) }
     private var taskGeneration = 0L
-    private var taskUrls: app.droidmirror.bluetooth.TaskUrlClient? = null
+    @Volatile private var taskUrls: app.droidmirror.bluetooth.TaskUrlClient? = null
+    private val appLibrary = PhoneAppLibrary(context, { taskUrls?.notificationReady() == true }) { taskUrls?.openLauncher(it) == true }
+    fun notificationOpenerReady(): Boolean = !destroyed && taskUrls?.notificationReady() == true
+    fun openNotification(intent: android.app.PendingIntent): Boolean =
+        !destroyed && taskUrls?.openNotification(intent) == true
     private var hotspot: app.droidmirror.bluetooth.HotspotClient? = null
     private lateinit var ble: BlePeripheral
     private val handler = Handler(Looper.getMainLooper())
@@ -95,7 +99,7 @@ class BridgeRuntime(private val context: Context, private val onChanged: Runnabl
         ble = BlePeripheral(
             context = context,
             endpoint = { finder.endpoint },
-            onPresence = { peer, present -> handler.post { if (!destroyed) leftBehind?.presence(peer, present) } },
+            onPresence = { _, present -> handler.post { if (!destroyed) leftBehind?.presence(present) } },
             onPresenceReset = { handler.post { if (!destroyed) leftBehind?.disarm() } },
             onWatchEvent = { event, valid, send -> WearPhoneBridge.receiveMac(context, event, valid, send) },
             onCommand = { command ->
@@ -115,10 +119,11 @@ class BridgeRuntime(private val context: Context, private val onChanged: Runnabl
             onMediaEvent = { event, authorized -> handler.post {
                 if (!destroyed && authorized()) media?.receive(event)
             } },
-            onTaskSubscription = { enabled, generation -> handler.post {
+            onTaskSubscription = { enabled, generation, changeOnly -> handler.post {
                 taskGeneration = generation
-                taskUrls?.setSubscribed(enabled && !destroyed)
+                taskUrls?.setSubscribed(enabled && !destroyed, changeOnly)
             } },
+            onAppLibrary = { command, authorized, reply -> appLibrary.receive(command, authorized, reply) },
             onShareLinkResult = { id, success -> handler.post { sharedLinks.remove(id)?.accept(success) } },
             onOpenLink = { url, authorized, reply -> handler.post {
                 val client = taskUrls
@@ -210,7 +215,7 @@ class BridgeRuntime(private val context: Context, private val onChanged: Runnabl
                     }
                     else -> {
                         updateDetailsOnly(checkedDetails.orEmpty())
-                        // Periodic republish makes a dropped BLE notification harmless.
+                        // Publish changed endpoints; the BLE publisher suppresses unchanged values per session.
                         ble.publish()
                     }
                 }
@@ -271,6 +276,7 @@ class BridgeRuntime(private val context: Context, private val onChanged: Runnabl
         clipboard?.close(); clipboard = null
         sharedLinks.values.toList().forEach { it.accept(false) }; sharedLinks.clear()
         taskUrls?.close(); taskUrls = null
+        appLibrary.close()
         Shizuku.removeBinderReceivedListener(shizukuReceived)
         Shizuku.removeRequestPermissionResultListener(shizukuPermission)
         runCatching { context.unregisterReceiver(bluetoothChanged) }

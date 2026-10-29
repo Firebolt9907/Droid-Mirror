@@ -38,3 +38,4 @@ __pycache__/
 /outputs/activity-renderer-preview/
 /outputs/aod-overlay-preview/
 /outputs/paste-fix/
+/outputs/*

@@ -17,6 +17,15 @@ public final class NotificationOpenGateTest {
         gate = new NotificationOpenGate(1000);
         check(gate.poll(30999, true, true, true) == WAIT, "Wait within deadline");
         check(gate.poll(31000, false, true, true) == REJECT, "Unlock at expiry must not open");
+        gate = new NotificationOpenGate(1000);
+        check(gate.poll(1000, false, false, true, true) == WAIT, "Wait for bridge binding before consuming click");
+        check(gate.poll(1200, false, true, true, true) == OPEN, "Open once bridge is ready");
+        check(gate.poll(1400, false, true, true, true) == REJECT, "Bridge readiness must not resend an open");
+        gate = new NotificationOpenGate(1000);
+        check(gate.poll(1000, false, false, true, true) == WAIT, "Bridge can be temporarily unavailable");
+        check(gate.poll(1200, false, false, false, true) == REJECT, "Lost authentication cancels bridge wait");
+        check(new NotificationOpenGate(1000).poll(31000, false, false, true, true) == REJECT,
+            "Bridge wait shares the bounded unlock deadline");
         System.out.println("Notification unlock, stale action, session loss, timeout and single-open tests passed");
     }
     private static void check(boolean condition, String message) {

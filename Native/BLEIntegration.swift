@@ -20,6 +20,7 @@ public func refreshDroidMirrorBLEMenu() {
 }
 
 func shareDroidMirrorLink(_ url: URL) { integration?.shareLink(url) }
+func openDroidMirrorPhoneApp(_ url: URL) { integration?.openPhoneApp(url) }
 
 private final class BLEIntegration: NSObject {
     private let wear = WearCompanion()
@@ -43,6 +44,8 @@ private final class BLEIntegration: NSObject {
     private var mediaStatusItem: NSMenuItem?
     private var remoteMediaStatus = "Media syncing off"
     private var clipboard: ClipboardSync?
+    private var appLibrary: PhoneAppLibrary?
+    func openPhoneApp(_ url: URL) { appLibrary?.open(url) }
     private var taskContinuation: TaskContinuation?
     private var hotspot: PhoneHotspot?
     private var clipboardItem: NSMenuItem?
@@ -61,13 +64,14 @@ private final class BLEIntegration: NSObject {
         media = NotificationRuntime.background ? MediaPlaybackSync() : nil
         clipboard = NotificationRuntime.background ? ClipboardSync() : nil
         taskContinuation = NotificationRuntime.background ? TaskContinuation() : nil
+        appLibrary = NotificationRuntime.background ? PhoneAppLibrary() : nil
         hotspot = NotificationRuntime.background ? PhoneHotspot() : nil
         discoveryNotifications?.onResponse = { [weak self] response in self?.phoneNotifications?.respond(response) }
         NotificationRuntime.preferences.register(defaults: [enabledKey: true])
         if NotificationRuntime.background && NotificationRuntime.preferences.bool(forKey: enabledKey) { start() }
         let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
             guard let self else { return }
-            if NotificationRuntime.background { self.links.tick(); self.wear.tick(); self.publishStatus() }
+            if NotificationRuntime.background { self.links.tick(); self.appLibrary?.tick(); self.wear.tick(); self.publishStatus() }
             else { self.refreshMenu() }
         }
         self.timer = timer
@@ -106,6 +110,7 @@ private final class BLEIntegration: NSObject {
             self.hotspot?.controller = nil
             self.hotspot?.clear()
             self.taskContinuation?.clear()
+            self.appLibrary?.disconnected(); self.appLibrary?.controller = nil
             self.links.cancel()
             self.controller?.stop(); self.controller = nil; self.subscriptions.removeAll()
             if NotificationRuntime.preferences.bool(forKey: self.enabledKey) { self.start() }
@@ -138,6 +143,7 @@ private final class BLEIntegration: NSObject {
             "status": controller?.status ?? "Bluetooth receiver disabled",
             "bleDiagnostics": controller?.diagnostics ?? "disabled",
             "notifications": phoneNotifications?.diagnostics ?? "unavailable",
+            "appLibrary": appLibrary?.diagnostics ?? "unavailable",
             "battery": wear.batteryStatus,
             "media": media?.status ?? "Media syncing off",
             "clipboard": clipboard?.status ?? "Clipboard mirroring off",
@@ -153,6 +159,7 @@ private final class BLEIntegration: NSObject {
         media?.controller = bridge
         clipboard?.controller = bridge
         taskContinuation?.controller = bridge
+        appLibrary?.controller = bridge
         hotspot?.controller = bridge
         bridge.onEvent = { [weak self] event in
             if (event["type"] as? String)?.hasPrefix("watch") == true {
@@ -163,6 +170,8 @@ private final class BLEIntegration: NSObject {
                 self?.media?.receive(event)
             } else if event["type"] as? String == "hotspotResult" {
                 self?.hotspot?.receive(event)
+            } else if event["type"] as? String == "appCatalogChanged" {
+                self?.appLibrary?.catalogChanged(event)
             } else if event["type"] as? String == "taskContinuation" {
                 self?.taskContinuation?.receive(event)
             } else if (event["type"] as? String)?.hasPrefix("clipboard") == true {
@@ -185,6 +194,7 @@ private final class BLEIntegration: NSObject {
         }
         bridge.onDisconnected = { [weak self] in
             self?.phoneNotifications?.disconnected()
+            self?.appLibrary?.disconnected()
             self?.wear.clear()
             self?.media?.clear()
             self?.clipboard?.disconnected()
@@ -195,6 +205,7 @@ private final class BLEIntegration: NSObject {
         bridge.onAuthenticated = { [weak self] in
             self?.wear.connected()
             self?.phoneNotifications?.connected()
+            self?.appLibrary?.connected()
             self?.media?.connected()
             self?.clipboard?.connected()
             self?.taskContinuation?.connected()
@@ -216,6 +227,7 @@ private final class BLEIntegration: NSObject {
         media?.stop()
         clipboard?.stop()
         taskContinuation?.stop()
+        appLibrary?.stop()
         hotspot?.stop()
         phoneNotifications?.stop()
         discoveryNotifications?.stop()
@@ -307,6 +319,7 @@ private final class BLEIntegration: NSObject {
             wear.clear()
             media?.clear()
             taskContinuation?.clear()
+            appLibrary?.disconnected(); appLibrary?.controller = nil
             controller?.stop()
             controller = nil
             subscriptions.removeAll()

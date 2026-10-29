@@ -23,6 +23,7 @@ use tokio::{
 use zeroize::Zeroize;
 
 const ALPN: &[u8] = b"droidmirror/video/1";
+const LIBRARY_ALPN: &[u8] = b"droidmirror/app-library/1";
 const AUDIO_ALPN: &[u8] = b"droidmirror/audio/1";
 
 fn diagnostic(message: &str) {
@@ -57,7 +58,7 @@ fn identity(key: &[u8; 32], role: &[u8]) -> SecretKey {
     secret
 }
 
-async fn endpoint(secret: SecretKey) -> Result<Endpoint> {
+async fn endpoint_mode(secret: SecretKey, library: bool) -> Result<Endpoint> {
     // LAN discovery only: never register with public discovery or relay services.
     let ep = Endpoint::builder(presets::Minimal)
         .relay_mode(RelayMode::Disabled)
@@ -71,7 +72,11 @@ async fn endpoint(secret: SecretKey) -> Result<Endpoint> {
                 .build(),
         )
         .secret_key(secret)
-        .alpns(vec![ALPN.to_vec(), AUDIO_ALPN.to_vec()])
+        .alpns(if library {
+            vec![LIBRARY_ALPN.to_vec()]
+        } else {
+            vec![ALPN.to_vec(), AUDIO_ALPN.to_vec()]
+        })
         .bind()
         .await?;
     // A network blocking multicast leaves this path unavailable; the host tries ADB.
@@ -237,7 +242,7 @@ async fn desktop(
 }
 
 #[cfg(target_os = "android")]
-async fn phone(ep: Endpoint, peer: EndpointId) -> Result<()> {
+async fn phone(ep: Endpoint, peer: EndpointId, library: bool) -> Result<()> {
     use std::os::{
         android::net::SocketAddrExt,
         unix::net::{SocketAddr, UnixStream},
@@ -247,7 +252,7 @@ async fn phone(ep: Endpoint, peer: EndpointId) -> Result<()> {
         let Ok(Ok(conn)) = tokio::time::timeout(Duration::from_secs(5), incoming).await else {
             continue;
         };
-        if !paired(&conn, peer) {
+        if !paired(&conn, peer) || (library && conn.alpn() != LIBRARY_ALPN) {
             continue;
         }
         let Ok(permit) = permits.clone().try_acquire_owned() else {
@@ -257,7 +262,9 @@ async fn phone(ep: Endpoint, peer: EndpointId) -> Result<()> {
         let audio = conn.alpn() == AUDIO_ALPN;
         tokio::spawn(async move {
             let _permit = permit;
-            let name = if audio {
+            let name = if library {
+                b"droidmirror_app_library".as_slice()
+            } else if audio {
                 b"droidmirror_audio_upgrade".as_slice()
             } else {
                 b"droidmirror_video_upgrade".as_slice()
@@ -319,9 +326,11 @@ impl Drop for Bridge {
     }
 }
 
-fn start(mut key: [u8; 32], is_phone: bool) -> Result<(Bridge, u16)> {
-    let secret = identity(&key, if is_phone { b"phone" } else { b"mac" });
-    let peer = identity(&key, if is_phone { b"mac" } else { b"phone" }).public();
+fn start_mode(mut key: [u8; 32], is_phone: bool, library: bool) -> Result<(Bridge, u16)> {
+    let phone_role: &[u8] = if library { b"phone-library" } else { b"phone" };
+    let mac_role: &[u8] = if library { b"mac-library" } else { b"mac" };
+    let secret = identity(&key, if is_phone { phone_role } else { mac_role });
+    let peer = identity(&key, if is_phone { mac_role } else { phone_role }).public();
     key.zeroize();
     let listener = if is_phone {
         None
@@ -333,7 +342,7 @@ fn start(mut key: [u8; 32], is_phone: bool) -> Result<(Bridge, u16)> {
         .map(|l| l.local_addr().map(|a| a.port()))
         .transpose()?
         .unwrap_or(0);
-    let audio_listener = if is_phone {
+    let audio_listener = if is_phone || library {
         None
     } else {
         Some(TcpListener::bind(("127.0.0.1", 0))?)
@@ -360,9 +369,12 @@ fn start(mut key: [u8; 32], is_phone: bool) -> Result<(Bridge, u16)> {
             tokio::select! {
                 _ = stopped => {},
                 result = async {
-                    let ep = endpoint(secret).await?;
+                    let ep = endpoint_mode(secret, library).await?;
                     *worker_local.write().expect("local endpoint poisoned") = Some(ep.clone());
                     if let Some(listener) = listener {
+                        if library {
+                            return desktop(ep, peer, listener, worker_remote, updates, LIBRARY_ALPN).await;
+                        }
                         let audio_listener = audio_listener.context("audio listener missing")?;
                         tokio::try_join!(
                             desktop(ep.clone(), peer, listener, worker_remote.clone(), updates.clone(), ALPN),
@@ -372,7 +384,7 @@ fn start(mut key: [u8; 32], is_phone: bool) -> Result<(Bridge, u16)> {
                     }
                     else {
                         #[cfg(target_os = "android")]
-                        { phone(ep, peer).await }
+                        { phone(ep, peer, library).await }
                         #[cfg(not(target_os = "android"))]
                         { anyhow::bail!("phone endpoint requires Android") }
                     }
@@ -393,6 +405,35 @@ fn start(mut key: [u8; 32], is_phone: bool) -> Result<(Bridge, u16)> {
         },
         port,
     ))
+}
+
+fn start(key: [u8; 32], is_phone: bool) -> Result<(Bridge, u16)> {
+    start_mode(key, is_phone, false)
+}
+
+/// Starts a dedicated, separately identified app-library connection.
+/// # Safety
+/// Same pointer contract as dm_peer_start.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dm_peer_library_start(key: *const u8, port: *mut u16) -> *mut Bridge {
+    if key.is_null() || port.is_null() {
+        return std::ptr::null_mut();
+    }
+    let mut bytes = [0; 32];
+    unsafe {
+        bytes.copy_from_slice(std::slice::from_raw_parts(key, 32));
+    }
+    let result = start_mode(bytes, false, true);
+    bytes.zeroize();
+    match result {
+        Ok((bridge, value)) => {
+            unsafe {
+                *port = value;
+            }
+            Box::into_raw(Box::new(bridge))
+        }
+        Err(_) => std::ptr::null_mut(),
+    }
 }
 
 /// Starts a Mac tunnel. Key is copied immediately and never persisted or logged.
@@ -514,11 +555,23 @@ mod android {
     static INITIALIZE: std::sync::Mutex<()> = std::sync::Mutex::new(());
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_app_droidmirror_bluetooth_PeerVideoTransport_nativeStart(
-        mut env: JNIEnv,
+        env: JNIEnv,
         _: JClass,
         context: JObject,
         key: JByteArray,
     ) -> jlong {
+        native_start(env, context, key, false)
+    }
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_app_droidmirror_bluetooth_PeerLibraryEndpoint_nativeStart(
+        env: JNIEnv,
+        _: JClass,
+        context: JObject,
+        key: JByteArray,
+    ) -> jlong {
+        native_start(env, context, key, true)
+    }
+    fn native_start(mut env: JNIEnv, context: JObject, key: JByteArray, library: bool) -> jlong {
         let Ok(_guard) = INITIALIZE.lock() else {
             return 0;
         };
@@ -547,7 +600,7 @@ mod android {
         let mut fixed = [0; 32];
         fixed.copy_from_slice(&bytes);
         bytes.zeroize();
-        let result = start(fixed, true);
+        let result = start_mode(fixed, true, library);
         fixed.zeroize();
         match result {
             Ok((bridge, _)) => Box::into_raw(Box::new(bridge)) as jlong,
@@ -624,6 +677,68 @@ mod tests {
         drop(bridge);
         assert!(started.elapsed() < Duration::from_secs(3));
         assert!(std::net::TcpStream::connect(("127.0.0.1", port)).is_err());
+    }
+
+    #[tokio::test]
+    async fn library_lane_is_separate_and_progresses_with_blocked_video() {
+        use tokio::io::AsyncReadExt;
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let key = [91; 32];
+            assert_ne!(
+                identity(&key, b"mac").public(),
+                identity(&key, b"mac-library").public()
+            );
+            let video_server = Endpoint::builder(presets::Minimal)
+                .secret_key(identity(&key, b"phone"))
+                .alpns(vec![ALPN.to_vec()])
+                .bind()
+                .await
+                .unwrap();
+            let library_server = Endpoint::builder(presets::Minimal)
+                .secret_key(identity(&key, b"phone-library"))
+                .alpns(vec![LIBRARY_ALPN.to_vec()])
+                .bind()
+                .await
+                .unwrap();
+            let (video_bridge, video_port) = start(key, false).unwrap();
+            let (library_bridge, library_port) = start_mode(key, false, true).unwrap();
+            assert_eq!(library_bridge.audio_port, 0);
+            video_bridge
+                .remote
+                .write()
+                .unwrap()
+                .extend(video_server.addr().ip_addrs().copied());
+            library_bridge
+                .remote
+                .write()
+                .unwrap()
+                .extend(library_server.addr().ip_addrs().copied());
+            let _video = tokio::net::TcpStream::connect(("127.0.0.1", video_port))
+                .await
+                .unwrap();
+            let video = video_server.accept().await.unwrap().await.unwrap();
+            let _blocked = prepare_stream(&video, false).await.unwrap();
+            let mut local = tokio::net::TcpStream::connect(("127.0.0.1", library_port))
+                .await
+                .unwrap();
+            let connection = library_server.accept().await.unwrap().await.unwrap();
+            assert_eq!(connection.alpn(), LIBRARY_ALPN);
+            assert!(paired(&connection, identity(&key, b"mac-library").public()));
+            assert_ne!(connection.remote_id(), identity(&key, b"mac").public());
+            let (mut send, _recv) = prepare_stream(&connection, false).await.unwrap();
+            let payload = vec![71; 65536];
+            send.write_all(&payload).await.unwrap();
+            let mut actual = vec![0; payload.len()];
+            local.read_exact(&mut actual).await.unwrap();
+            assert_eq!(actual, payload);
+            drop(local);
+            drop(library_bridge);
+            drop(video_bridge);
+            library_server.close().await;
+            video_server.close().await;
+        })
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
@@ -774,7 +889,9 @@ mod tests {
 
     #[tokio::test]
     async fn production_endpoint_disables_relays_and_public_discovery() {
-        let ep = endpoint(identity(&[42; 32], b"mac")).await.unwrap();
+        let ep = endpoint_mode(identity(&[42; 32], b"mac"), false)
+            .await
+            .unwrap();
         assert_eq!(ep.addr().relay_urls().count(), 0);
         // The only allowed address lookup is local multicast, if available.
         assert!(ep.address_lookup().unwrap().len() <= 1);

@@ -10,6 +10,9 @@ static NSEvent *Input(NSString *text, unsigned short key, NSEventModifierFlags f
 
 int main(void) {
     @autoreleasepool {
+        // The routing hook is exercised in SyntheticTextQueueTests with SDL's
+        // real Cocoa backend; keep this test independent of a video session.
+        (void)DMInstallSyntheticTextRouting;
         assert(DMSyntheticTextEvent(Input(@"😀", kVK_ANSI_A, 0)));
         assert(DMSyntheticTextEvent(Input(@"https://example.com/path?q=hello", kVK_ANSI_A, 0)));
         assert(DMSyntheticTextEvent(Input(@"hello\nworld", kVK_ANSI_A, 0)));

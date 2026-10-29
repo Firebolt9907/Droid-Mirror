@@ -10,6 +10,35 @@ public final class MediaSyncProtocolTest {
             .put("playing", true).put("actions", new JSONArray().put("play").put("pause").put("seek"));
     }
     public static void main(String[] args) {
+        var wireSender = new app.droidmirror.bluetooth.bridge.MediaStateWire();
+        var wireReceiver = new app.droidmirror.bluetooth.bridge.MediaStateWire();
+        JSONObject full = wireSender.prepare(snapshot(), 0);
+        check(wireReceiver.receive(full).getString("title").equals("Song"));
+        check(wireSender.prepare(snapshot(), 0) != null); // Retry before acknowledgment.
+        wireSender.receive(wireReceiver.prepare(snapshot(), 0));
+        wireReceiver.receive(wireSender.prepare(snapshot(), 0));
+        for (int second = 2; second < 80; second += 2) {
+            check(wireSender.prepare(snapshot().put("position", 20 + second), second * 1000) == null);
+            check(wireReceiver.prepare(snapshot().put("position", 20 + second), second * 1000) == null);
+        }
+        wireReceiver.receive(full); // Sender retries after a lost final acknowledgment.
+        check(wireReceiver.prepare(snapshot().put("position", 98), 78000).getBoolean("unchanged"));
+        check(wireReceiver.prepare(snapshot().put("position", 98), 78000) == null);
+        JSONObject seek = wireSender.prepare(snapshot().put("position", 5), 80000);
+        check(seek != null && !seek.has("unchanged"));
+        check(wireReceiver.receive(seek).getDouble("position") == 5);
+        check(wireSender.prepare(snapshot().put("position", 5), 80000) != null);
+        wireSender.receive(wireReceiver.prepare(snapshot().put("position", 100), 80000));
+        check(wireSender.prepare(snapshot().put("position", 7), 82000) == null);
+        JSONObject paused = snapshot().put("position", 7).put("playing", false);
+        wireReceiver.receive(wireSender.prepare(paused, 82000));
+        wireSender.receive(wireReceiver.prepare(snapshot().put("position", 102), 82000));
+        check(wireSender.prepare(paused, 1000000) == null);
+        check(wireSender.prepare(new JSONObject(paused.toString()).put("title", "New song"), 1000000) != null);
+        var legacyWire = new app.droidmirror.bluetooth.bridge.MediaStateWire();
+        for (int second = 0; second < 20; second++) check(legacyWire.prepare(snapshot(), second * 1000) != null);
+        check(new app.droidmirror.bluetooth.bridge.MediaStateWire().receive(new JSONObject().put("unchanged", true)
+            .put("stateRevision", full.getString("stateRevision"))) == null);
         check(MediaSyncProtocol.validSnapshot(snapshot()));
         check(MediaSyncProtocol.fresh(1000, 8999));
         check(!MediaSyncProtocol.fresh(1000, 9000));

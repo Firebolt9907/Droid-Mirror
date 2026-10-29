@@ -17,6 +17,8 @@ extern void DroidMirrorShowConnecting(SDL_Window *window);
 extern void DroidMirrorPumpPresentation(void);
 
 static BOOL reduceMotion;
+static NSUInteger readinessRequests;
+void DroidMirrorReportMirrorVisible(void) { readinessRequests++; }
 static BOOL TestReduceMotion(id workspace, SEL selector) { return reduceMotion; }
 
 static void PresentState(NSString *path, NSString *title, BOOL connecting) {
@@ -32,6 +34,7 @@ int main(void) {
         NSString *cache = [NSTemporaryDirectory() stringByAppendingPathComponent:NSUUID.UUID.UUIDString];
         setenv("DROIDMIRROR_APPEARANCE_CACHE", cache.UTF8String, 1);
         setenv("DROIDMIRROR_DEVICE_NAME", "Test Phone", 1);
+        setenv("DROIDMIRROR_HOST_PID", "12345", 1);
         NSBitmapImageRep *image = [[NSBitmapImageRep alloc] initWithBitmapDataPlanes:NULL pixelsWide:2 pixelsHigh:2
             bitsPerSample:8 samplesPerPixel:3 hasAlpha:NO isPlanar:NO colorSpaceName:NSDeviceRGBColorSpace bytesPerRow:0 bitsPerPixel:0];
         NSUInteger red[] = {255, 0, 0};
@@ -62,6 +65,12 @@ int main(void) {
             SDL_GetWindowProperties(loading), SDL_PROP_WINDOW_COCOA_WINDOW_POINTER, NULL);
         NSInteger number = native.windowNumber;
         DroidMirrorShowConnecting(loading);
+        [[NSDistributedNotificationCenter defaultCenter] postNotificationName:@"app.droidmirror.focusMirror"
+            object:@"12345" userInfo:nil deliverImmediately:YES];
+        NSDate *focusDeadline = [NSDate dateWithTimeIntervalSinceNow:2];
+        while (!readinessRequests && focusDeadline.timeIntervalSinceNow > 0)
+            [NSRunLoop.currentRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.01]];
+        assert(readinessRequests == 1);
         assert(!(native.styleMask & NSWindowStyleMaskTitled));
         assert(native.collectionBehavior & NSWindowCollectionBehaviorPrimary);
         assert(native.collectionBehavior & NSWindowCollectionBehaviorManaged);
@@ -150,7 +159,24 @@ int main(void) {
         DroidMirrorVideoSurfaceReady();
         assert(native.contentView.subviews.lastObject == overlay); // Recheck lazy drawable insertion.
         assert(![overlay.layer animationForKey:@"firstFrameReveal"]); // Warmup does not start entrance.
+        NSString *revealPath = [NSTemporaryDirectory() stringByAppendingPathComponent:NSUUID.UUID.UUIDString];
+        setenv("DROIDMIRROR_REVEAL_STATE", revealPath.UTF8String, 1);
+        NSMutableDictionary *shortcut = [@{@"token": @"test-shortcut", @"expires": @(NSDate.timeIntervalSinceReferenceDate + 30), @"ready": @NO} mutableCopy];
+        [[NSJSONSerialization dataWithJSONObject:shortcut options:0 error:nil] writeToFile:revealPath atomically:YES];
+        DMPrepareShortcutReveal();
         DMFinishConnectingPhone();
+        assert(![overlay.layer animationForKey:@"firstFrameReveal"]); // Video ready is not app ready.
+        DMShortcutRevealFramePresented(100);
+        assert(![overlay.layer animationForKey:@"firstFrameReveal"]); // Old-app frames remain covered.
+        shortcut[@"ready"] = @YES; shortcut[@"displayedAtUs"] = @200;
+        [[NSJSONSerialization dataWithJSONObject:shortcut options:0 error:nil] writeToFile:revealPath atomically:YES];
+        DMPrepareShortcutReveal();
+        assert(![overlay.layer animationForKey:@"firstFrameReveal"]); // Acknowledgment alone cannot reveal an older frame.
+        DMShortcutRevealFramePresented(150);
+        assert(![overlay.layer animationForKey:@"firstFrameReveal"]); // Queued pre-launch frames stay covered.
+        DMShortcutRevealFramePresented(201); // A captured frame after app display releases the same surface.
+        [[NSFileManager defaultManager] removeItemAtPath:revealPath error:nil];
+        unsetenv("DROIDMIRROR_REVEAL_STATE");
 
         assert(native.contentView.subviews.lastObject == overlay);
         CALayer *videoLayer = native.contentView.subviews.firstObject.layer;
@@ -213,6 +239,14 @@ int main(void) {
         while (deadline.timeIntervalSinceNow > 0)
             [NSRunLoop.currentRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.01]];
         assert(!overlay.superview && !overlay.layer.animationKeys.count);
+        // Opening another notification must request readiness again even
+        // though the persistent window has already finished its first frame.
+        [[NSDistributedNotificationCenter defaultCenter] postNotificationName:@"app.droidmirror.focusMirror"
+            object:@"12345" userInfo:nil deliverImmediately:YES];
+        focusDeadline = [NSDate dateWithTimeIntervalSinceNow:2];
+        while (readinessRequests < 2 && focusDeadline.timeIntervalSinceNow > 0)
+            [NSRunLoop.currentRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.01]];
+        assert(readinessRequests == 2);
         assert(![videoLayer animationForKey:@"firstFrameZoom"] && ![videoLayer animationForKey:@"firstFrameBlur"]);
         assert(!videoLayer.filters.count && CATransform3DIsIdentity(videoLayer.transform));
         // Accessibility skips the fade, zoom and blur.
@@ -243,6 +277,6 @@ int main(void) {
         SDL_DestroyRenderer(renderer);
         SDL_DestroyWindow(video);
         SDL_Quit();
-        puts("PASS: Metal-backed eased fade/zoom/unblur, interruptible reveal, reduced motion, shared window and exact corners");
+        puts("PASS: app-display and capture-timestamp reveal gate, Metal-backed fade/zoom/unblur, reduced motion, shared window and exact corners");
     }
 }

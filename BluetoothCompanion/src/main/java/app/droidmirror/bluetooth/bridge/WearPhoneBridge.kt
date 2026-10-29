@@ -26,6 +26,8 @@ object WearPhoneBridge {
     private val leases = linkedMapOf<String, Lease>()
     private val requests = linkedSetOf<String>()
     private val pending = mutableMapOf<String, String>()
+    private val awaitingTickets = mutableSetOf<String>()
+    private var sentBattery = ""
     private val tick = object : Runnable {
         override fun run() {
             val ctx = context ?: return
@@ -38,6 +40,7 @@ object WearPhoneBridge {
     }
     fun disconnected(ctx: Context) {
         main.post {
+            sentBattery = ""; awaitingTickets.clear()
             mac = null; macSend = null; macValid = null
             pending.toMap().forEach { (request, node) -> result(ctx, node, request, "Mac disconnected") }
             pending.clear(); refresh(ctx)
@@ -49,8 +52,17 @@ object WearPhoneBridge {
             when (event.optString("type")) {
                 "watchMacState" -> {
                     if (!runCatching { UUID.fromString(event.getString("id")) }.isSuccess) return@post
+                    if (event.optString("id") != mac?.optString("id")) sentBattery = ""
                     mac = event; macAt = SystemClock.elapsedRealtime(); macValid = valid; macSend = send
                     refresh(ctx)
+                }
+                "watchMacTicket" -> {
+                    val request = event.optString("request")
+                    if (event.optString("id") != currentMac()?.optString("id") || request !in pending ||
+                        !awaitingTickets.remove(request) || !runCatching { UUID.fromString(event.getString("ticket")) }.isSuccess) return@post
+                    val sent = macSend?.invoke(JSONObject().put("type", "watchFindMac").put("id", event.getString("id"))
+                        .put("ticket", event.getString("ticket")).put("request", request)) == true
+                    if (!sent) pending.remove(request)?.let { result(ctx, it, request, "Mac disconnected") }
                 }
                 "watchFindResult" -> {
                     if (event.optString("id") != currentMac()?.optString("id")) return@post
@@ -62,7 +74,7 @@ object WearPhoneBridge {
         }
     }
     private fun currentMac(): JSONObject? = mac?.takeIf {
-        SystemClock.elapsedRealtime() - macAt in 0 until WearProtocol.LEASE_MS && macValid?.invoke() == true
+        (it.optBoolean("changeOnly") || SystemClock.elapsedRealtime() - macAt in 0 until WearProtocol.LEASE_MS) && macValid?.invoke() == true
     }
     fun battery(ctx: Context): JSONObject {
         val status = ctx.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
@@ -80,7 +92,14 @@ object WearPhoneBridge {
     }
     private fun publish(ctx: Context) {
         val current = currentMac()
-        if (current != null) macSend?.invoke(battery(ctx).put("type", "watchPhoneBattery").put("id", current.getString("id")))
+        if (current != null) {
+            val state = battery(ctx).put("type", "watchPhoneBattery").put("id", current.getString("id"))
+            if (current.optBoolean("changeOnly")) state.put("changeOnly", true)
+            val fingerprint = state.toString()
+            if (!current.optBoolean("changeOnly") || fingerprint != sentBattery) {
+                if (macSend?.invoke(state) == true) sentBattery = fingerprint
+            }
+        }
         Wearable.getNodeClient(ctx).connectedNodes.addOnSuccessListener { nodes -> main.post {
             nodes.forEach { sendState(ctx, it.id) }
         } }
@@ -124,9 +143,14 @@ object WearPhoneBridge {
                 } else {
                     if (pending.size >= 4) { result(ctx,node,request,"Please wait before ringing again"); return@post }
                     pending[request] = node
-                    val sent = macSend?.invoke(JSONObject().put("type", "watchFindMac").put("id", target).put("ticket", currentMac()?.optString("ticket") ?: "").put("request", request)) == true
-                    if (!sent) { pending.remove(request); result(ctx,node,request,"Mac disconnected") }
-                    else main.postDelayed({ pending.remove(request)?.let { result(ctx,it,request,"No response from Mac") } }, 5000)
+                    val changeOnly = currentMac()?.optBoolean("changeOnly") == true
+                    if (changeOnly) awaitingTickets.add(request)
+                    val command = JSONObject().put("type", if (changeOnly) "watchTicketRequest" else "watchFindMac")
+                        .put("id", target).put("request", request)
+                    if (!changeOnly) command.put("ticket", currentMac()?.optString("ticket") ?: "")
+                    val sent = macSend?.invoke(command) == true
+                    if (!sent) { awaitingTickets.remove(request); pending.remove(request); result(ctx,node,request,"Mac disconnected") }
+                    else main.postDelayed({ awaitingTickets.remove(request); pending.remove(request)?.let { result(ctx,it,request,"No response from Mac") } }, 5000)
                 }
             } }
         }

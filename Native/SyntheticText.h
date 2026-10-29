@@ -1,5 +1,6 @@
 #import <AppKit/AppKit.h>
 #import <Carbon/Carbon.h>
+#import <objc/runtime.h>
 #include "../scrcpy-5.0/app/src/droidmirror_text_event.h"
 
 static BOOL DMPasteShortcutEvent(NSEvent *event) {
@@ -42,4 +43,61 @@ static BOOL DMQueueSyntheticText(NSString *text) {
     if (SDL_PushEvent(&event)) return YES;
     free(copy);
     return NO;
+}
+
+static BOOL (^DMSyntheticInputTarget)(NSEvent *);
+static BOOL DMSyntheticAActive, DMSyntheticVActive;
+static NSEvent *(*DMOriginalNextInputEvent)(id, SEL, NSEventMask, NSDate *, NSString *, BOOL);
+
+static BOOL DMConsumeSyntheticInput(NSEvent *event) {
+    if (event.type == NSEventTypeKeyUp) {
+        if (event.keyCode == kVK_ANSI_A && DMSyntheticAActive) {
+            DMSyntheticAActive = NO;
+            return YES;
+        }
+        if (event.keyCode == kVK_ANSI_V && DMSyntheticVActive) {
+            DMSyntheticVActive = NO;
+            return YES;
+        }
+    }
+    if (!DMSyntheticInputTarget(event)) return NO;
+    if (DMPasteShortcutEvent(event)) {
+        NSString *text = [NSPasteboard.generalPasteboard stringForType:NSPasteboardTypeString];
+        // Preserve the existing route for non-text clipboards.
+        if (!text) return NO;
+        if (!event.isARepeat && !DMQueueSyntheticText(text))
+            NSLog(@"DroidMirror: could not queue clipboard paste");
+        DMSyntheticVActive = YES;
+        return YES;
+    }
+    if (DMSyntheticTextEvent(event)) {
+        if (!DMQueueSyntheticText(event.characters))
+            NSLog(@"DroidMirror: could not queue synthetic text");
+        DMSyntheticAActive = YES;
+        return YES;
+    }
+    return NO;
+}
+
+// SDL Cocoa translates keys *before* NSApplication.sendEvent:. Intercept the
+// dequeue instead, so consumed Unicode events generate neither a HID A nor a
+// second SDL_TEXTINPUT. Peeking must leave both the queue and our state intact.
+static NSEvent *DMNextInputEvent(id app, SEL selector, NSEventMask mask,
+                               NSDate *until, NSString *mode, BOOL dequeue) {
+    for (;;) {
+        NSEvent *event = DMOriginalNextInputEvent(app, selector, mask, until, mode, dequeue);
+        if (!event || !dequeue || !DMConsumeSyntheticInput(event)) return event;
+        // We queued SDL input; do not block waiting for another native event.
+        until = NSDate.distantPast;
+    }
+}
+
+static void DMInstallSyntheticTextRouting(BOOL (^target)(NSEvent *)) {
+    DMSyntheticInputTarget = [target copy];
+    if (DMOriginalNextInputEvent) return;
+    Method method = class_getInstanceMethod(NSApplication.class,
+        @selector(nextEventMatchingMask:untilDate:inMode:dequeue:));
+    DMOriginalNextInputEvent = (void *)method_getImplementation(method);
+    method_setImplementation(method, (IMP)DMNextInputEvent);
+    NSLog(@"DroidMirror synthetic text routing v2: intercept before SDL translation");
 }

@@ -346,6 +346,16 @@ its advertised action specification is unchanged; changed actions cancel. Androi
 revalidates notification/session identity and waits for unlock before performing
 an app-opening PendingIntent. Live activity opens use the ordinary mirror startup
 path without requesting a legacy wireless-ADB connection.
+App-opening PendingIntents are sent by the Shizuku task bridge with shell attribution:
+Android can silently block the background companion's direct send even after video
+starts. Only the original notification capability crosses local Binder IPC; it is
+not reconstructed from a package name. The listener validates the authenticated
+session, notification version and unlock immediately before dispatch, and the
+bridge rechecks keyguard state. Bridge binding and unlock share a 30-second deadline;
+waiting rechecks authentication and notification identity on every poll. The shell
+entry prepares a Looper before first-use context initialization on its Binder thread.
+Opens are never retried after dispatch. Replies and
+broadcast/service actions retain their direct path.
 
 Settings → Live activities lists sources by app and Android notification channel.
 Its switches are independent of ordinary notification switches. Disabling a source

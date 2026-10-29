@@ -75,3 +75,28 @@ enum NotificationConversationContent {
         return String(lines.joined(separator: "\n").prefix(4000))
     }
 }
+
+// Require authentication context and one unambiguous token. Never infer a code
+// from an ordinary number (parcel IDs, prices, phone numbers, etc.).
+enum NotificationVerificationCode {
+    static func detect(_ event: [String: Any]) -> String? {
+        guard event["snapshot"] as? Bool != true, event["silent"] as? Bool != true,
+              event["fromMe"] as? Bool != true else { return nil }
+        let messages = event["messages"] as? [[String: Any]] ?? []
+        guard messages.last?["outgoing"] as? Bool != true else { return nil }
+        let body = messages.last?["text"] as? String ?? event["body"] as? String ?? ""
+        let text = [event["title"] as? String ?? "", event["subtitle"] as? String ?? "", body].joined(separator: "\n")
+        let context = #"(?i)\b(?:2fa|otp|verification|authentication|security code|login code|sign[ -]?in code|one[ -]?time (?:code|password|passcode)|verify|confirmation code)\b"#
+        guard text.range(of: context, options: .regularExpression) != nil else { return nil }
+        let pattern = #"(?<![\p{L}\p{N}])(?:[0-9]{4,8}|[A-Za-z0-9]{6,8})(?![\p{L}\p{N}])"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+        let tokens = regex.matches(in: text, range: NSRange(text.startIndex..., in: text)).compactMap { match -> String? in
+            guard let range = Range(match.range, in: text) else { return nil }
+            let token = String(text[range])
+            guard token.contains(where: { $0.isNumber }) else { return nil }
+            return token
+        }
+        let unique = Set(tokens)
+        return unique.count == 1 ? unique.first : nil
+    }
+}

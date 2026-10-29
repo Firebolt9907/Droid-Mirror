@@ -14,7 +14,6 @@ final class AndroidNotificationBridge {
     private var actions = NotificationActionQueue()
     private var conversations = NotificationConversationState()
     private var visible = false
-    private var lastStart = Date.distantPast
     private let policy = NotificationDeliveryPolicy()
     private var sessionObserver: NSObjectProtocol?
     private var configurationObserver: NSObjectProtocol?
@@ -30,6 +29,8 @@ final class AndroidNotificationBridge {
     private var iconsAttached = 0
     private var focusPolicy = NotificationFocusPolicy()
     private var presentation = NotificationPresentationPolicy()
+    private var copiedCodes = Set<String>()
+    private var copiedCodeOrder = [String]()
     private var dismissals = NotificationDismissalQueue()
     private static let fallbackCategory = "DroidMirror.dismiss"
     var diagnostics: String {
@@ -294,11 +295,32 @@ final class AndroidNotificationBridge {
                     else { DispatchQueue.main.async {
                         guard let self else { return }
                         self.accepted += 1
+                        if !quiet, BLETrust.identity == identity, self.appPreferences.allows(event),
+                           let code = NotificationVerificationCode.detect(event) {
+                            self.copyVerificationCode(code, identity: identity, card: card)
+                        }
                         if !self.appPreferences.allows(event) { self.applyAppPreferences() }
                     } }
                     if let icon { try? FileManager.default.removeItem(at: icon.directory) }
                 }
             }
+    }
+    private func copyVerificationCode(_ code: String, identity: String, card: String) {
+        let key = SHA256.hash(data: Data((identity + ":" + card + ":" + code).utf8))
+            .map { String(format: "%02x", $0) }.joined()
+        guard !copiedCodes.contains(key) else { return }
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        guard pasteboard.setString(code, forType: .string) else { return }
+        copiedCodes.insert(key); copiedCodeOrder.append(key)
+        if copiedCodeOrder.count > 256 { copiedCodes.remove(copiedCodeOrder.removeFirst()) }
+        let content = UNMutableNotificationContent()
+        content.title = "2FA code received"
+        content.subtitle = "Copied \"\(code)\" to clipboard"
+        content.interruptionLevel = .active
+        center.add(UNNotificationRequest(identifier: "DroidMirror.code." + key, content: content, trigger: nil)) { error in
+            if let error { NSLog("DroidMirror code confirmation failed: %@", error.localizedDescription) }
+        }
     }
     private func restoreConversation(_ id: String) {
         // Wait until the response completion has let macOS dismiss its old card.
@@ -365,6 +387,10 @@ final class AndroidNotificationBridge {
         let request = UUID().uuidString
         var command: [String: Any] = ["type": "action", "id": id, "version": version,
             "action": selectedAction, "request": request]
+        let specifications = (current ?? info["cardEvent"] as? [String: Any])?["actions"] as? [[String: Any]] ?? []
+        command["opensApp"] = specifications.contains {
+            $0["id"] as? String == selectedAction && $0["opensApp"] as? Bool == true
+        }
         if let reply = response as? UNTextInputNotificationResponse {
             let text = String(reply.userText.prefix(1024))
             guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
@@ -378,7 +404,7 @@ final class AndroidNotificationBridge {
             }
         }
         actions.enqueue(phone: identity, command: command)
-        if command["action"] as? String == "open" {
+        if command["action"] as? String == "open" || command["opensApp"] as? Bool == true {
             focusPolicy = NotificationFocusPolicy()
             visible = false
             controller?.requestEndpoint(); controller?.connectADB()
@@ -401,10 +427,9 @@ final class AndroidNotificationBridge {
                 : "Couldn’t connect to your phone. The notification action was not sent.")
         }
         guard let identity = BLETrust.identity else { return }
-        // An explicit click focuses immediately, even if a recent reconnect
-        // throttles startup or a visible heartbeat arrives before the next flush.
+        // Each explicit click requests startup and focus once. A pending action
+        // must not restart a failed session while waiting for readiness.
         if actions.needsMirror(phone: identity), focusPolicy.requestOnce() {
-            lastStart = Date()
             if NotificationRuntime.background { NotificationRuntime.requestMirror() }
             else if let function = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "DroidMirrorRequestMirror") {
                 unsafeBitCast(function, to: (@convention(c) () -> Void).self)()
@@ -418,14 +443,9 @@ final class AndroidNotificationBridge {
                 actions.sent(request)
             }
         }
-        if !visible && actions.needsMirror(phone: identity) {
-            if Date().timeIntervalSince(lastStart) >= 2 {
-                lastStart = Date()
-                // Host owns launch/cleanup; never start an unmanaged second client.
-                if NotificationRuntime.background { NotificationRuntime.requestMirror(activate: false) }
-            }
-            return
-        }
+        // A pending action waits for readiness or expires. Reissuing startup here
+        // restarts failed sessions and repeatedly wakes/blacks out the phone.
+        // Only a new user action may request another mirror connection.
     }
     private func failure(_ text: String) {
         let content = UNMutableNotificationContent(); content.title = "DroidMirror"; content.body = text

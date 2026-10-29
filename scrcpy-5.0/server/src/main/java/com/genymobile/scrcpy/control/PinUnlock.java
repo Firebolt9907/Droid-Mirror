@@ -19,8 +19,15 @@ public final class PinUnlock {
     public static void unlock(byte[] pin, Device device) throws Exception {
         if (!valid(pin)) throw new IllegalArgumentException("Invalid saved PIN");
         if (!device.locked()) return;
-        device.key(82); // MENU opens the credential bouncer without leaving the last app.
-        device.sleep(400);
+        // Logical wake completes before SystemUI necessarily accepts input. In
+        // particular the first SPACE can be consumed by the AOD/wake transition.
+        // SPACE opens the primary bouncer without the OEM MENU-enable setting.
+        // Prepare twice before touching credentials; never retry PIN submission.
+        for (int i = 0; i < 2; i++) {
+            if (!device.locked()) return;
+            device.key(62); // SPACE also collapses an expanded lock-screen shade.
+            device.sleep(700);
+        }
         for (int i = 0; i < 16; i++) {
             if (!device.locked()) return;
             device.key(67); // DEL clears any partial lock-screen entry.
@@ -33,7 +40,7 @@ public final class PinUnlock {
         }
         device.sleep(250); // Some devices auto-confirm the final digit.
         if (device.locked()) device.key(66); // ENTER only while still on keyguard.
-        long deadline = device.now() + 2000;
+        long deadline = device.now() + 4000;
         while (device.locked()) {
             if (device.now() >= deadline) throw new Failure();
             device.sleep(25);

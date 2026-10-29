@@ -1,166 +1,86 @@
-# Mac left-behind radio experiments
+# Mac left-behind reminders: selected beacon detector
 
-Enable **Mac left-behind alerts (experimental)** in Android's **Notifications
-and left-behind alerts** screen. Keep the background bridge enabled and the
-paired Mac's DroidMirror background receiver running. Install matching Mac and
-Android builds. Allow Nearby Devices and notifications. Significant-motion
-hardware is required; it approximates travel without classifying walking/biking.
-On Android 11 and earlier, BLE scanning also requires the existing location
-permission and Android's Location setting.
+The selected implementation is the former **#2 passive BLE beacon**. Experiments
+#1 (link loss), #3 (reverse GATT challenge), and #4 (Classic RFCOMM challenge) have
+been removed from the runtime, Mac endpoints, and selection UI. Normal mirror
+Bluetooth authentication and sequence checks remain unchanged.
 
-Four detectors run in parallel, each with its own **MacBook left behind? #N**
-notification and persistent firing count:
+## Final selection, 2026-10-29
 
-1. **Authenticated BLE link:** the existing Mac-central → phone-peripheral
-   notification connection. Loss of the last authenticated physical link is the
-   observation; session/security rediscovery alone is not separation.
-2. **Passive Mac BLE beacon:** the Mac advertises a pairing-specific service UUID;
-   the phone scans for it. This needs no connection. It is deliberately a lower
-   confidence measurement: an advertisement can be recorded/spoofed. It grants
-   no trust or command access.
-3. **Phone-initiated BLE GATT challenge:** the phone is the central, the Mac is a
-   peripheral. The phone connects, discovers the dedicated presence service,
-   writes a fresh 16-byte nonce, and reads a 32-byte HMAC proof. A remembered
-   address lets this probe try connecting even when an advertisement is missing.
-   It succeeds only with a valid proof from the paired Mac, not merely a
-   successful connection. Initial discovery shares #2's scan, so these channels
-   are not statistically independent.
-4. **Phone-initiated Bluetooth Classic RFCOMM challenge:** a separate Mac SDP/
-   RFCOMM presence service, independent of BLE. The phone sends a fresh nonce
-   over a real socket and validates a transport-specific HMAC response. Cached
-   SDP UUIDs, device names, bonding and ACL connection alone never count as
-   success. **Pair the Mac in Android system Bluetooth settings first.** The
-   experiment targets the Mac explicitly selected in DroidMirror pairing.
-   If no Mac is selected, it may reuse a previously cryptographically verified
-   address for this pairing. It never cycles through other bonded computers.
-   An unbonded selected target is unavailable, not a miss. Probes have a 20-second
-   deadline and show whether failure occurred opening the socket, writing the
-   nonce, or reading the response. Cached names label the target, not presence. It does not start pairing automatically.
+The read-only phone snapshot showed #2 with 5 correct, zero incorrect, and 2
+unanswered feedback events. #3 had 7 recorded correct, 6 recorded incorrect, and
+2 unanswered; allowing for the user's one known accidental incorrect vote gives
+8 correct and 5 incorrect (about 62% precision among answered alerts). #4 had no
+successful probes and never armed. #1 was already rejected as too noisy.
+These results favor #2 for this user's hardware and usage; they do not establish
+recall or reliability across all sleep/power settings. Historical votes are not
+rewritten because the accidental event is unidentified.
 
-The Mac's presence-only endpoints do not execute commands or grant access to
-mirror/notification sessions. Both active transports use the notification pairing
-key with separate HMAC labels and fresh random nonces for every attempt. A
-response from a previous attempt, another key, or another transport fails
-verification. Existing mirror authentication and sequence checks are unchanged.
-The Mac bounds pending GATT challenges, Classic connections and their lifetimes.
+## Operation
 
-## Sampling and alerts
+Enable **Mac left-behind alerts** and **Show left-behind reminders** in Android's
+background features settings. Allow Nearby Devices/scanning and notifications.
+On Android 11 or earlier, scanning also needs Location permission and Location
+enabled. The bridge and the paired Mac's DroidMirror receiver must be running.
+Significant-motion sensor support is required.
 
-On enable/reset, the phone takes one initial sample even while stationary, so
-working channels can arm nearby. Another authenticated BLE connection requests a
-warmup sample. While significant motion is recent (last two minutes), radio
-rounds start at most once per minute. A round scans for 20 seconds, tries a
-bounded GATT connection/read, and tries one Classic socket concurrently. Probes
-close afterward. While stationary there is no continuous scan or connection
-loop; there is a lightweight bridge-owned timer. Android idle modes can delay
-all these callbacks; this is not an exact once-per-minute wake guarantee.
+The Mac advertises a pairing-specific service UUID. The phone only scans for
+this beacon: it never connects to a Mac GATT presence service, opens a Classic
+presence socket, or enumerates other bonded computers. The beacon is a discovery
+hint, not an authenticated presence proof; it grants no command/session access.
 
-Each channel must first succeed nearby before it can alert. The three sampled
-channels require two completed misses at least 45 seconds apart, plus recent
-movement. #1 uses a 45-second physical-disconnect grace period plus recent
-movement. A channel fires once until **that same channel** reports presence
-again; another detector's success does not mask its failures. Separations expire
-after ten minutes. Reappearance rearms that channel and records recovery in the timestamped
-history. Notifications survive normal reconnection so short absences do not
-vanish before the user notices them; bridge shutdown/disarm still clears them. Permission/scanner/radio unavailability is recorded separately and breaks the
-miss streak. An absent/invalid remote response counts as a miss, including sleep
-or interference: comparing those false positives is the experiment's purpose.
+The original #2 policy and timing remain: an initial nearby success arms it;
+while significant movement is recent (two minutes), scan for 20 seconds at most
+once per minute. Two completed missed rounds and at least 45 seconds since the
+first miss can trigger a reminder. Separations expire after ten minutes. A
+successful scan rearms the next separation. Unavailable/interrupted scans reset
+the miss streak. Android idle modes can delay callbacks. Radio ownership during
+mirroring is respected; those scans are unavailable, never invented successes.
 
-#1 notifications are muted by default based on the first field trials; its
-connection is still monitored. Per-channel switches control notifications, not
-radio sampling. Existing notification-post counters are preserved.
+## Presentation
 
-Settings shows persistent notification counts and probe success/miss/unavailable
-counts, plus the most recent status per channel, and refreshes while open.
-It displays separate SCAN/CONNECT permission status and requests missing detection
-permissions when reopening an enabled experiment. The Allow detection permissions
-button retries that request. Missing BLE SCAN permission blocks #2 and initial
-#3 discovery, but does not block Classic #4. Tap Reset to begin a new tally. #1 is a persistent connection, not a sampled
-probe, so its probe totals are not directly comparable. Counts record successful
-notification submissions, not proof that Android displayed/sounded an alert or
-that it was a true positive. Disabled notifications do not consume an alert.
-The old five timing-policy counters are retained but are not mixed with these
-new radio-channel counts. Resetting counts does not rearm a fired channel.
+**Use Live Activity until Mac returns** is optional and off by default:
 
-Phone bridge stop, trust reset, local Bluetooth shutdown, and process restart
-clear live detection state and close probes; counters survive. Changes to trust
-are checked before new probes. The Mac server follows the receiver's lifecycle,
-refreshes on pairing changes and Bluetooth state changes, and removes its
-services when stopped. This does not keep the Mac awake: lid-closed behavior,
-Bluetooth off, app shutdown/update, and radio interference can all cause misses.
+- Off: a normal notification that clears when the Mac beacon is detected again
+  or the user dismisses it.
+- On: an ongoing Live Activity, using the same Android promotion request as the
+  recently-mirrored indicator. It clears when a completed beacon scan detects the
+  Mac again or the user presses Dismiss. There is **no fixed timeout**. Devices
+  without Live Activity promotion show an ongoing notification with the same
+  lifecycle. Android/system settings control actual promotion.
 
-## Verification and field testing
+Both modes have only a **Dismiss** action. Correct/Incorrect controls have been
+removed. The selected mode is attached to each notification, so changing settings
+only affects future reminders. Either type of posted reminder clears on return
+even if the preference is changed while it is visible. Bridge shutdown, trust
+reset, and disabling the feature clear reminders in either mode.
 
-Run `bash Native/test-left-behind.sh` for independent-channel policy tests,
-cross-language UUID/proof vectors, nonce and transport separation, unavailable
-states, alert deduplication, rearming and expiry. Run
-`bash Native/test-ble-session.sh` to compile/link the actual Mac receiver and
-check existing session policy. Build Android with `:assembleDebug`.
+## History and compatibility
 
-Compilation and deterministic tests do not establish radio reliability. Validate
-all four channels nearby before walking away: each should show success, not just
-zero alerts. Then compare phone-only departure, carrying both devices, lid-open
-and lid-closed sleep, screen lock/idle, transient interference, reconnection,
-permissions revoked, Bluetooth off and bridge stop. Tally true positives by the
-notification number. #2 can be spoofed; #3/#4 require fresh cryptographic proof.
+Original #2 notification, preference, and database IDs are retained. Historical
+#1/#3/#4 counters and old decisions are preserved as archived data and never
+renumbered. Reset counts clears only the selected detector's counters; it does
+not erase decision/lifetime history. New dismissals are logged as unanswered with
+the observed posted lifetime and end reason; returning-Mac dismissal of either type of reminder is logged separately by reason. Old action PendingIntents are still
+understood for compatibility, but new notifications expose no rating controls.
 
-Before installing either update, end active mirroring and stop/quit the old
-components gracefully. Replacing an active BLE service is not seamless; an atomic
-bundle replacement alone does not preserve a running session.
+Counts mean notify() submissions, not separately visible banners/sounds. Clock
+changes do not distort monotonic lifetimes. If removals were missed while the
+process was stopped, the log marks the last observed lifetime as uncertain;
+reboots yield unknown durations. Only the most recent records are shown in the
+settings UI; the SQLite log retains the full history.
 
-## Second field trial (2026-10-26)
+## Validation and updates
 
-Screenshot totals: #1 112 notification posts; #2 10 posts, 1076 successful probes,
-215 misses, 139 unavailable; #3 21 posts, 1007 successes, 287 misses,
-139 unavailable; #4 zero posts, zero successes, 1294 misses, 139 unavailable.
-The user finds #1 too noisy to use. #2/#3 were both noticed on departures,
-including a recent test in which #2 appeared after about one minute and #3 after
-two. There is no deliberately different delay: both require two misses and a
-45-second absence, but #3 can have a different last success/failed round. Their
-shared discovery also means these are not fully independent measurements.
+Run `bash Native/test-left-behind.sh` for selected-policy, UUID compatibility and
+lifetime checks. Run `bash Native/test-ble-session.sh` to compile/link the actual
+Mac receiver and check session behavior; build Android with `:assembleDebug`.
 
-The old #4 code rotated through all bonded computers until a proof succeeded.
-The Windows/CachyOS laptop name reported by the user is consistent with a cached
-bond record used as a probe target, not evidence of a live computer nearby. Those
-1294 historical misses can include attempts against other computers; zero
-successes means #4 never armed. The new target restriction and stage-specific
-errors improve diagnosis; they do not establish that Classic now works.
+End active mirroring gracefully before updating either app. This change affects
+app-process detection and receiver advertising, not code loaded by the Shizuku
+display guard; it does not require a display-guard user-service version bump.
+Radio behavior, Live Activity promotion, and return-to-Mac dismissal still need
+hardware validation after installing the matching apps.
 
-Historical counts measured notify() submissions. They cannot reconstruct how
-many banners/sounds the user noticed. Reused notification IDs replace cards,
-normal reconnection previously removed them, and a single successful observation
-rearms a channel. Thus another short dropout can post again. New builds retain a
-bounded history of the last 60 posts/recoveries with timestamps, label counts as
-notification posts, and preserve cards across normal reconnects. Existing counts
-and historical unavailable results remain unchanged. No historical event log can
-be recovered retroactively.
-
-## Correct / Incorrect / Unanswered feedback
-
-New notifications include **Correct** and **Incorrect** actions. Each uses a
-unique immutable PendingIntent pointing to an app-private receiver and a unique
-notification event ID. The first completed decision/removal wins; stale or
-repeated actions cannot modify a completed event or cancel a newer notification.
-Choosing an answer records it and removes only that exact active notification.
-Opening the settings page from the notification does not dismiss it.
-
-A separate SQLite log retains every new event, algorithm, posting timestamp,
-probe detail, answer, observed posted lifetime, and end reason. Settings shows
-per-algorithm decision totals and the most recent 40 entries. Radio counter resets
-do not erase this decision log. Older notification totals cannot be assigned
-feedback or durations retroactively.
-
-While an alert is still posted, it appears as `unanswered (2m 3s; still posted)`
-with an increasing lifetime. A swipe/clear, replacement by a later alert from the
-same algorithm, muting, or bridge shutdown closes it as unanswered with the
-observed duration and reason. Correct/Incorrect entries also retain the elapsed
-time until the choice. Timings use elapsed realtime and boot identity, so wall
-clock changes do not distort them. This measures how long the notification was
-posted, not how long a heads-up banner was on screen or whether the user saw it.
-
-The bridge reconciles the OS active-notification list every 15 seconds. If a
-system removal was missed while the process was stopped, only the last observed
-lifetime is retained and marked as such. Across reboot, duration is unknown.
-These uncertain removals are not reported as exact lifetimes. A process killed
-in the tiny create/post interval may leave an incomplete posting record; stale
-incomplete records are discarded, not counted as answered/unanswered alerts.
+See `docs/presence-experiment-archive.md` for the retired experiments and earlier
+field trials.

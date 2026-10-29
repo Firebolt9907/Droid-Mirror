@@ -28,6 +28,7 @@ class PhoneNotifications : NotificationListenerService() {
     companion object { @Volatile var live: PhoneNotifications? = null }
     private data class Entry(val notification: StatusBarNotification, val version: String, @Volatile var imageRevision: String? = null)
     private val entries = LinkedHashMap<String, Entry>()
+    private var changes = ActivityDeltas().apply { enabled = true }
     private val icons = LinkedHashMap<String, String>()
     private val imageAssets = ActivityImageAssets()
     private var imageThread: android.os.HandlerThread? = null
@@ -108,29 +109,46 @@ class PhoneNotifications : NotificationListenerService() {
 
     /** Only an authenticated explicit open may wait for the user to unlock. */
     fun openAfterUnlock(command: JSONObject, authorized: () -> Boolean, result: (Boolean) -> Unit) {
-        val gate = NotificationOpenGate(SystemClock.elapsedRealtime())
+        val started = SystemClock.elapsedRealtime()
+        val gate = NotificationOpenGate(started)
         openHandler.post {
             // A newer click replaces the old destination instead of opening several apps.
             cancelOpen()
             pendingOpenResult = result
             val task = object : Runnable {
+                var waitingLogged = false
                 override fun run() {
                     // Keep the BLE lock outside the listener lock (BLE also calls snapshot/dismiss).
                     val trusted = authorized()
                     val outcome = synchronized(this@PhoneNotifications) {
                         runCatching {
                             val entry = entries[command.getString("id")]
-                            val current = live === this@PhoneNotifications && entry != null &&
-                                entry.version == command.getString("version") &&
-                                opensApp(entry.notification.notification, command.optString("action")) &&
-                                activeNotifications.any { it.key == entry.notification.key && it.postTime == entry.notification.postTime }
-                            val locked = getSystemService(KeyguardManager::class.java).isKeyguardLocked
-                            when (gate.poll(SystemClock.elapsedRealtime(), locked, trusted, current)) {
-                                NotificationOpenGate.Decision.WAIT -> null
-                                NotificationOpenGate.Decision.OPEN -> perform(command)
-                                else -> false
+                            val versionMatches = entry?.version == command.getString("version")
+                            val postedMatches = entry != null && activeNotifications.any {
+                                it.key == entry.notification.key && it.postTime == entry.notification.postTime
                             }
-                        }.getOrDefault(false)
+                            val current = live === this@PhoneNotifications && entry != null &&
+                                versionMatches &&
+                                opensApp(entry.notification.notification, command.optString("action")) &&
+                                postedMatches
+                            val locked = getSystemService(KeyguardManager::class.java).isKeyguardLocked
+                            val ready = BridgeRuntime.live?.notificationOpenerReady() == true
+                            when (gate.poll(SystemClock.elapsedRealtime(), locked, ready, trusted, current)) {
+                                NotificationOpenGate.Decision.WAIT -> {
+                                    if (!waitingLogged) android.util.Log.i("DroidMirrorNotifications", "Notification open waiting: locked=$locked ready=$ready")
+                                    waitingLogged = true
+                                    null
+                                }
+                                NotificationOpenGate.Decision.OPEN -> perform(command, privilegedOpen = true)
+                                else -> {
+                                    android.util.Log.w("DroidMirrorNotifications", "Notification open rejected: trusted=$trusted current=$current version=$versionMatches posted=$postedMatches locked=$locked ready=$ready ageMs=${SystemClock.elapsedRealtime() - started}")
+                                    false
+                                }
+                            }
+                        }.getOrElse {
+                            android.util.Log.w("DroidMirrorNotifications", "Notification open validation failed: ${it.javaClass.simpleName}")
+                            false
+                        }
                     }
                     if (outcome == null) openHandler.postDelayed(this, 200)
                     else {
@@ -231,7 +249,7 @@ class PhoneNotifications : NotificationListenerService() {
             sbn.notification.channelId, hasProgress(sbn.notification))
     }
     override fun onListenerConnected() {
-        synchronized(this) { entries.clear() }
+        synchronized(this) { entries.clear(); changes = ActivityDeltas().apply { enabled = true } }
         ActivityEmbeddedTimers.clear()
         live = this
         snapshot().forEach { BridgeRuntime.live?.sendEvent(it) }
@@ -366,21 +384,58 @@ class PhoneNotifications : NotificationListenerService() {
         }
         return result
     }
+    /** Token identity and reply schema changes must invalidate previously advertised actions. */
+    private fun sameBindings(a: Notification, b: Notification): Boolean {
+        if (a.contentIntent != b.contentIntent || a.deleteIntent != b.deleteIntent || a.fullScreenIntent != b.fullScreenIntent) return false
+        val x = a.actions.orEmpty(); val y = b.actions.orEmpty()
+        if (x.size != y.size) return false
+        return x.indices.all { i ->
+            val left = x[i]; val right = y[i]
+            left.actionIntent == right.actionIntent && left.title?.toString() == right.title?.toString() &&
+                left.remoteInputs.orEmpty().map { it.resultKey to it.allowFreeFormInput } ==
+                right.remoteInputs.orEmpty().map { it.resultKey to it.allowFreeFormInput }
+        }
+    }
+    @Synchronized private fun changedPayload(sbn: StatusBarNotification): JSONObject? {
+        val key = id(sbn.key)
+        val previous = entries[key]
+        val candidate = Entry(sbn, previous?.version ?: UUID.randomUUID().toString())
+        val value = payload(candidate)
+        val now = SystemClock.elapsedRealtime()
+        val comparable = JSONObject(value.toString())
+        if (comparable.optBoolean("chronometer") && comparable.has("clockSampleElapsedMs")) {
+            comparable.put("clockOffsetMs", NotificationClock.offsetAtSend(comparable.getLong("clockOffsetMs"), comparable.getLong("clockSampleElapsedMs"), now))
+            comparable.remove("clockSampleElapsedMs")
+        }
+        ActivityEmbeddedTimers.prepareToSend(comparable, now)
+        val contentChanged = changes.contentChanged(comparable, now)
+        if (previous != null && sameBindings(previous.notification.notification, sbn.notification) && !contentChanged) {
+            // Refresh the local PendingIntent source without changing its advertised version.
+            entries[key] = candidate
+            return null
+        }
+        val current = candidate.copy(version = UUID.randomUUID().toString())
+        entries[key] = current
+        while (entries.size > 128) entries.remove(entries.keys.first())
+        value.put("version", current.version)
+        return value
+    }
     override fun onNotificationPosted(sbn: StatusBarNotification) {
         if (!eligible(sbn)) {
             // An update can make a previously forwarded item ineligible.
             val key = id(sbn.key)
             ActivityEmbeddedTimers.forget(key)
+            synchronized(this) { changes.encode(JSONObject().put("type", "removed").put("id", key), SystemClock.elapsedRealtime()) }
             val removed = synchronized(this) { entries.remove(key) != null }
             if (removed) BridgeRuntime.live?.sendEvent(JSONObject().put("type", "removed").put("id", key))
             return
         }
-        BridgeRuntime.live?.sendEvent(payload(remember(sbn)))
+        changedPayload(sbn)?.let { BridgeRuntime.live?.sendEvent(it) }
     }
     override fun onNotificationRemoved(sbn: StatusBarNotification) {
         val key = id(sbn.key)
         ActivityEmbeddedTimers.forget(key)
-        synchronized(this) { entries.remove(key) }
+        synchronized(this) { entries.remove(key); changes.encode(JSONObject().put("type", "removed").put("id", key), SystemClock.elapsedRealtime()) }
         BridgeRuntime.live?.sendEvent(JSONObject().put("type", "removed").put("id", key))
     }
     @Synchronized fun snapshot(): List<JSONObject> {
@@ -446,7 +501,11 @@ class PhoneNotifications : NotificationListenerService() {
         true
     }.getOrDefault(false)
 
-    private fun sendIntent(intent: PendingIntent, fill: Intent? = null) {
+    private fun sendIntent(intent: PendingIntent, fill: Intent? = null, privilegedOpen: Boolean = false) {
+        if (privilegedOpen) {
+            check(fill == null && BridgeRuntime.live?.openNotification(intent) == true)
+            return
+        }
         val options = if (Build.VERSION.SDK_INT >= 34) ActivityOptions.makeBasic().apply {
             // Only reached for an authenticated, explicit Mac notification click.
             // This opts into existing BAL privileges; it does not bypass Android's policy.
@@ -455,14 +514,14 @@ class PhoneNotifications : NotificationListenerService() {
         }.toBundle() else null
         intent.send(this, 0, fill, null, null, null, options)
     }
-    @Synchronized fun perform(command: JSONObject): Boolean = runCatching {
+    @Synchronized fun perform(command: JSONObject, privilegedOpen: Boolean = false): Boolean = runCatching {
         val entry = entries[command.getString("id")] ?: return false
         check(entry.version == command.getString("version"))
         check(activeNotifications.any { it.key == entry.notification.key })
         val notification = entry.notification.notification
         val action = command.getString("action")
         if (action == "open") {
-            sendIntent(requireNotNull(notification.contentIntent))
+            sendIntent(requireNotNull(notification.contentIntent), privilegedOpen = privilegedOpen)
         } else {
             val index = action.toInt(); require(index in 0..2)
             val selected = requireNotNull(notification.actions?.getOrNull(index))
@@ -476,7 +535,7 @@ class PhoneNotifications : NotificationListenerService() {
                 sendIntent(selected.actionIntent, fill)
             } else {
                 check(text.isEmpty())
-                sendIntent(selected.actionIntent)
+                sendIntent(selected.actionIntent, privilegedOpen = privilegedOpen)
             }
         }
         true

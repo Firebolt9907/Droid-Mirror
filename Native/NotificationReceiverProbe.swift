@@ -6,6 +6,7 @@ struct NotificationReceiverProbe {
         let observer = DistributedNotificationCenter.default().addObserver(
             forName: Notification.Name("app.droidmirror.receiverStatus"), object: nil, queue: .main) { event in
                 print("Receiver status: \(event.userInfo?["status"] ?? "unknown")")
+                print("App library: \(event.userInfo?["appLibrary"] ?? "unavailable")")
                 print("Delivery counters: \(event.userInfo?["notifications"] ?? "unknown")")
             }
         RunLoop.current.run(until: Date().addingTimeInterval(8))

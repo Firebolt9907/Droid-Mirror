@@ -140,3 +140,64 @@ class RemoteMediaQueue {
         return JSONObject().put("queueRevision", revision).put("queueItemId", id)
     }
 }
+
+/** Compact lease/position refreshes are enabled only after the peer advertises support. */
+class MediaStateWire {
+    private var signature: String? = null
+    private var revision = ""
+    private var confirmedRevision = ""
+    private var incoming: JSONObject? = null
+    private var peerSupportsCompact = false
+    var peerSupportsLocalTimeline = false
+        private set
+    private var acknowledgedIncoming = ""
+    private var position = 0.0
+    private var positionAt = 0L
+    private var playing = false
+    private var duration = 0.0
+    @JvmOverloads fun prepare(value: JSONObject, now: Long = System.nanoTime() / 1000000): JSONObject? {
+        val keys = value.keys().asSequence().filter { it != "position" }.sorted().toList()
+        val next = keys.joinToString("\n") { JSONObject.quote(it) + ":" + org.json.JSONArray().put(value.get(it)).toString() }
+        val currentPosition = value.optDouble("position", 0.0)
+        val projected = position + if (playing) (now - positionAt).coerceAtLeast(0) / 1000.0 else 0.0
+        val expected = if (duration > 0) minOf(duration, projected) else projected
+        val changed = signature != next || (peerSupportsLocalTimeline && kotlin.math.abs(currentPosition - expected) > 1.0)
+        val incomingRevision = incoming?.optString("stateRevision").orEmpty()
+        if (peerSupportsLocalTimeline && !changed && confirmedRevision == revision && revision.isNotEmpty() && acknowledgedIncoming == incomingRevision) return null
+        acknowledgedIncoming = incomingRevision
+        if (peerSupportsCompact && !changed && confirmedRevision == revision && revision.isNotEmpty()) {
+            val compact = JSONObject().put("type", "mediaState").put("stateRevision", revision).put("unchanged", true)
+            if (value.has("position")) compact.put("position", value.get("position"))
+            incoming?.opt("stateRevision")?.let { compact.put("receivedStateRevision", it) }
+            return compact
+        }
+        if (changed || revision.isEmpty()) {
+            revision = java.util.UUID.randomUUID().toString()
+            position = currentPosition; positionAt = now
+            playing = value.optBoolean("playing"); duration = value.optDouble("duration", 0.0)
+        }
+        signature = next
+        return JSONObject(value.toString()).put("stateRevision", revision).put("supportsCompactState", true).put("supportsLocalTimeline", true)
+            .also { full -> incoming?.opt("stateRevision")?.let { full.put("receivedStateRevision", it) } }
+    }
+    fun receive(event: JSONObject): JSONObject? {
+        if (event.optString("receivedStateRevision") == revision) confirmedRevision = revision
+        if (event.opt("unchanged") == true) {
+            val previous = incoming ?: return null
+            if (event.opt("stateRevision") !is String || event.optString("stateRevision") != previous.optString("stateRevision")) return null
+            val full = JSONObject(previous.toString())
+            if (full.opt("active") == true) {
+                val position = event.optDouble("position", Double.NaN)
+                if (!position.isFinite() || position < 0 || position > 604800) return null
+                full.put("position", position)
+            }
+            return full
+        }
+        if (event.opt("active") != false && !MediaSyncProtocol.validSnapshot(event)) return null
+        peerSupportsCompact = event.opt("supportsCompactState") == true
+        peerSupportsLocalTimeline = event.opt("supportsLocalTimeline") == true
+        incoming = JSONObject(event.toString())
+        acknowledgedIncoming = "" // Retry acknowledgments when a full snapshot is retransmitted.
+        return event
+    }
+}

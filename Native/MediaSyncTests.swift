@@ -144,6 +144,24 @@ final class MusicStub: AppleMusicAccess {
         precondition(MediaSnapshot.validCommand(["id": "abc", "action": "shuffle", "enabled": true], target: "abc", actions: ["shuffle"]))
         precondition(!MediaSnapshot.validCommand(["id": "abc", "action": "repeat", "mode": "execute"], target: "abc", actions: ["repeat"]))
         precondition(MediaSnapshot.validCommand(["id": "abc", "action": "repeat", "mode": "one"], target: "abc", actions: ["repeat"]))
+        var lease = PhoneMediaKeyLease()
+        var leasePaused = value; leasePaused["playing"] = false
+        let pausedSnapshot = MediaSnapshot(leasePaused)!
+        lease.observe(pausedSnapshot, now: 0)
+        precondition(!lease.allows(pausedSnapshot, now: 1))
+        lease.observe(MediaSnapshot(value), now: 1)
+        lease.observe(pausedSnapshot, now: 2)
+        precondition(lease.allows(pausedSnapshot, now: 601))
+        precondition(!lease.allows(pausedSnapshot, now: 602))
+        lease.invalidate()
+        precondition(!lease.allows(pausedSnapshot, now: 3))
+        var external = leasePaused; external["externalAudio"] = true
+        precondition(lease.allows(MediaSnapshot(external)!, now: 1000))
+        var different = leasePaused; different["id"] = "different"
+        lease.observe(MediaSnapshot(value), now: 4)
+        lease.observe(pausedSnapshot, now: 5)
+        lease.observe(MediaSnapshot(different), now: 6)
+        precondition(!lease.allows(MediaSnapshot(different)!, now: 7))
         let controller = BLEController()
         let music = MusicStub()
         let sync = MediaPlaybackSync(music: music)
@@ -154,16 +172,30 @@ final class MusicStub: AppleMusicAccess {
         NotificationRuntime.preferences.set(true, forKey: MediaPlaybackSync.enabledKey)
         sync.configure()
         precondition(controller.sent.contains { $0["type"] as? String == "mediaSubscribe" && $0["enabled"] as? Bool == true })
-        sync.receive(value)
+        var paused = value
+        paused["playing"] = false
+        sync.receive(paused)
+        precondition(MPNowPlayingInfoCenter.default().nowPlayingInfo == nil, "A retained paused phone session must not claim Now Playing")
+        var connectedValue = value; connectedValue["externalAudio"] = true
+        sync.receive(connectedValue)
         precondition(MPNowPlayingInfoCenter.default().nowPlayingInfo?[MPMediaItemPropertyTitle] as? String == "Phone song")
-        var illustrated = value
+        sync.receive(paused)
+        precondition(MPNowPlayingInfoCenter.default().nowPlayingInfo != nil, "Recent pause must retain Now Playing")
+        precondition(MPNowPlayingInfoCenter.default().playbackState == .paused)
+        precondition(MPRemoteCommandCenter.shared().playCommand.isEnabled)
+        sync.receive(connectedValue)
+        precondition(MPNowPlayingInfoCenter.default().nowPlayingInfo?[MPMediaItemPropertyTitle] as? String == "Phone song")
+        sync.receive(["type": "mediaState", "active": false])
+        precondition(MPNowPlayingInfoCenter.default().nowPlayingInfo == nil, "Ending phone playback must remove Now Playing")
+        sync.receive(connectedValue)
+        var illustrated = connectedValue
         illustrated["artwork"] = cover
         sync.receive(illustrated)
         precondition(MPNowPlayingInfoCenter.default().nowPlayingInfo?[MPMediaItemPropertyArtwork] is MPMediaItemArtwork)
         illustrated["artwork"] = "invalid"
         sync.receive(illustrated)
         precondition(MPNowPlayingInfoCenter.default().nowPlayingInfo?[MPMediaItemPropertyArtwork] == nil)
-        sync.receive(value)
+        sync.receive(connectedValue)
         precondition(MPNowPlayingInfoCenter.default().nowPlayingInfo?[MPMediaItemPropertyArtwork] == nil)
         sync.receive(["type": "mediaCommand", "id": "music", "action": "pause"])
         precondition(music.commands.count == 1)
@@ -175,14 +207,14 @@ final class MusicStub: AppleMusicAccess {
         controller.authenticated = true
         music.value = value
         sync.connected()
-        sync.receive(value)
-        precondition(MPNowPlayingInfoCenter.default().nowPlayingInfo == nil, "Local Music playback takes priority")
+        sync.receive(connectedValue)
+        precondition(MPNowPlayingInfoCenter.default().nowPlayingInfo != nil, "No app-specific Music priority")
         NotificationRuntime.preferences.set(false, forKey: MediaPlaybackSync.enabledKey)
         sync.configure()
         sync.receive(["type": "mediaCommand", "id": "music", "action": "pause"])
         precondition(music.commands.count == 1)
         sync.stop()
         NotificationRuntime.preferences.removePersistentDomain(forName: "app.droidmirror.media-tests.\(ProcessInfo.processInfo.processIdentifier)")
-        print("PASS: media validation, expiry, commands, opt-in, routing, disconnect cleanup and local Music priority")
+        print("PASS: media validation, expiry, commands, opt-in, routing, pause lease, external audio, disconnect cleanup and app-neutral eligibility")
     }
 }

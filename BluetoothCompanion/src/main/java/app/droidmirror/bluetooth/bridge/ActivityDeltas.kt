@@ -9,7 +9,17 @@ class ActivityDeltas {
     var enabled = false
     private data class Baseline(val wire: JSONObject, val clockAt: Long, val timersAt: Long)
     private val baselines = LinkedHashMap<String, Baseline>()
-    fun encode(value: JSONObject, now: Long): JSONObject {
+    fun encode(value: JSONObject, now: Long): JSONObject = encodeInternal(value, now, false)
+
+    /** Source-side suppression uses the same local timer prediction as wire patches. */
+    fun contentChanged(value: JSONObject, now: Long): Boolean {
+        val normalized = JSONObject(value.toString())
+        normalized.remove("postedAt"); normalized.remove("snapshot")
+        normalized.put("version", "content").put("_wasActivity", value.optBoolean("activity")).put("activity", true)
+        val result = encodeInternal(normalized, now, true)
+        return result.optString("type") != "activityPatch" || result.getJSONObject("set").length() != 0 || result.getJSONArray("unset").length() != 0
+    }
+    private fun encodeInternal(value: JSONObject, now: Long, forcePatch: Boolean): JSONObject {
         val id = value.optString("id")
         if (value.optString("type") == "removed") baselines.remove(id)
         if (value.optString("type") != "notification") return value
@@ -22,11 +32,12 @@ class ActivityDeltas {
         if (previous == null || value.optBoolean("snapshot")) { store(value); return value }
         var candidate = JSONObject(value.toString())
         val old = previous.wire
-        val clockPredictable = value.optBoolean("chronometer") && old.optBoolean("chronometer") &&
+        val localTimers = value.optBoolean("_wasActivity", true)
+        val clockPredictable = localTimers && value.optBoolean("chronometer") && old.optBoolean("chronometer") &&
             value.optBoolean("countDown") == old.optBoolean("countDown") && now >= previous.clockAt &&
             abs(value.optDouble("clockOffsetMs") - (old.optDouble("clockOffsetMs") - (now - previous.clockAt))) <= 250
         if (clockPredictable) candidate.put("clockOffsetMs", old.get("clockOffsetMs"))
-        val timers = stabilizeTimers(candidate, old, (now - previous.timersAt).coerceAtLeast(0) / 1000.0)
+        val timers = if (localTimers) stabilizeTimers(candidate, old, (now - previous.timersAt).coerceAtLeast(0) / 1000.0) else null
         val timersPredictable = timers != null
         if (timers != null) candidate = timers
         val fields = JSONObject()
@@ -38,7 +49,7 @@ class ActivityDeltas {
         old.keys().forEach { key -> if (!candidate.has(key) && key != "type" && key != "id") unset.put(key) }
         val delta = JSONObject().put("type", "activityPatch").put("id", id)
             .put("base", old.getString("version")).put("set", fields).put("unset", unset)
-        if (delta.toString().toByteArray(Charsets.UTF_8).size >= value.toString().toByteArray(Charsets.UTF_8).size) {
+        if (!forcePatch && delta.toString().toByteArray(Charsets.UTF_8).size >= value.toString().toByteArray(Charsets.UTF_8).size) {
             store(value); return value
         }
         store(candidate, if (clockPredictable) previous.clockAt else now, if (timersPredictable) previous.timersAt else now)

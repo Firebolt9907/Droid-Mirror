@@ -9,11 +9,15 @@ public final class NotificationOpenGate {
     public NotificationOpenGate(long now) { deadline = now + 30_000; }
 
     public Decision poll(long now, boolean locked, boolean authorized, boolean current) {
+        return poll(now, locked, true, authorized, current);
+    }
+
+    public Decision poll(long now, boolean locked, boolean ready, boolean authorized, boolean current) {
         if (finished || now >= deadline || !authorized || !current) {
             finished = true;
             return Decision.REJECT;
         }
-        if (locked) return Decision.WAIT;
+        if (locked || !ready) return Decision.WAIT;
         finished = true;
         return Decision.OPEN;
     }

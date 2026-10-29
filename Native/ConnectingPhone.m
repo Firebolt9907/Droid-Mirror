@@ -11,6 +11,14 @@
 static NSView *DMLoadingSurface;
 static SDL_Window *DMPhoneWindow;
 static id DMConnectingFocusObserver;
+static id DMShortcutRevealObserver;
+static NSString *DMShortcutToken;
+static NSTimeInterval DMShortcutDeadline;
+static BOOL DMShortcutWaiting, DMShortcutReleased, DMShortcutFrameReady;
+static BOOL DMShortcutAnimate = YES;
+static uint64_t DMShortcutFrames, DMShortcutReleaseFrame;
+static int64_t DMShortcutMinimumPTS, DMShortcutLastPTS;
+
 static NSString *DMCurrentSession;
 static NSDictionary *DMState;
 static NSData *DMStateBytes;
@@ -311,6 +319,64 @@ static void DMShowPhoneState(NSString *title, NSString *message, BOOL connecting
         userInfo:@{@"title": title ?: @"", @"window": @(window.windowNumber), @"connecting": @(connecting), @"behavior": @(window.collectionBehavior), @"level": @(window.level)} deliverImmediately:YES];
 }
 
+// Presentation capability only: the receiver still authorizes app commands over BLE.
+static NSDictionary *DMShortcutRevealState(void) {
+    NSString *testPath = NSProcessInfo.processInfo.environment[@"DROIDMIRROR_REVEAL_STATE"];
+    if (testPath.length) {
+        NSData *data = [NSData dataWithContentsOfFile:testPath];
+        return data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
+    }
+    NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:@"app.droidmirror.mac"];
+    [defaults synchronize];
+    return [defaults dictionaryForKey:@"DroidMirror.shortcutReveal"];
+}
+
+void DMPrepareShortcutReveal(void) {
+    NSDictionary *state = DMShortcutRevealState();
+    if (![state isKindOfClass:NSDictionary.class]) return;
+    NSString *token = [state[@"token"] isKindOfClass:NSString.class] ? state[@"token"] : nil;
+    NSTimeInterval expires = [state[@"expires"] doubleValue];
+    if (!token.length || token.length > 64 || expires <= NSDate.timeIntervalSinceReferenceDate) return;
+    NSWindow *window = DMNativePhone();
+    // Do not cover or animate a mirror the user can already see.
+    if (!DMLoadingSurface && window.visible && !window.miniaturized) return;
+    if ([(DMConnectingPhoneView *)DMLoadingSurface revealingVideo]) return;
+    BOOL hiddenVideo = !DMLoadingSurface;
+    if (hiddenVideo) DMShowPhoneState(@"Opening app…", @"", YES);
+    if (![DMShortcutToken isEqual:token]) {
+        DMShortcutToken = token; DMShortcutDeadline = MIN(expires, NSDate.timeIntervalSinceReferenceDate + 60);
+        DMShortcutWaiting = YES; DMShortcutReleased = NO; DMShortcutMinimumPTS = 0; DMShortcutFrameReady = hiddenVideo;
+        DMShortcutAnimate = YES;
+        NSString *generation = token;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(MAX(0, DMShortcutDeadline - NSDate.timeIntervalSinceReferenceDate) * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            if (![DMShortcutToken isEqual:generation] || !DMShortcutWaiting) return;
+            DMShortcutWaiting = NO;
+            if (DMShortcutFrameReady) DMFinishConnectingPhone();
+        });
+    }
+    if ([state[@"ready"] boolValue] && !DMShortcutReleased) {
+        DMShortcutReleased = YES; DMShortcutReleaseFrame = DMShortcutFrames;
+        if ([state[@"displayedAtUs"] isKindOfClass:NSNumber.class]) DMShortcutMinimumPTS = MAX(0, [state[@"displayedAtUs"] longLongValue]);
+        NSString *generation = token;
+        // Static screens may not produce another decoded frame. Never leave the
+        // cover stuck; Android's -W acknowledgment already confirms app display.
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+            if (![DMShortcutToken isEqual:generation] || !DMShortcutWaiting || !DMShortcutFrameReady) return;
+            if (DMShortcutMinimumPTS && DMShortcutLastPTS < DMShortcutMinimumPTS) return;
+            DMShortcutWaiting = NO;
+            if (DMShortcutAnimate) DMFinishConnectingPhone(); else DMFinishConnectingPhoneWithoutAnimation();
+        });
+    }
+}
+
+void DMShortcutRevealFramePresented(int64_t pts) {
+    ++DMShortcutFrames; DMShortcutLastPTS = pts;
+    if (!DMShortcutWaiting || !DMShortcutReleased || !DMShortcutFrameReady || DMShortcutFrames <= DMShortcutReleaseFrame ||
+        (DMShortcutMinimumPTS && pts < DMShortcutMinimumPTS)) return;
+    DMShortcutWaiting = NO;
+    if (DMShortcutAnimate) DMFinishConnectingPhone(); else DMFinishConnectingPhoneWithoutAnimation();
+}
+
 __attribute__((visibility("default")))
 void DroidMirrorShowConnecting(SDL_Window *sdlWindow) {
     DMPhoneWindow = sdlWindow;
@@ -333,12 +399,24 @@ void DroidMirrorShowConnecting(SDL_Window *sdlWindow) {
     }
     DMShowPhoneState(@"Connecting…", @"Keep your phone locked and nearby.", YES);
     DMRefreshDeviceCornersFromPhone(window.contentView);
+    if (!DMShortcutRevealObserver) {
+        DMShortcutRevealObserver = [[NSDistributedNotificationCenter defaultCenter]
+            addObserverForName:@"app.droidmirror.shortcutReveal" object:nil queue:NSOperationQueue.mainQueue
+            usingBlock:^(__unused NSNotification *note) {
+                if (DMSessionRunning || !DMState || [DMState[@"connecting"] boolValue]) DMPrepareShortcutReveal();
+            }];
+    }
+    DMPrepareShortcutReveal();
     if (!DMConnectingFocusObserver) {
         DMConnectingFocusObserver = [[NSDistributedNotificationCenter defaultCenter]
             addObserverForName:@"app.droidmirror.focusMirror"
             object:NSProcessInfo.processInfo.environment[@"DROIDMIRROR_HOST_PID"] queue:NSOperationQueue.mainQueue
             usingBlock:^(__unused NSNotification *note) {
+                DMPrepareShortcutReveal();
                 [window deminiaturize:nil]; [NSApp activateIgnoringOtherApps:YES]; [window makeKeyAndOrderFront:nil];
+                // Each notification click waits for fresh readiness, including
+                // when this persistent window already has a rendered stream.
+                DroidMirrorReportMirrorVisible();
             }];
     }
     [window makeKeyAndOrderFront:nil];
@@ -369,6 +447,13 @@ void DroidMirrorVideoSurfaceReady(void) {
 static void DMFinishConnectingPhoneWithMotion(BOOL animate) {
     DMConnectingPhoneView *overlay = (DMConnectingPhoneView *)DMLoadingSurface;
     if (!overlay || overlay.revealingVideo) return;
+    if (DMShortcutWaiting) {
+        DMShortcutFrameReady = YES; DMShortcutAnimate = animate;
+        if (NSDate.timeIntervalSinceReferenceDate < DMShortcutDeadline &&
+            (!DMShortcutReleased || DMShortcutFrames <= DMShortcutReleaseFrame ||
+             (DMShortcutMinimumPTS && DMShortcutLastPTS < DMShortcutMinimumPTS))) return;
+        DMShortcutWaiting = NO;
+    }
     NSView *screen = overlay.superview;
     // SDL creates its Metal view after the loading page. Restore the overlay
     // above that opaque video view before fading it, or the reveal is invisible.
@@ -578,6 +663,7 @@ __attribute__((visibility("default")))
 void DroidMirrorSessionFinished(int code) {
     DMSessionRunning = NO;
     DMStopRequested = NO;
+    DMShortcutWaiting = NO; DMShortcutFrameReady = NO; DMShortcutReleased = NO; DMShortcutToken = nil;
     void (*stopped)(void) = dlsym(RTLD_DEFAULT, "DroidMirrorSessionDidStop");
     if (stopped) stopped();
     DMSetChrome(NO);

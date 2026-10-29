@@ -33,7 +33,8 @@ class BlePeripheral(
     private val onClipboardFile: (JSONObject) -> Unit = {},
     private val onMediaSubscription: (Boolean, Long) -> Unit = { _, _ -> },
     private val onMediaEvent: (JSONObject, () -> Boolean) -> Unit = { _, _ -> },
-    private val onTaskSubscription: (Boolean, Long) -> Unit = { _, _ -> },
+    private val onTaskSubscription: (Boolean, Long, Boolean) -> Unit = { _, _, _ -> },
+    private val onAppLibrary: (JSONObject, () -> Boolean, (JSONObject) -> Unit) -> Unit = { _, _, reply -> reply(JSONObject().put("success", false)) },
     private val onOpenLink: (String, () -> Boolean, (Boolean) -> Unit) -> Unit = { _, _, reply -> reply(false) },
     private val onShareLinkResult: (String, Boolean) -> Unit = { _, _ -> },
     private val onHotspotToggle: (Boolean, () -> Boolean, (JSONObject) -> Unit) -> Unit = { _, _, reply -> reply(JSONObject().put("status", "unsupported")) }
@@ -61,6 +62,7 @@ class BlePeripheral(
     private var nextMessage = 1
     private var advertiser: android.bluetooth.le.BluetoothLeAdvertiser? = null
     private var advertiseCallback: AdvertiseCallback? = null
+    private val publishedEndpoints = mutableMapOf<android.bluetooth.BluetoothDevice, String>()
     private var publishedPort: Int? = null
     private var revision = 0L
     private var clipboardDevice: android.bluetooth.BluetoothDevice? = null
@@ -173,7 +175,7 @@ class BlePeripheral(
         clipboardDevice = null
         onClipboardSubscription(false, ++clipboardGeneration, false)
         taskDevice = null
-        onTaskSubscription(false, ++taskGeneration)
+        onTaskSubscription(false, ++taskGeneration, false)
         server?.close()
         server = null
         connected.clear()
@@ -182,6 +184,7 @@ class BlePeripheral(
         pendingMessages.clear(); activityDeltas.clear()
         notificationMode.clear()
         pendingIndication.clear()
+        publishedEndpoints.clear()
         sessions.clear(); fragments.clear()
     }
 
@@ -199,7 +202,11 @@ class BlePeripheral(
                 }
             recipients.forEach { subscription ->
                 sessions[subscription.first]?.takeIf { it.authenticated }?.let { session ->
-                    enqueueSecure(subscription.first, session, JSONObject(String(value, Charsets.UTF_8)))
+                    val json = String(value, Charsets.UTF_8)
+                    if (requestId != null || publishedEndpoints[subscription.first] != json) {
+                        if (enqueueSecure(subscription.first, session, JSONObject(json)) && requestId == null)
+                            publishedEndpoints[subscription.first] = json
+                    }
                 }
             }
         }
@@ -250,12 +257,12 @@ class BlePeripheral(
         val queue = pendingMessages.getOrPut(device) { BleOutboundQueue() }
         // Preserve notification/update/removal order. Only file chunks yield to
         // control traffic; snapshots must not arrive after a newer tombstone.
-        val bulk = value.optString("type") in setOf("clipboardFileChunk", "activityImageChunk")
+        val bulk = value.optString("type") in setOf("clipboardFileChunk", "activityImageChunk", "appIconResult")
         val haptic = value.optString("type") == "haptic"
-        if (!queue.append(value.toString(), bulk, android.os.SystemClock.elapsedRealtime(), haptic || value.optString("type") == "pong",
+        if (!queue.append(value.toString(), bulk, android.os.SystemClock.elapsedRealtime(), haptic || value.optString("type") in setOf("pong", "appLaunchResult"),
                 if (value.optString("type") == "notification" && value.optBoolean("activity") && !value.optBoolean("snapshot")) value.optString("id") else null,
                 if (haptic) 200L else 60000L)) {
-            if (value.optString("type") in setOf("activityImageChunk", "activityImageManifest")) return false
+            if (value.optString("type") in setOf("activityImageChunk", "activityImageManifest", "appIconResult", "appCatalogResult")) return false
             if (haptic) return false // Optional feedback must not revoke a healthy mirror link.
             revokeSession(device)
             return false
@@ -333,12 +340,13 @@ class BlePeripheral(
         // notification session must not disconnect that other authenticated service.
         if (mediaDevice == device) { mediaDevice = null; onMediaSubscription(false, ++mediaGeneration) }
         if (clipboardDevice == device) { clipboardDevice = null; onClipboardSubscription(false, ++clipboardGeneration, false) }
-        if (taskDevice == device) { taskDevice = null; onTaskSubscription(false, ++taskGeneration) }
+        if (taskDevice == device) { taskDevice = null; onTaskSubscription(false, ++taskGeneration, false) }
         notificationMode.remove(device)
         subscribed.remove(device)
         indicationInFlight.remove(device)
         pendingIndication.remove(device)
         pendingMessages.remove(device); activityDeltas.remove(device)
+        publishedEndpoints.remove(device)
         sessions.remove(device)
         fragments.remove(device)
     }
@@ -353,6 +361,7 @@ class BlePeripheral(
         presencePeers.clear()
         onPresenceReset()
         notificationMode.clear()
+        publishedEndpoints.clear()
         sessions.clear(); fragments.clear(); pendingIndication.clear(); pendingMessages.clear(); activityDeltas.clear()
         revokeClients()
     }
@@ -381,7 +390,8 @@ class BlePeripheral(
                 indicationInFlight.remove(device)
                 pendingIndication.remove(device)
                 pendingMessages.remove(device); activityDeltas.remove(device)
-                sessions.remove(device); fragments.remove(device)
+                publishedEndpoints.remove(device)
+        sessions.remove(device); fragments.remove(device)
             }
             Unit
         }
@@ -448,13 +458,15 @@ class BlePeripheral(
                                 presencePeers.add(device)
                                 onPresence(device.address, true)
                                 android.util.Log.i("DroidMirrorNotifications", "BLE notification session authenticated")
-                                enqueueSecure(device, session, JSONObject().put("type", "ready").put("activityImages", 1).put("watchCompanion", 1).put("sessionHealth", 1).put("clipboard", 1).put("clipboardFiles", 1).put("taskUrls", 1).put("linkSharing", 1).put("media", 1)
+                                enqueueSecure(device, session, JSONObject().put("type", "ready").put("activityImages", 1).put("watchCompanion", 1).put("sessionHealth", 1).put("changePush", 1).put("clipboard", 1).put("clipboardFiles", 1).put("taskUrls", 1).put("appLibrary", 1).put("appLibraryIroh", 1).put("linkSharing", 1).put("media", 1)
                                     .put("hotspot", if (Build.VERSION.SDK_INT >= 30) 2 else 0))
+                                publishedEndpoints.remove(device)
+                                publish(device)
                             }
                             else -> {
                                 val command = session.open(objectValue)
                                 when (command.optString("type")) {
-                                    "watchMacState", "watchFindResult" -> {
+                                    "watchMacState", "watchMacTicket", "watchFindResult" -> {
                                         // Watch commands may only route to the selected capture Mac and this exact BLE session.
                                         if (device.address == context.getSharedPreferences("ready", Context.MODE_PRIVATE).getString("peer", "")) {
                                             val valid = { synchronized(this@BlePeripheral) {
@@ -552,11 +564,29 @@ class BlePeripheral(
                                     "taskSubscribe" -> {
                                         if (command.optBoolean("enabled")) {
                                             taskDevice = device
-                                            onTaskSubscription(true, ++taskGeneration)
+                                            onTaskSubscription(true, ++taskGeneration, command.optBoolean("changeOnly"))
                                         } else if (taskDevice == device) {
                                             taskDevice = null
-                                            onTaskSubscription(false, ++taskGeneration)
+                                            onTaskSubscription(false, ++taskGeneration, false)
                                         }
+                                    }
+                                    "appCatalogSubscribe", "appLibraryOffer", "appCatalogRequest", "appIconRequest", "appLaunch" -> {
+                                        val request = command.optString("request")
+                                        require(request.matches(Regex("[A-Za-z0-9-]{1,64}")))
+                                        val replyType = when (command.optString("type")) {
+                                            "appCatalogSubscribe" -> "appCatalogChanged"
+                                            "appLibraryOffer" -> "appLibraryOfferResult"
+                                            "appCatalogRequest" -> "appCatalogResult"
+                                            "appIconRequest" -> "appIconResult"
+                                            else -> "appLaunchResult"
+                                        }
+                                        onAppLibrary(command, { synchronized(this@BlePeripheral) {
+                                            sessions[device] === session && session.authenticated
+                                        } }) { result -> synchronized(this@BlePeripheral) {
+                                            if (sessions[device] === session && session.authenticated) {
+                                                runCatching { enqueueSecure(device, session, result.put("type", replyType).put("request", request)) }
+                                            }
+                                        } }
                                     }
                                     "activityImageManifestRequest" -> {
                                         val request = command.optString("request")

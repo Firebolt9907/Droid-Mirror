@@ -15,8 +15,6 @@ static id DMKeyboardMonitor;
 static id DMWindowCloseObserver;
 static BOOL DMCommandQuitActive;
 static BOOL DMEmojiShortcutActive;
-static BOOL DMSyntheticTextKeyActive;
-static BOOL DMPasteKeyActive;
 static BOOL DMHostQuitRequested;
 static NSUInteger DMPINSyntheticEventsRemaining;
 static void (*DMOriginalSendEvent)(NSApplication *, SEL, NSEvent *);
@@ -40,7 +38,8 @@ static __weak NSWindow *DMMirrorWindow;
 static id DMFocusObserver;
 static id DMMinimizeObserver;
 
-static void DMReportMirrorVisible(void) {
+__attribute__((visibility("default")))
+void DroidMirrorReportMirrorVisible(void) {
     // The toolbar/controller attaches after the loading overlay is removed.
     // First-frame readiness must use the persistent phone window even while
     // that controller has not been created yet.
@@ -51,7 +50,7 @@ static void DMReportMirrorVisible(void) {
 }
 __attribute__((visibility("default")))
 void DroidMirrorFrameVisible(void) {
-    void (^present)(void) = ^{ DMSecureSessionStopped = NO; DMFinishConnectingPhone(); DMFrameRendered = YES; DMReportMirrorVisible(); };
+    void (^present)(void) = ^{ DMSecureSessionStopped = NO; DMFinishConnectingPhone(); DMFrameRendered = YES; DroidMirrorReportMirrorVisible(); };
     // SDL presents on the main thread. Reorder the loading overlay in the same
     // turn, before Core Animation can expose the new Metal view for a frame.
     if (NSThread.isMainThread) present();
@@ -59,7 +58,7 @@ void DroidMirrorFrameVisible(void) {
 }
 __attribute__((visibility("default")))
 void DroidMirrorFrameVisibleWithoutAnimation(void) {
-    void (^present)(void) = ^{ DMSecureSessionStopped = NO; DMFinishConnectingPhoneWithoutAnimation(); DMFrameRendered = YES; DMReportMirrorVisible(); };
+    void (^present)(void) = ^{ DMSecureSessionStopped = NO; DMFinishConnectingPhoneWithoutAnimation(); DMFrameRendered = YES; DroidMirrorReportMirrorVisible(); };
     if ([NSThread isMainThread]) present(); else dispatch_async(dispatch_get_main_queue(), present);
 }
 
@@ -156,7 +155,7 @@ void DroidMirrorSetSecureScreen(int secure) {
             // video or waiting for startup content that Android cannot send.
             DMFinishConnectingPhoneWithoutAnimation();
             DMFrameRendered = YES;
-            DMReportMirrorVisible();
+            DroidMirrorReportMirrorVisible();
             DMSecureOverlay.hidden = NO;
             [DMSecureOverlay setNeedsDisplay:YES];
         });
@@ -215,37 +214,6 @@ static BOOL DMEventIsQ(NSEvent *event) {
 static DMMirrorQuitTarget *DMMirrorQuit;
 
 static void DMSendEvent(NSApplication *app, SEL selector, NSEvent *event) {
-    // Snippet tools can put Command on V without posting a separate modifier
-    // event. SDL's physical modifier state then loses Command, producing "v".
-    // Read the original Cocoa flags and send clipboard+paste as one operation.
-    if (event.type == NSEventTypeKeyUp && event.keyCode == kVK_ANSI_V && DMPasteKeyActive) {
-        DMPasteKeyActive = NO;
-        return;
-    }
-    BOOL mirrorInput = DMMirrorWindow.isKeyWindow && !DMSecureWindow &&
-        ![DMMirrorWindow.firstResponder isKindOfClass:NSTextView.class];
-    if (mirrorInput && DMPasteShortcutEvent(event)) {
-        if (!event.isARepeat) {
-            NSString *text = [NSPasteboard.generalPasteboard stringForType:NSPasteboardTypeString];
-            if (!text || !DMQueueSyntheticText(text)) {
-                NSLog(@"DroidMirror: could not queue clipboard paste");
-            }
-        }
-        DMPasteKeyActive = YES;
-        return;
-    }
-    // Intercept before SDL emits both the dummy physical A and text events.
-    // Pair the release as well, without disturbing a real hardware A press.
-    if (event.type == NSEventTypeKeyUp && event.keyCode == kVK_ANSI_A && DMSyntheticTextKeyActive) {
-        DMSyntheticTextKeyActive = NO;
-        return;
-    }
-    if (mirrorInput && DMSyntheticTextEvent(event)) {
-        if (DMQueueSyntheticText(event.characters)) {
-            DMSyntheticTextKeyActive = YES;
-            return;
-        }
-    }
     // setupKeyboardRemapping is replaced below, so media keys must enter here,
     // before either SDL or AppKit handles the system-defined event.
     if (event.type == NSEventTypeSystemDefined && !DMHostQuitRequested) {
@@ -348,7 +316,7 @@ static void DMSetupKeyboardPassthrough(id self, SEL command) {
                     [mirrorWindow deminiaturize:nil];
                     [NSApp activateIgnoringOtherApps:YES];
                     [mirrorWindow makeKeyAndOrderFront:nil];
-                    DMReportMirrorVisible();
+                    DroidMirrorReportMirrorVisible();
                 }];
             DMMinimizeObserver = [[NSDistributedNotificationCenter defaultCenter]
                 addObserverForName:@"app.droidmirror.minimizeMirror"
@@ -369,7 +337,7 @@ static void DMSetupKeyboardPassthrough(id self, SEL command) {
                     [NSApp activateIgnoringOtherApps:YES];
                     [mirrorWindow makeKeyAndOrderFront:nil];
                 }
-                DMReportMirrorVisible();
+                DroidMirrorReportMirrorVisible();
                 SEL screenSelector = NSSelectorFromString(@"screenView");
                 if ([self respondsToSelector:screenSelector]) {
                     NSView *screen = sendObject(self, screenSelector);
@@ -515,6 +483,11 @@ static void DMObserveScrcpyTermination(void) {
         DMOriginalRendererTerminate = (void *)method_getImplementation(terminate);
         method_setImplementation(terminate, (IMP)DMRendererTerminate);
     }
+    DMInstallSyntheticTextRouting(^BOOL(NSEvent *event) {
+        return DMMirrorWindow.isKeyWindow && !DMSecureWindow &&
+            (event.windowNumber == 0 || event.windowNumber == DMMirrorWindow.windowNumber) &&
+            ![DMMirrorWindow.firstResponder isKindOfClass:NSTextView.class];
+    });
     Method sendEvent = class_getInstanceMethod(NSApplication.class, @selector(sendEvent:));
     DMOriginalSendEvent = (void *)method_getImplementation(sendEvent);
     method_setImplementation(sendEvent, (IMP)DMSendEvent);

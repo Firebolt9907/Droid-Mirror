@@ -227,3 +227,21 @@ the AppleEvent failure observed alongside Droppy's loading indicator.
 After installation, Next invoked through Android's DroidMirror MediaSession also
 advanced from “After Midnight” to “Naked In Manhattan”, confirming the Bluetooth
 command path uses the corrected adapter.
+
+### Unchanged playback metadata
+
+Both directions still poll their local player every two seconds. Updated peers
+advertise `supportsLocalTimeline` and stop sending media traffic once the latest
+state is acknowledged and normal progress matches the local clock (within one
+second). Paused or inactive state also stays silent. macOS advances elapsed time
+with a monotonic clock; Android's PlaybackState carries a position, playback rate
+and elapsed-realtime anchor so system clients advance the progress bar locally.
+Seeks, pause/resume, track/metadata/control changes, and position drift send a new
+state revision. Full snapshots retry until acknowledged, including retrying a lost
+acknowledgment. Artwork chunks and queue publications retain separate deduplication.
+
+These timelines last only for their authenticated media subscription. Disconnect,
+resubscription or disabling sync clears the state; existing connection health
+checks replace per-media freshness traffic. Authentication and sequence checks are
+unchanged. Older peers retain the eight-second media lease and periodic snapshots
+(or compact refreshes if supported).

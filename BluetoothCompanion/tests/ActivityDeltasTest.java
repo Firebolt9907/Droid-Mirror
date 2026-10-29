@@ -44,6 +44,22 @@ public class ActivityDeltasTest {
         check(sender.encode(snapshot,66000).getString("type").equals("notification"));
         sender.encode(new JSONObject().put("type","removed").put("id","runner"),67000);
         check(sender.encode(first,68000).getString("type").equals("notification"));
+        ActivityDeltas suppression = new ActivityDeltas(); suppression.setEnabled(true);
+        check(suppression.contentChanged(first, 1000));
+        check(!suppression.contentChanged(new JSONObject(next.toString()).put("postedAt", 9999), 2000));
+        check(!suppression.contentChanged(later, 62000));
+        check(suppression.contentChanged(correction, 63000));
+        check(suppression.contentChanged(changed, 64000));
+        check(suppression.contentChanged(paused, 65000));
+        ActivityDeltas ordinaryTimers = new ActivityDeltas(); ordinaryTimers.setEnabled(true);
+        check(ordinaryTimers.contentChanged(new JSONObject(first.toString()).put("activity", false), 1000));
+        check(ordinaryTimers.contentChanged(new JSONObject(next.toString()).put("activity", false), 2000)); // Static notification clients cannot advance timer digits.
+        JSONObject regular = new JSONObject().put("type", "notification").put("id", "regular").put("version", "v1").put("body", "Hello");
+        check(suppression.contentChanged(regular, 1));
+        check(!suppression.contentChanged(new JSONObject(regular.toString()).put("version", "v2").put("postedAt", 9999), 2));
+        check(suppression.contentChanged(new JSONObject(regular.toString()).put("body", "Changed"), 3));
+        suppression.encode(new JSONObject().put("type", "removed").put("id", "regular"), 4);
+        check(suppression.contentChanged(regular, 5));
         if(args.length>0) java.nio.file.Files.writeString(java.nio.file.Path.of(args[0]),new JSONArray().put(first).put(patch).put(laterPatch).put(fix).toString());
         System.out.println("PASS: activity deltas, predictive timers, corrections, pause, snapshots and removal; representative update "+fullBytes+" -> "+patchBytes+" JSON bytes");
     }

@@ -74,7 +74,7 @@ object LeftBehindFeedback {
     fun action(context: Context, id: String, action: String) {
         if (action != "dismissed" && !LeftBehindFeedbackEvent.choice(action)) return
         val changed = finish(context, id, if (action == "dismissed") "unanswered" else action, action)
-        if (!changed || action == "dismissed") return
+        if (!changed) return
         // A stale action must never cancel a newer notification for the same algorithm.
         context.getSystemService(NotificationManager::class.java).activeNotifications.firstOrNull {
             it.notification.extras.getString("leftBehindEvent") == id
@@ -105,7 +105,7 @@ object LeftBehindFeedback {
     }
     fun summary(context: Context): String {
         val database = db(context)
-        val lines = mutableListOf("Notification decisions (new build onward; retained separately from counter resets):")
+        val lines = mutableListOf("Reminder history (including archived experiment decisions; retained separately from counter resets):")
         database.rawQuery("SELECT algorithm,outcome,COUNT(*) FROM events WHERE outcome!='posting' GROUP BY algorithm,outcome ORDER BY algorithm,outcome", null).use { rows ->
             while (rows.moveToNext()) lines.add("#${rows.getInt(0)} ${rows.getString(1)}: ${rows.getLong(2)}")
         }

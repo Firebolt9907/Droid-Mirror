@@ -80,7 +80,7 @@ class BridgeSettingsActivity : Activity() {
         })
         heading("Left-behind alerts (optional)")
         layout.addView(Switch(this).apply {
-            text = "Mac left-behind alerts (experimental)"
+            text = "Mac left-behind alerts"
             isChecked = LeftBehindMonitor.enabled(this@BridgeSettingsActivity)
             isEnabled = LeftBehindMonitor.supported(this@BridgeSettingsActivity)
             setOnCheckedChangeListener { _, enabled ->
@@ -90,18 +90,21 @@ class BridgeSettingsActivity : Activity() {
         })
         layout.addView(TextView(this).apply {
             text = if (LeftBehindMonitor.supported(this@BridgeSettingsActivity))
-                "Requires the background bridge and a paired Mac running DroidMirror. Runs four independent Bluetooth detectors in parallel: authenticated BLE link, passive Mac BLE beacon, active Mac GATT challenge, and Classic RFCOMM challenge. Pair the Mac in Android Bluetooth settings for Classic. Both apps need the matching update. Each posts its own numbered alert once per separation after that channel has first succeeded nearby; counts persist across restarts. Significant motion approximates travel, including walking or biking, but does not classify activity. Mac sleep or disabling Mac Bluetooth may cause false alerts. Closed-lid operation is experimental."
+                "Uses the selected Mac Bluetooth beacon detector (formerly #2). Requires the background bridge and the paired Mac running DroidMirror. After first detecting the beacon nearby, recent movement and two failed scans can produce a reminder. Sleep, Bluetooth settings and interference can still cause false alerts."
             else "Left-behind alerts are unavailable: this phone has no significant-motion sensor."
         })
-        repeat(app.droidmirror.bluetooth.LeftBehindExperiments.COUNT) { index ->
-            layout.addView(Switch(this).apply {
-                text = "#${index + 1} notifications${if (index == 0) " (noisy baseline; off by default)" else ""}"
-                isChecked = LeftBehindMonitor.alertsEnabled(this@BridgeSettingsActivity, index)
-                setOnCheckedChangeListener { _, enabled -> LeftBehindMonitor.setAlertsEnabled(this@BridgeSettingsActivity, index, enabled) }
-            })
-        }
+        layout.addView(Switch(this).apply {
+            text = "Show left-behind reminders"
+            isChecked = LeftBehindMonitor.alertsEnabled(this@BridgeSettingsActivity, LeftBehindMonitor.ALGORITHM)
+            setOnCheckedChangeListener { _, enabled -> LeftBehindMonitor.setAlertsEnabled(this@BridgeSettingsActivity, LeftBehindMonitor.ALGORITHM, enabled) }
+        })
+        layout.addView(Switch(this).apply {
+            text = "Use Live Activity until Mac returns"
+            isChecked = LeftBehindMonitor.temporary(this@BridgeSettingsActivity)
+            setOnCheckedChangeListener { _, enabled -> LeftBehindMonitor.setTemporary(this@BridgeSettingsActivity, enabled) }
+        })
         layout.addView(TextView(this).apply {
-            text = "#2 hears the Mac beacon; #3 connects and verifies a fresh response. Both use the same alert threshold but may miss different rounds. Alerts remain after normal reconnection; bridge shutdown still clears them; the recent history records posts and recovery. Repeated posts can replace the same card. #4 probes only the Mac selected in pairing, and must succeed nearby before it can alert."
+            text = "Off: a normal notification. On: an ongoing Live Activity. Both go away when the Mac beacon is detected again or you tap Dismiss. There is no timer. Android controls Live Activity promotion; older versions show an ongoing notification with the same behavior. This setting applies to the next reminder. Historical experiment records are retained below."
         })
         experimentStats = TextView(this).apply {
             text = LeftBehindMonitor.stats(this@BridgeSettingsActivity)
@@ -184,8 +187,8 @@ class BridgeSettingsActivity : Activity() {
             .orEmpty().split(':').any { ComponentName.unflattenFromString(it) == component }
         val secure = checkSelfPermission(Manifest.permission.WRITE_SECURE_SETTINGS) == PackageManager.PERMISSION_GRANTED
         permissions.text = "\nLeft-behind alerts: ${if (LeftBehindMonitor.enabled(this)) (if (getSystemService(NotificationManager::class.java).areNotificationsEnabled()) "enabled (experimental)" else "allow DroidMirror notifications in Android settings") else "off"}\n" +
-            "Bluetooth scan permission: ${if (Build.VERSION.SDK_INT < 31 || checkSelfPermission(Manifest.permission.BLUETOOTH_SCAN) == PackageManager.PERMISSION_GRANTED) "allowed" else "missing — #2 and initial #3 discovery cannot run"}\n" +
-            "Bluetooth connect permission: ${if (Build.VERSION.SDK_INT < 31 || checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED) "allowed" else "missing — active probes cannot run"}\n" +
+            "Bluetooth scan permission: ${if (Build.VERSION.SDK_INT < 31 || checkSelfPermission(Manifest.permission.BLUETOOTH_SCAN) == PackageManager.PERMISSION_GRANTED) "allowed" else "missing — Mac beacon scanning cannot run"}\n" +
+            "Bluetooth connect permission: ${if (Build.VERSION.SDK_INT < 31 || checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED) "allowed" else "missing — background Bluetooth features may be unavailable"}\n" +
             "Notification access: ${if (access) "allowed" else "missing — complete step 3"}\n" +
             "Notification listener: ${if (PhoneNotifications.live != null) "connected" else if (access) "disconnected — try reconnecting below" else "waiting for access"}\n" +
             "Shared Mac pairing code: ${if (BleTrust.key(this) != null) "available (does not confirm Mac connection)" else "select a Mac and tap Pair Mac"}\n" +

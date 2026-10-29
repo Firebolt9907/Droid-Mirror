@@ -2,6 +2,7 @@ import Foundation
 
 // No Bluetooth or sound side effects: compile the real companion against this transport double.
 final class BLEController {
+    var supportsChangePush = false
     var authenticated = true
     var supportsWearCompanion = true
     var sent = [[String: Any]]()
@@ -43,6 +44,24 @@ final class BLEController {
         companion.clear(); assert(companion.batteryStatus == "Phone battery unavailable")
         companion.receive(["type": "watchPhoneBattery", "id": state["id"]!, "level": 20, "charging": false])
         assert(companion.batteryStatus == "Phone battery unavailable", "reject old connection battery")
+        let push = BLEController(); push.supportsChangePush = true
+        var now = 100.0, battery = 73
+        let quiet = WearCompanion(clock: { now }, readBattery: { ["level": battery, "charging": false] })
+        quiet.controller = push; quiet.connected()
+        let pushID = push.sent[0]["id"]!
+        for _ in 0..<100 { now += 10; quiet.tick() }
+        assert(push.sent.count == 1, "Unchanged state must stay silent after legacy lease expiry")
+        battery = 72; quiet.tick(); assert(push.sent.count == 2)
+        quiet.receive(["type": "watchPhoneBattery", "id": pushID, "level": 30, "charging": false, "changeOnly": true])
+        now += 100; assert(quiet.batteryStatus == "Phone battery: 30%")
+        let ticketRequest = UUID().uuidString
+        quiet.receive(["type": "watchTicketRequest", "id": pushID, "request": ticketRequest])
+        assert(push.sent.last?["type"] as? String == "watchMacTicket")
+        assert(push.sent.last?["request"] as? String == ticketRequest)
+        quiet.clear()
+        assert(quiet.batteryStatus == "Phone battery unavailable")
+        quiet.receive(["type": "watchTicketRequest", "id": pushID, "request": UUID().uuidString])
+        assert(push.sent.count == 3, "Old connections cannot acquire fresh command tickets")
         print("Wear companion: command expiry, replay, reconnection and battery tests passed")
     }
 }

@@ -110,7 +110,7 @@ struct BLEOutboundQueue {
         guard bytes + cost <= Self.limit else { return false }
         let bulk = object["type"] as? String == "clipboardFileChunk"
         messages.append(Message(object: object, deadline: deadline, cost: cost, bulk: bulk,
-                                urgent: object["type"] as? String == "ping"))
+                                urgent: ["ping", "appLaunch"].contains(object["type"] as? String ?? "")))
         bytes += cost
         return true
     }

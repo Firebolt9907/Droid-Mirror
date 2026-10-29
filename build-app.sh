@@ -50,10 +50,10 @@ cp "$ROOT/PeerTransport/target/release/libdroidmirror_peer.dylib" "$APP/Contents
   -framework Foundation "$ROOT/Native/MusicQueueHelper.m" \
   -o "$APP/Contents/Helpers/libDroidMirrorMusicQueue.dylib"
 # The host and background receiver share the same pairing implementation.
-BLE_SOURCES=(Sources/DroidMirror/NotificationAppPreferences.swift Native/BrowserURL.swift Native/LinkSharing.swift Native/MediaSyncState.swift Native/AppleMusicQueue.swift Native/MusicCatalogArtwork.swift Native/AppleMusicSync.swift Native/MediaPlaybackSync.swift Native/WearCompanionState.swift Native/WearCompanion.swift Native/PhoneHotspot.swift Native/TaskContinuation.swift Native/ClipboardSync.swift Native/NotificationRuntime.swift Native/NotificationPresentationPolicy.swift Native/NotificationDismissal.swift Native/NotificationActions.swift Native/NotificationConversationState.swift
+BLE_SOURCES=(Sources/DroidMirror/NotificationAppPreferences.swift Native/BrowserURL.swift Native/LinkSharing.swift Native/MediaSyncState.swift Native/AppleMusicQueue.swift Native/MusicCatalogArtwork.swift Native/AppleMusicSync.swift Native/MediaPlaybackSync.swift Native/WearCompanionState.swift Native/WearCompanion.swift Native/PhoneHotspot.swift Native/TaskContinuation.swift Native/PhoneAppLibrary.swift Native/LibraryIrohChannel.swift Native/ShortcutReveal.swift Native/ClipboardSync.swift Native/NotificationRuntime.swift Native/NotificationPresentationPolicy.swift Native/NotificationDismissal.swift Native/NotificationActions.swift Native/NotificationConversationState.swift
   Native/NotificationIconAttachment.swift Native/NotificationCommunicationContent.swift Native/BLESession.swift Native/BLEController.swift Native/BLEIntegration.swift
   Native/BLEMenu.swift Native/TrackpadHaptics.swift Native/DiscoveryNotifications.swift Native/ActivityClock.swift Native/BLESecurity.swift
-  Native/PresenceRadioServer.swift Native/ActivityImages.swift Native/AndroidActivityRenderer.swift Native/AndroidActivityMenu.swift Native/AndroidNotificationBridge.swift)
+  Native/PresenceBeaconAdvertiser.swift Native/ActivityImages.swift Native/AndroidActivityRenderer.swift Native/AndroidActivityMenu.swift Native/AndroidNotificationBridge.swift)
 xcrun swiftc "${SWIFT_FLAGS[@]}" -module-cache-path /private/tmp/droidmirror-swift-module-cache \
   -emit-library -module-name DroidMirrorBLE -target arm64-apple-macosx14.0 \
   -framework AppKit -framework IOBluetooth -framework CoreBluetooth -framework UserNotifications -framework Security \
@@ -72,6 +72,8 @@ xcrun swiftc "${SWIFT_FLAGS[@]}" -module-cache-path /private/tmp/droidmirror-swi
   -target arm64-apple-macosx14.0 -framework AppKit -framework IOBluetooth -framework CoreBluetooth \
   -framework UserNotifications -framework Security "${BLE_SOURCES[@]}" \
   Native/NotificationReceiver.swift -o "$RECEIVER/MacOS/DroidMirrorNotifications"
+/usr/bin/clang "${C_FLAGS[@]}" -fobjc-arc -fblocks -mmacosx-version-min=14.0 -framework AppKit \
+  Native/PhoneAppLauncher.m -o "$APP/Contents/Helpers/PhoneAppLauncher"
 # A native Share extension receives web links from Safari and other apps.
 SHARE="$APP/Contents/PlugIns/DroidMirrorShare.appex/Contents"
 mkdir -p "$SHARE/MacOS"

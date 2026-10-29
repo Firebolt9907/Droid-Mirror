@@ -29,6 +29,12 @@ final class BLEController {
         precondition(state.currentURL(authenticated: true, now: now) == nil)
         let app = NSApplication.shared
         app.setActivationPolicy(.accessory)
+        var pushed = event; pushed["changeOnly"] = true
+        state.receive(pushed, authenticated: true, now: now)
+        precondition(state.currentURL(authenticated: true, now: now.addingTimeInterval(3600)) != nil)
+        precondition(state.currentURL(authenticated: false, now: now.addingTimeInterval(3600)) == nil)
+        state.clear()
+        precondition(state.currentURL(authenticated: true, now: now) == nil)
         let controller = BLEController()
         controller.authenticated = true
         var opened: URL?
