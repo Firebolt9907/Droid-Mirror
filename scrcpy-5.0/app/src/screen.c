@@ -625,6 +625,7 @@ sc_screen_init(struct sc_screen *screen,
     screen->req.y = params->window_y;
     screen->req.width = params->window_width;
     screen->req.height = params->window_height;
+    screen->req.keep_short_side = false;
     screen->req.fullscreen = params->fullscreen;
     screen->req.start_fps_counter = params->start_fps_counter;
 
@@ -699,11 +700,15 @@ sc_screen_init(struct sc_screen *screen,
 
     if (SDL_GetBooleanProperty(SDL_GetWindowProperties(screen->window), "app.droidmirror.connecting", false)) {
         // Preserve moves and resizes made while connecting. Only the phone's
-        // aspect ratio needs to be resolved when the first frame arrives.
+        // aspect ratio needs to be resolved when the first frame arrives. The
+        // window may have been left in landscape by the previous session, so
+        // keep its short edge rather than its width (see
+        // sc_screen_show_initial_window).
         struct sc_size size = sc_sdl_get_window_size(screen->window);
         struct sc_point position = sc_sdl_get_window_position(screen->window);
         screen->req.width = size.width;
-        screen->req.height = 0;
+        screen->req.height = size.height;
+        screen->req.keep_short_side = true;
         screen->req.x = position.x;
         screen->req.y = position.y;
         SDL_ClearProperty(SDL_GetWindowProperties(screen->window), "app.droidmirror.connecting");
@@ -883,9 +888,26 @@ sc_screen_show_initial_window(struct sc_screen *screen) {
         .y = y,
     };
 
-    struct sc_size window_size =
-        get_initial_optimal_size(screen->content_size, screen->req.width,
-                                                       screen->req.height);
+    struct sc_size window_size;
+    if (screen->req.keep_short_side && screen->req.width && screen->req.height
+            && screen->content_size.width && screen->content_size.height) {
+        // Map the adopted window's short edge onto the content's short edge,
+        // independent of the orientation either one was in.
+        struct sc_size content = screen->content_size;
+        uint32_t short_side = MIN(screen->req.width, screen->req.height);
+        if (content.height >= content.width) {
+            window_size.width = short_side;
+            window_size.height = short_side * content.height / content.width;
+        } else {
+            window_size.height = short_side;
+            window_size.width = short_side * content.width / content.height;
+        }
+        window_size = get_optimal_size(window_size, content, true);
+    } else {
+        window_size = get_initial_optimal_size(screen->content_size,
+                                               screen->req.width,
+                                               screen->req.height);
+    }
 
     if (screen->flex_display
             && window_size.width == screen->content_size.width
@@ -1258,8 +1280,7 @@ sc_screen_apply_frame(struct sc_screen *screen, bool can_resize) {
     sc_tick cutout_now = sc_tick_now();
     if (screen->controller && !screen->camera
             && (!screen->camera_cutout_requested || frame_size_changed
-                || (!sc_camera_cutout_matches_frame(new_frame_size)
-                    && cutout_now >= screen->camera_cutout_request_at))) {
+                || cutout_now >= screen->camera_cutout_request_at)) {
         struct sc_control_msg request = {.type = SC_CONTROL_MSG_TYPE_GET_CAMERA_CUTOUT};
         screen->camera_cutout_requested = sc_controller_push_msg(screen->controller, &request);
         screen->camera_cutout_request_at = cutout_now + SC_TICK_FROM_SEC(1);

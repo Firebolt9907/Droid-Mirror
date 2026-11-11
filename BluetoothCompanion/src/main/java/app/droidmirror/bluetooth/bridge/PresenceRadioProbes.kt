@@ -42,6 +42,8 @@ class PresenceRadioProbes(private val context: Context, private val result: (Boo
         running = true
         val token = ++generation
         var seen = false
+        var packets = 0
+        var peakRssi: Int? = null
         fun valid() = !closed && running && generation == token
         fun finish(present: Boolean?, detail: String) {
             if (!valid()) return
@@ -51,7 +53,10 @@ class PresenceRadioProbes(private val context: Context, private val result: (Boo
         val callback = object : ScanCallback() {
             override fun onScanResult(callbackType: Int, value: ScanResult) { handler.post {
                 if (!valid()) return@post
-                if (mirroring()) finish(null, "Beacon scan interrupted by active mirroring") else seen = true
+                if (mirroring()) finish(null, "Beacon scan interrupted by active mirroring") else {
+                    seen = true; packets++
+                    if (value.rssi in -127..20) peakRssi = maxOf(peakRssi ?: -127, value.rssi)
+                }
             } }
             override fun onScanFailed(errorCode: Int) { handler.post { finish(null, "BLE scan failed ($errorCode)") } }
         }
@@ -62,7 +67,18 @@ class PresenceRadioProbes(private val context: Context, private val result: (Boo
         } catch (error: Exception) { finish(null, "BLE scan unavailable: ${error.javaClass.simpleName}"); return }
         handler.postDelayed({
             if (mirroring()) finish(null, "Beacon scan interrupted by active mirroring")
-            else finish(seen, if (seen) "Paired Mac beacon observed" else "No paired Mac beacon in 20s scan")
+            else {
+                if (seen) {
+                    context.getSharedPreferences("left-behind", Context.MODE_PRIVATE).edit()
+                        .putString("beacon-last-signal", "${peakRssi?.let { "$it dBm" } ?: "RSSI unknown"}; $packets advertisements")
+                        .putLong("beacon-last-seen-wall", System.currentTimeMillis()).apply()
+                }
+                val prefs = context.getSharedPreferences("left-behind", Context.MODE_PRIVATE)
+                val signal = prefs.getString("beacon-last-signal", "No signal diagnostic yet")
+                val last = prefs.getLong("beacon-last-seen-wall", 0)
+                val whenSeen = if (last > 0) java.text.DateFormat.getDateTimeInstance().format(java.util.Date(last)) else "unknown"
+                finish(seen, if (seen) "Paired Mac beacon observed ($signal)" else "No paired Mac beacon in 20s scan; last seen $whenSeen ($signal)")
+            }
         }, 20_000)
     }
     fun cancel() {

@@ -67,6 +67,9 @@ struct sc_screen {
         int16_t y;
         uint16_t width;
         uint16_t height;
+        // An adopted persistent window keeps its phone short edge, so a
+        // window left in landscape does not become a giant portrait window.
+        bool keep_short_side;
         bool fullscreen;
         bool start_fps_counter;
     } req;

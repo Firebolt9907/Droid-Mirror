@@ -24,7 +24,17 @@ pairing. The feature is off by default and works between mirror sessions.
   artwork are synchronized. Covers are sent as compressed JPEGs over the
   same encrypted BLE connection and appear in both devices’ media controls.
   This does not transfer audio, download music, or synchronize two audio streams.
-  Volume control and queue editing are not included. The actual Music playback
+  Queue editing is not included. Optional **Volume keys control phone media**
+  (Settings → Media playback) makes the keyboard volume up/down/mute keys adjust
+  the phone while phone media is shown in macOS Now Playing, regardless of which
+  app is focused, and shows the phone's volume in a HUD styled after the system
+  one. The background helper installs a session event tap only while phone
+  media is published and the phone reports an adjustable output (`volumeControl`
+  in its snapshot); otherwise the keys stay with macOS. It needs Accessibility
+  permission for **DroidMirror Notifications**. `mediaVolume` commands are bound
+  to the advertised session ID; Android rechecks that session, adjusts its local
+  music stream or remote (cast) volume, and replies with `mediaVolumeState`
+  (level, max, muted, device name). Phone-side volume changes do not show the HUD. The actual Music playback
   queue is read through MediaRemote and published with Android's
   `MediaSession.setQueue()`, `ACTION_SKIP_TO_QUEUE_ITEM`, and active queue item ID.
   Compatible watch players can browse and select entries. Android's standard
@@ -45,8 +55,8 @@ The Bluetooth menu and Settings show permission or connection status.
 Music must have an available current track and persistent track ID; some radio
 streams or unavailable tracks may not provide usable metadata or seeking.
 
-Snapshots refresh about every two seconds and expire after eight seconds without
-an update. Disconnecting, disabling sync, replacing the authenticated session, or
+Peers without a local timeline get snapshots about every two seconds, which
+expire after eight seconds without an update. Disconnecting, disabling sync, replacing the authenticated session, or
 stopping the bridge clears proxy state. Controls use the existing encrypted,
 sequence-checked BLE channel. Android binds its media subscription to one paired
 Mac and a generation; delayed callbacks cannot send to a replacement subscription.
@@ -170,12 +180,14 @@ hide Music behind the global Now Playing owner. The same snapshot supplies title
 artist, album, duration, position, playing state, shuffle/repeat modes, artwork when
 available, and the controls Music currently advertises. AppleScript is a fallback
 with a two-second timeout; its failure no longer clears a valid native player.
-The helper runs as a small dylib loaded in a short-lived `/usr/bin/perl` process,
+The helper runs as a small dylib loaded in a reused `/usr/bin/perl` process,
 using the compatibility approach documented by
 [mediaremote-adapter](https://github.com/ungive/mediaremote-adapter). No Droppy
 binary or third-party implementation is bundled. The host and notification
-receiver do not load MediaRemote. Input is bounded JSON on stdin, output is
-bounded JSON on stdout, and the parent terminates a child exceeding four seconds.
+receiver do not load MediaRemote. Each request is one line of bounded JSON on
+stdin and each response is one line of bounded JSON on stdout. The child blocks
+between requests, exits on EOF, is replaced after 256 requests, and is terminated
+if a request exceeds four seconds. It stops when the session ends, including sleep.
 Missing APIs, exceptions, mismatched metadata and unavailable queues remove queue
 controls while leaving existing Music controls available. Private APIs may need
 adjustment after macOS updates.
@@ -230,7 +242,14 @@ command path uses the corrected adapter.
 
 ### Unchanged playback metadata
 
-Both directions still poll their local player every two seconds. Updated peers
+The Mac reads Music when Music announces a change (`com.apple.Music.playerInfo`),
+when Music launches or quits, and when the phone needs an acknowledgment. A timer
+catches changes Music does not announce, such as seeks and queue edits: every 10
+seconds while playing, 30 with the display off, and 60 when paused. Legacy peers
+keep two-second reads for their eight-second lease. A phone command that arrives
+when the last read is over eight seconds old reads first, so the fresh-snapshot
+checks still apply. Now Playing is republished only when its content changes.
+Android still polls its local player every two seconds. Updated peers
 advertise `supportsLocalTimeline` and stop sending media traffic once the latest
 state is acknowledged and normal progress matches the local clock (within one
 second). Paused or inactive state also stays silent. macOS advances elapsed time
@@ -245,3 +264,20 @@ resubscription or disabling sync clears the state; existing connection health
 checks replace per-media freshness traffic. Authentication and sequence checks are
 unchanged. Older peers retain the eight-second media lease and periodic snapshots
 (or compact refreshes if supported).
+
+### Progress sample timing
+
+Progress is sampled with a monotonic timestamp before artwork processing. Both
+senders advance playing samples through processing and queue delays. The existing
+ping/pong calibration maps Mac sample times to Android elapsed realtime, and maps
+phone sample times back to the Mac. Receivers retain that source anchor rather
+than treating an old position as current on arrival. Paused/buffering samples do
+not advance, non-unit playback rates are respected, and positions clamp to the
+track duration. Compact acknowledgments carry a fresh position/sample pair.
+A materially improved clock calibration triggers one corrected timeline exchange;
+normal progress still produces no media heartbeat. Action-array ordering does not
+count as changed metadata.
+
+Regressions cover four-second processing delay, additional queue/transit delay,
+compact messages, pause, rate changes, clock conversion and silent steady playback.
+The source-level fix has not been installed or validated against live playing UI.

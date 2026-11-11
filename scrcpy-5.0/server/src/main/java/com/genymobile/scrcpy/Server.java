@@ -111,7 +111,7 @@ public final class Server {
 
             if (options.getDroidMirrorSession() && video && options.getVideoSource() == VideoSource.DISPLAY
                     && options.getDisplayId() == 0 && options.getNewDisplay() == null) {
-                session = new AdbStreamSession(cleanUp);
+                session = new AdbStreamSession(cleanUp, options.getDroidMirrorAllowUnlock());
             }
             Controller controller = null;
 

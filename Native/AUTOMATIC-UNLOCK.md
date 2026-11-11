@@ -80,3 +80,81 @@ preventing empty-drawable flashes. A genuinely black/protected app receives a bo
 Before installing an update, end any active mirror session gracefully, then replace
 the app/server and reconnect. An independent startup timer reapplies panel-off during Android’s asynchronous wake and PIN injection; it does not extend the recovery deadline. The Shizuku service version is bumped for the new
 capture signature; replacing components during an active session is not seamless.
+
+## Require Touch ID on the Mac
+
+In Mac Settings → Phone unlock, enable **Require Touch ID to unlock phone**.
+The default is off. The prompt appears only after the phone connection is
+confirmed, not when you click Connect. Over Bluetooth that means Android accepted
+the Classic session and the per-session BLE channel authenticated. Android
+checks for local use (awake and unlocked) before starting BLE, so a phone in use
+ends the session with `EVENT PHONE_IN_USE` and no prompt. The helper
+then emits `EVENT UNLOCK_DECISION_NEEDED` and holds the first capture record,
+including heartbeats, until the app answers `UNLOCK_DECISION 0|1` on stdin.
+Capture and video wait for the answer. With no answer within 30 seconds, the
+helper falls back to manual unlock. The prompt itself closes after 25 seconds.
+Android waits up to 45 seconds after BLE starts for that first record. Over ADB,
+the prompt appears after adb reached the phone and the phone-in-use check passed.
+The second byte of the start gate carries the answer to the client, which passes
+it to the server. Without that byte, the fail-closed launch default stands.
+For each new mirror session, the host evaluates a fresh
+`LAContext` with `.deviceOwnerAuthenticationWithBiometrics`, zero reuse duration,
+and a hidden fallback button. There is no Mac password or Apple Watch fallback.
+[Apple documents this biometric-only policy](https://developer.apple.com/documentation/localauthentication/lapolicy/deviceownerauthenticationwithbiometrics).
+Cancel (**Unlock manually**), failed authentication, lockout, or unavailable
+biometrics starts the mirror on the normal Android lock screen without reading
+or submitting the saved PIN and without consuming its cooldown. Manual phone
+input and the existing Mac PIN keypad remain available. Stopping the connection
+invalidates the prompt; a late result cannot start a cancelled connection.
+Success is scoped to the selected device/transport and next capture startup;
+reconnects prompt again. This setting cannot change during startup or an active mirror.
+
+The option cannot be newly enabled unless Touch ID is available and enrolled.
+An already enabled requirement never silently downgrades when Touch ID disappears.
+In lid-closed/clamshell mode, use a supported external Touch ID keyboard or open
+the lid; otherwise cancel and unlock Android manually. No sensor means no
+biometric authorization, including after enrollment changes or biometric lockout.
+There is no separate in-session saved-PIN action: after cancelling, use manual
+unlock, or stop and reconnect to request Touch ID again. This keeps one bounded
+PIN attempt per capture and preserves cooldown behavior.
+
+### Binding and threat model
+
+The PIN remains solely on Android, encrypted by Android Keystore; the Mac has no
+PIN item to protect with Keychain `.biometryCurrentSet`. Existing Mac pairing
+keys remain transport credentials, not proof of biometric authentication. The
+host gates both startup callers in `MirrorModel.start`: Bluetooth (including USB
+accessory/direct IP video upgrades) and direct ADB. Hybrid video/audio upgrades
+only replace transport and do not request another PIN. Manual keyboard/keypad
+entry is deliberately allowed and requires knowledge of the Android credential.
+
+Bluetooth sends a standalone `0x71 / length 1 / allow 0-or-1` decision as the first
+encrypted capture input record. Only that first sequence-checked record can
+authorize PIN retrieval; a missing/legacy decision defaults to manual unlock and
+later grants cannot upgrade it. It is authenticated under the fresh capture
+nonce-derived key; old-session ciphertext, tampering and sequence replay fail
+existing crypto checks. ADB passes an explicit default-false server option through
+its verified, owner-bound Binder handshake, retaining its one-shot PIN guard.
+Neither path changes Android authentication, sequence validation or cooldown.
+Use matching updated Mac client/helper, scrcpy server and Android companion;
+Bluetooth rejects companions lacking the unlock-decision capability before sending
+any capture input; ADB rejects a legacy PIN handoff when authorization was denied.
+Older components may fail to connect rather than offer a safe manual-only session.
+An older Android companion still waits only 15 seconds, BLE setup included, so
+answer Touch ID quickly or update the companion. End sessions before updating components.
+
+This is a local convenience/privacy gate against unattended use of the normal
+Mac app, not remote biometric attestation. A compromised Mac/user account can
+change preferences, forge an allow decision using its pairing key, or use
+independently authorized ADB; root/compromised Android can observe the PIN.
+Enforcing biometric presence against a malicious paired computer would require
+an Android-enforced policy and a separately protected signing credential.
+
+Run `bash Native/test-touch-id-unlock.sh` for first-record approval/denial,
+malformed/legacy input, late-grant rejection, cross-session isolation, crypto
+replay/tamper rejection, LA wrapper typecheck, BLE transport syntax checking,
+and native encrypted allow/deny records plus legacy capability rejection.
+Also run `bash Native/test-pin-unlock.sh`. Device testing still needs both
+Bluetooth/hybrid and ADB: success, cancel/failure (lock screen visible and usable),
+stop during prompt, repeated reconnect, cooldown, no enrolled Touch ID, lockout,
+clamshell with/without external Touch ID, and stale capture record replay.

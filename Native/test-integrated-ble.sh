@@ -17,6 +17,8 @@ classpath="$task_build:$classes:$stdlib:$json"
   "$root/Native/tests/BLESecurityPeer.java"
 "$task_java/bin/javac" -cp "$classpath" -d "$task_build" "$root/BluetoothCompanion/tests/ConversationPayloadTest.java"
 "$task_java/bin/java" -cp "$classpath" ConversationPayloadTest
+"$task_java/bin/javac" -cp "$classpath" -d "$task_build" "$root/BluetoothCompanion/tests/CatalogPushSubscriptionsTest.java"
+"$task_java/bin/java" -cp "$classpath" CatalogPushSubscriptionsTest
 "$task_java/bin/javac" -cp "$classpath" -d "$task_build" "$root/BluetoothCompanion/tests/BleOutboundQueueTest.java"
 "$task_java/bin/java" -cp "$classpath" BleOutboundQueueTest
 "$task_java/bin/javac" -d "$task_build" \
@@ -31,6 +33,10 @@ classpath="$task_build:$classes:$stdlib:$json"
   "$root/BluetoothCompanion/tests/SharedPairingTest.java"
 "$task_java/bin/java" -cp "$task_build" BackgroundBridgePreferencesTest
 "$task_java/bin/java" -cp "$task_build" SharedPairingTest
+"$task_java/bin/javac" -cp "$classpath" -d "$task_build" "$root/BluetoothCompanion/tests/ActivitySportsFieldsTest.java"
+"$task_java/bin/java" -cp "$classpath" ActivitySportsFieldsTest
+"$task_java/bin/javac" -cp "$classpath" -d "$task_build" "$root/BluetoothCompanion/tests/ActivityLayoutBudgetTest.java"
+"$task_java/bin/java" -cp "$classpath" ActivityLayoutBudgetTest
 "$task_java/bin/javac" -cp "$classpath" -d "$task_build" "$root/BluetoothCompanion/tests/ActivityDeltasTest.java"
 "$task_java/bin/java" -cp "$classpath" ActivityDeltasTest "$task_build/activity-deltas.json"
 xcrun swiftc -module-cache-path /private/tmp/droidmirror-swift-module-cache \

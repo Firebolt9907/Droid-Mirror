@@ -8,13 +8,24 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate {
 
     static func needsFirstRun(model: MirrorModel) -> Bool {
         !UserDefaults.standard.bool(forKey: "DroidMirror.onboarding.completed") &&
+        !UserDefaults.standard.bool(forKey: deferredKey) &&
         (UserDefaults.standard.bool(forKey: "DroidMirror.onboarding.started") ||
          (model.preferences.bluetoothDeviceID == nil &&
           !UserDefaults.standard.bool(forKey: "DroidMirror.BLE.enabled")))
     }
 
+    /// Set by "Set up later" so first-run setup stops reopening at every launch.
+    /// Choosing Set Up Phone… again clears it.
+    static let deferredKey = "DroidMirror.onboarding.deferred"
+
+    func deferSetup() {
+        UserDefaults.standard.set(true, forKey: Self.deferredKey)
+        close()
+    }
+
     func show(model: MirrorModel) {
         self.model = model
+        UserDefaults.standard.removeObject(forKey: Self.deferredKey)
         model.isOnboarding = true
         UserDefaults.standard.set(true, forKey: "DroidMirror.onboarding.started")
         if window == nil {
@@ -92,7 +103,8 @@ struct OnboardingView: View {
             .animation(stepAnimation, value: step)
             Divider()
             HStack {
-                Button("Set up later") { OnboardingWindowController.shared.close() }
+                Button("Set up later") { OnboardingWindowController.shared.deferSetup() }
+                    .help("Close setup. Reopen it any time from Set Up Phone….")
                     .disabled(model.isPairingBluetooth)
                 Spacer()
                 if step > 0 {
@@ -113,7 +125,10 @@ struct OnboardingView: View {
             }
         }
         .padding(28).frame(width: 600, height: 610)
-        .task(id: model.selectedID) { await checkPairing() }
+        // Key on the resolved device, not the raw ID: at launch the remembered
+        // ID is set before discovery fills `devices`, and the check must rerun
+        // once that phone actually appears.
+        .task(id: model.selectedDevice?.id) { await checkPairing() }
         .onChange(of: step) { _, value in
             UserDefaults.standard.set(value, forKey: "DroidMirror.onboarding.step")
         }
@@ -229,7 +244,11 @@ struct OnboardingView: View {
         didVerifyMirror = false
         model.bluetoothPairingCode = ""
         model.pairingError = nil
-        guard let device = model.selectedDevice, device.isBluetooth else { step = 0; return }
+        guard let device = model.selectedDevice, device.isBluetooth else {
+            // Keep a resumed step while discovery hasn't produced a list yet.
+            if !model.devices.isEmpty { step = 0 }
+            return
+        }
         guard let helper = ClassicBluetoothTransport.helperPath else {
             pairingCheckError = "Bluetooth helper missing. Install a complete DroidMirror app build, then reopen setup."
             return

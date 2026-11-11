@@ -133,6 +133,8 @@ static NSData *DMUpgradeProof(NSData *key, const char *direction, const uint8_t 
 @property(nonatomic, strong) NSMutableData *outgoing;
 @property(nonatomic, strong) DMBleInputTransport *ble;
 @property(nonatomic) BOOL announcedReady;
+@property(nonatomic) NSTimeInterval unlockDecisionRequestedAt;
+@property(nonatomic) BOOL unlockDecisionResolved;
 @property(nonatomic) NSTimeInterval outgoingSince;
 @property(nonatomic) NSTimeInterval controlSince;
 @property(nonatomic) BOOL l2capReady;
@@ -427,7 +429,11 @@ static void DMWirelessLatency(void *context, uint64_t timestamp) {
             [self fallbackToBluetooth]; return;
         }
     }
-    BOOL audioStalled=_audioPlayback && NSDate.timeIntervalSinceReferenceDate-_audioLastPacket > 2;
+    // While the phone still reports an eligible, sending capture it may be in its
+    // one-minute idle window (paused media), so only its own timeout ends audio.
+    // Otherwise a two-second packet gap is a failed lane.
+    NSTimeInterval audioGapLimit=((_audioState & 3)==3) ? 65 : 2;
+    BOOL audioStalled=_audioPlayback && NSDate.timeIntervalSinceReferenceDate-_audioLastPacket > audioGapLimit;
     if (_audioRequested && (audioStalled || (!_audioPlayback && NSDate.timeIntervalSinceReferenceDate-_audioRequestedAt > 5))) {
         [self stopAudio]; _audioLocalFailure=YES; [self publishAudioState];
     }
@@ -449,6 +455,8 @@ static void DMWirelessLatency(void *context, uint64_t timestamp) {
                 if (port > 0 && port <= UINT16_MAX) [self probeWiFi:(uint16_t)port];
             }
             if ([line isEqualToString:@"UPGRADE_PEER"]) [self probePeer];
+            if ([line isEqualToString:@"UNLOCK_DECISION 1"]) [self resolveUnlockDecision:YES reason:"host approved"];
+            if ([line isEqualToString:@"UNLOCK_DECISION 0"]) [self resolveUnlockDecision:NO reason:"host declined"];
             if ([line hasPrefix:@"AUDIO_FORWARD "]) {
                 NSArray *fields=[line componentsSeparatedByString:@" "];
                 if (fields.count==3) {
@@ -632,6 +640,29 @@ static void DMWirelessLatency(void *context, uint64_t timestamp) {
     _announcedReady=YES;
     printf("READY %u %u\n",_videoPort,_controlPort); fflush(stdout);
     fprintf(stderr,"BLE side channel authenticated; Classic L2CAP carries video only (phone to Mac)\n");
+    [self requestUnlockDecisionIfNeeded];
+}
+// Touch ID runs only after the phone accepted the session and BLE authenticated.
+// The first capture record (and so capture startup) waits for this bounded answer.
+static const NSTimeInterval DMUnlockDecisionTimeout=30;
+- (void)requestUnlockDecisionIfNeeded {
+    if (_unlockDecisionRequestedAt || !_ble.awaitingUnlockDecision) return;
+    _unlockDecisionRequestedAt=NSDate.timeIntervalSinceReferenceDate;
+    fprintf(stderr,"Authenticated capture channel open; waiting for the host unlock decision\n");
+    printf("EVENT UNLOCK_DECISION_NEEDED\n"); fflush(stdout);
+}
+- (void)resolveUnlockDecision:(BOOL)allowed reason:(const char *)reason {
+    if (!_unlockDecisionRequestedAt || _unlockDecisionResolved) return;
+    _unlockDecisionResolved=YES;
+    fprintf(stderr,"Unlock decision %s (%s)\n",allowed ? "allowed" : "manual",reason);
+    [_ble resolveUnlockDecision:allowed];
+}
+- (void)holdStartupForUnlockDecisionAtTime:(NSTimeInterval)now {
+    if (!_unlockDecisionRequestedAt || _unlockDecisionResolved) return;
+    // Video cannot start before the decision; the host prompt is not a stall.
+    _lastData=now; _wifiLastData=now;
+    if (now-_unlockDecisionRequestedAt > DMUnlockDecisionTimeout)
+        [self resolveUnlockDecision:NO reason:"timed out; unlock manually"];
 }
 - (void)bleInputReady { [self announceReady]; [self sendControl]; }
 - (void)bleInputFailed:(NSString *)reason { [self fail:reason]; }
@@ -690,7 +721,8 @@ static void DMWirelessLatency(void *context, uint64_t timestamp) {
     [NSDistributedNotificationCenter.defaultCenter postNotificationName:@"app.droidmirror.audioState"
         object:[NSString stringWithFormat:@"%d",getppid()]
         userInfo:@{@"helper":@(getpid()), @"available":@(available), @"requested":@(_audioRequested),
-                   @"playing":@(_audioPlayback != nil), @"failed":@(_audioLocalFailure || (_audioState & 4))}
+                   @"playing":@(_audioPlayback != nil),
+                   @"connected":@(_audioRequested && _audioDedicated && _audioSocket >= 0), @"failed":@(_audioLocalFailure || (_audioState & 4))}
         deliverImmediately:YES];
 }
 - (void)startAudio {
@@ -746,6 +778,7 @@ static void DMWirelessLatency(void *context, uint64_t timestamp) {
             fcntl(fd,F_SETFL,O_NONBLOCK); self.audioSocket=fd;
             dm_classic_wire_init_video_only(&self->_audioWire); self->_audioWire.audio=DMAudio;
             fprintf(stderr,"Independent audio lane authenticated (%s)\n",usedPeer ? "paired QUIC" : "wireless ADB");
+            [self publishAudioState]; // Lets the window send its one start-up volume press promptly.
         });
     });
 }
@@ -1001,6 +1034,7 @@ static void DMWirelessLatency(void *context, uint64_t timestamp) {
         // A quiet period ends the bounded diagnostic; the script also requires
         // exact agreement with the sender's total before accepting the sample.
         if (self.benchmark && self.benchmarkBytes && now-self.benchmarkLast > 2.0) [self finishBenchmark];
+        [self holdStartupForUnlockDecisionAtTime:now];
         [self flush]; [self pollControl]; [self pollWiFi]; [self pollUSB];
         if (self.outgoingSince && now - self.outgoingSince > 1.0) [self fail:@"Bluetooth input stalled"];
         if (self.controlSince && now - self.controlSince > 1.0) [self fail:@"Control response stalled"];

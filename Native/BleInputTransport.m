@@ -11,6 +11,7 @@ static NSString *const DMInputKey=@"c356a44e-6f2b-4da9-85e5-397991b8a614";
 static NSString *const DMInputClock=@"c356a44e-6f2b-4da9-85e5-397991b8a615";
 static NSString *const DMInputResume=@"c356a44e-6f2b-4da9-85e5-397991b8a616";
 static NSString *const DMInputReplay=@"c356a44e-6f2b-4da9-85e5-397991b8a617";
+static NSString *const DMInputUnlockDecision=@"c356a44e-6f2b-4da9-85e5-397991b8a618";
 static NSString *const DMInputProof=@"c356a44e-6f2b-4da9-85e5-397991b8a612";
 // With-response capacity can include slow ATT prepared writes (up to 512 B),
 // rather than one radio packet. Avoid turning a small click into a long batch.
@@ -64,6 +65,9 @@ static NSUInteger DMInputPacketLimit(NSUInteger reliable, NSUInteger singlePacke
 @property(nonatomic, strong) DMBleInputQueue *pending;
 @property(nonatomic, strong) NSMutableSet<NSUUID *> *rejected;
 @property(nonatomic) uint64_t sequence;
+@property(atomic) BOOL startupAuthorizationPending;
+// -1 deferred until the host answers; 0 manual unlock; 1 saved PIN allowed.
+@property(atomic) NSInteger unlockDecision;
 @property(atomic) BOOL ready;
 @property(atomic, copy, readwrite) NSString *connectionStage;
 @property(atomic) BOOL closed;
@@ -71,11 +75,19 @@ static NSUInteger DMInputPacketLimit(NSUInteger reliable, NSUInteger singlePacke
 @property(nonatomic, strong) dispatch_source_t watchdog;
 @property(nonatomic, strong) dispatch_queue_t queue;
 @end
+// Missing/unknown values fail closed. "defer" holds every capture record,
+// including heartbeats, until the host resolves Touch ID after BLE is ready.
+static NSInteger DMUnlockDecisionFromEnvironment(void) {
+    const char *allowed=getenv("DROIDMIRROR_ALLOW_UNLOCK");
+    if (allowed && !strcmp(allowed,"defer")) return -1;
+    return allowed && !strcmp(allowed,"1") ? 1 : 0;
+}
 @implementation DMBleInputTransport
 - (instancetype)initWithPairingKey:(NSData *)key {
     if (key.length != 32 || !(self=[super init])) return nil;
     _connectionStage=@"initializing BLE";
-    _pairingKey=[key copy]; _sequence=1; _receiveSequence=1;
+    _pairingKey=[key copy]; _sequence=1; _receiveSequence=1; _startupAuthorizationPending=YES;
+    _unlockDecision=DMUnlockDecisionFromEnvironment();
     _pending=[DMBleInputQueue new]; _rejected=[NSMutableSet set];
     _queue=dispatch_queue_create("app.droidmirror.ble-control",
         dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL,QOS_CLASS_USER_INTERACTIVE,0));
@@ -313,7 +325,8 @@ static NSUInteger DMInputPacketLimit(NSUInteger reliable, NSUInteger singlePacke
         [self setStage:@"discovering BLE characteristics"];
         [peripheral discoverCharacteristics:@[[CBUUID UUIDWithString:DMInputCharacteristic],[CBUUID UUIDWithString:DMInputProof],
             [CBUUID UUIDWithString:DMInputReturn],[CBUUID UUIDWithString:DMInputKey],[CBUUID UUIDWithString:DMInputClock],
-            [CBUUID UUIDWithString:DMInputResume],[CBUUID UUIDWithString:DMInputReplay]] forService:service];
+            [CBUUID UUIDWithString:DMInputResume],[CBUUID UUIDWithString:DMInputReplay],
+            [CBUUID UUIDWithString:DMInputUnlockDecision]] forService:service];
         return;
     }
     [self waitForInputService];
@@ -321,7 +334,9 @@ static NSUInteger DMInputPacketLimit(NSUInteger reliable, NSUInteger singlePacke
 - (void)peripheral:(CBPeripheral *)peripheral didDiscoverCharacteristicsForService:(CBService *)service error:(NSError *)error {
     if (self.closed || peripheral != _peripheral || service != self.inputService || self.nonceCharacteristic || self.nextDiscovery) return;
     CBCharacteristic *key=nil;
+    BOOL supportsUnlockDecision=NO;
     for (CBCharacteristic *characteristic in service.characteristics) {
+        if ([characteristic.UUID isEqual:[CBUUID UUIDWithString:DMInputUnlockDecision]]) supportsUnlockDecision=YES;
         if ([characteristic.UUID isEqual:[CBUUID UUIDWithString:DMInputResume]]) self.resumeCharacteristic=characteristic;
         if ([characteristic.UUID isEqual:[CBUUID UUIDWithString:DMInputReplay]]) self.replayCharacteristic=characteristic;
         if ([characteristic.UUID isEqual:[CBUUID UUIDWithString:DMInputCharacteristic]]) _input=characteristic;
@@ -333,6 +348,9 @@ static NSUInteger DMInputPacketLimit(NSUInteger reliable, NSUInteger singlePacke
     if (error || !key || !(_clockCharacteristic.properties & CBCharacteristicPropertyRead) || !(_returning.properties & CBCharacteristicPropertyRead)
             || !(_proof.properties & CBCharacteristicPropertyRead) || !(_proof.properties & CBCharacteristicPropertyWrite)
             || !(_input.properties & CBCharacteristicPropertyWrite)) { [self waitForInputService]; return; }
+    if (!error && !supportsUnlockDecision) {
+        [self reportFailure:@"Update the Android companion before mirroring: safe manual unlock startup is unavailable."]; return;
+    }
     // The public nonce derives session keys from the one-time, privately paired root.
     // Proof authenticates the chosen phone before any input is sent.
     self.nonceCharacteristic=key;
@@ -587,8 +605,17 @@ static NSUInteger DMInputPacketLimit(NSUInteger reliable, NSUInteger singlePacke
     });
     return YES;
 }
+- (BOOL)awaitingUnlockDecision { return self.startupAuthorizationPending && self.unlockDecision < 0; }
+- (void)resolveUnlockDecision:(BOOL)allowed {
+    dispatch_async(_queue,^{
+        if (self.closed || !self.startupAuthorizationPending || self.unlockDecision >= 0) return;
+        self.unlockDecision=allowed ? 1 : 0;
+        [self drain];
+    });
+}
 - (void)drain {
     if (self.closed || !self.ready || _writePending || _readPending) return;
+    if (self.startupAuthorizationPending && self.unlockDecision < 0) return;
     if (self.commandFrame.length) {
         if (!_peripheral.canSendWriteWithoutResponse) return;
         NSUInteger maximum=[_peripheral maximumWriteValueLengthForType:CBCharacteristicWriteWithoutResponse];
@@ -636,7 +663,13 @@ static NSUInteger DMInputPacketLimit(NSUInteger reliable, NSUInteger singlePacke
         [_peripheral maximumWriteValueLengthForType:CBCharacteristicWriteWithResponse],
         [_peripheral maximumWriteValueLengthForType:CBCharacteristicWriteWithoutResponse]);
     NSData *plain;
-    if (self.pendingReturnAcknowledgement) {
+    if (self.startupAuthorizationPending) {
+        // One decision sealed under this capture's fresh nonce and sequence.
+        // Missing authorization fails closed, including standalone helper use.
+        uint8_t authorization[6]={0x71,0,0,0,1,self.unlockDecision==1 ? 1 : 0};
+        plain=[NSData dataWithBytes:authorization length:sizeof(authorization)];
+        self.startupAuthorizationPending=NO;
+    } else if (self.pendingReturnAcknowledgement) {
         uint8_t acknowledgement[13]={3,0,0,0,8};
         uint64_t sequence=CFSwapInt64HostToBig(self.pendingReturnAcknowledgement.unsignedLongLongValue);
         memcpy(acknowledgement+5,&sequence,8);

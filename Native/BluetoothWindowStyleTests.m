@@ -80,6 +80,21 @@ int main(void) {
                 controller.sessionActive = YES;
             }
         }
+        // Phone audio on this Mac: volume keys stay with macOS, then forwarding resumes.
+        {
+            NSEvent *up = [NSEvent otherEventWithType:NSEventTypeSystemDefined
+                location:NSZeroPoint modifierFlags:0 timestamp:0 windowNumber:0
+                context:nil subtype:8 data1:(0u << 16) | 0x0a00 data2:0];
+            SDL_Event sent;
+            controller.audioRequested = YES;
+            assert([controller handleVolumeEvent:up focused:YES] == up);
+            assert(!SDL_PollEvent(&sent));
+            controller.audioRequested = NO;
+            assert([controller handleVolumeEvent:up focused:YES] == nil);
+            assert(SDL_PollEvent(&sent) && sent.key.key == SDLK_UP);
+            assert(SDL_PollEvent(&sent) && sent.type == SDL_EVENT_KEY_UP);
+            assert(!SDL_PollEvent(&sent));
+        }
         DMTrackpadEventTimestamp=111000000;
         [controller beginTrackpadTouchAt:NSMakePoint(215,430)];
         SDL_Event sourceEvent;
@@ -149,7 +164,7 @@ int main(void) {
             if (axis==0) scroll.inputDeltaX=direction*10; else scroll.inputDeltaY=-10;
             scroll.inputTimestamp=now-.075;
             [controller handleScrollEvent:scroll];
-            assert(controller.wheelScheduled); // Keep the 30 Hz coalescing limit.
+            assert(controller.wheelScheduled); // Keep the 60 Hz direct-trackpad coalescing limit.
             assert(SDL_PeepEvents(&sourceEvent,1,SDL_GETEVENT,SDL_EVENT_FIRST,SDL_EVENT_LAST)==0);
             scroll.inputPhase=NSEventPhaseEnded; scroll.inputDeltaX=scroll.inputDeltaY=0;
             scroll.inputTimestamp=now-.065;
@@ -170,6 +185,23 @@ int main(void) {
             [controller handleScrollEvent:scroll];
             assert(SDL_PeepEvents(&sourceEvent,1,SDL_GETEVENT,SDL_EVENT_FIRST,SDL_EVENT_LAST)==0);
         }
+        // Direct trackpad drags flush at 60 Hz so a mostly horizontal swipe
+        // cannot cross the vertical touch slop in one coarse move; wheel
+        // playback keeps its 30 Hz pacing.
+        controller.directTrackpad=YES;
+        [controller beginTrackpadTouchAt:NSMakePoint(215,430)];
+        assert(SDL_PeepEvents(&sourceEvent,1,SDL_GETEVENT,SDL_EVENT_FIRST,SDL_EVENT_LAST)==1 && sourceEvent.type==SDL_EVENT_MOUSE_BUTTON_DOWN);
+        controller.lastWheelCommand=NSProcessInfo.processInfo.systemUptime-.020;
+        [controller queueWheelX:1 y:0 at:NSMakePoint(215,430) trackpad:YES];
+        assert(!controller.wheelScheduled);
+        assert(SDL_PeepEvents(&sourceEvent,1,SDL_GETEVENT,SDL_EVENT_FIRST,SDL_EVENT_LAST)==1 && sourceEvent.type==SDL_EVENT_MOUSE_MOTION);
+        [controller endTrackpadTouch];
+        assert(SDL_PeepEvents(&sourceEvent,1,SDL_GETEVENT,SDL_EVENT_FIRST,SDL_EVENT_LAST)==1 && sourceEvent.type==SDL_EVENT_MOUSE_BUTTON_UP);
+        controller.lastWheelCommand=NSProcessInfo.processInfo.systemUptime-.020;
+        [controller queueWheelX:0 y:1 at:NSMakePoint(215,430) trackpad:NO];
+        assert(controller.wheelScheduled);
+        controller.pendingWheelX=controller.pendingWheelY=0;
+        controller.wheelScheduled=NO; ++controller.wheelGeneration;
         controller.directTrackpad=NO;
         controller.bluetoothStream=YES;
         controller.pendingScrollPosition=NSMakePoint(215,430);
@@ -186,6 +218,6 @@ int main(void) {
         controller.sdlWindow = NULL;
         SDL_DestroyWindow(window);
         SDL_Quit();
-        puts("PASS: Bluetooth controls, phase-less momentum and source-timed page/Home flicks with immediate release (30 Hz coalescing)");
+        puts("PASS: Bluetooth controls, phase-less momentum and source-timed page/Home flicks with immediate release (60 Hz trackpad, 30 Hz wheel coalescing)");
     }
 }

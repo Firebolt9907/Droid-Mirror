@@ -30,6 +30,9 @@ final class AppleMusicSync: AppleMusicAccess {
     private let queueAccess: MusicQueueAccess
     private var playbackQueue: MusicPlaybackQueue?
     private var nativePlayback = false
+    // Used only on the serial worker queue.
+    private var encodedNativeArtwork: (raw: String, cover: String?)?
+    private var lastCover: (track: String, cover: String)?
     init(queueAccess: MusicQueueAccess = LocalMusicQueueAccess()) { self.queueAccess = queueAccess }
     private(set) var snapshot: MediaSnapshot?
     private(set) var status = "Waiting for Apple Music"
@@ -54,22 +57,33 @@ final class AppleMusicSync: AppleMusicAccess {
                let playbackQueue = MusicPlaybackQueue(raw, snapshot: value) {
                 value["queueRevision"] = playbackQueue.revision
                 value["_queue"] = playbackQueue.event
-                if let artwork = raw["artwork"] as? String, let data = Data(base64Encoded: artwork),
-                   let cover = MediaArtwork.encode(data) { value["artwork"] = cover }
+                if let artwork = raw["artwork"] as? String {
+                    // Decoding and re-encoding the same cover is the costliest part of a poll.
+                    if self.encodedNativeArtwork?.raw != artwork {
+                        self.encodedNativeArtwork = (artwork, Data(base64Encoded: artwork).flatMap { MediaArtwork.encode($0) })
+                    }
+                    value["artwork"] = self.encodedNativeArtwork?.cover
+                }
                 if value["artwork"] == nil, let cover = self.catalogArtwork.cover(for: raw["artworkCatalogID"]) {
                     value["artwork"] = cover
                 }
+                // A source briefly omitting the cover must not change the advertised
+                // digest, because that makes the phone restart its download.
+                let track = value["id"] as? String ?? ""
+                if let cover = value["artwork"] as? String { self.lastCover = (track, cover) }
+                else if self.lastCover?.track == track { value["artwork"] = self.lastCover?.cover }
                 self.publish(value, queue: playbackQueue, native: true, epoch: epoch, status: "Apple Music connected (native)", completion: completion)
                 return
             }
             let source = "with timeout of 2 seconds\n" + Self.snapshotScript + "\nend timeout"
             var error: NSDictionary?
             let result = NSAppleScript(source: source)?.executeAndReturnError(&error)
+            let positionSampleUptime = ProcessInfo.processInfo.systemUptime
             let denied = (error?[NSAppleScript.errorNumber] as? Int) == -1743
             var value: [String: Any] = ["active": false]
             if error == nil, let result, result.numberOfItems == 10,
                let id = result.atIndex(1)?.stringValue, !id.isEmpty {
-                value = ["active": true, "id": id,
+                value = ["active": true, "id": id, "_positionSampleUptime": positionSampleUptime,
                     "title": String((result.atIndex(2)?.stringValue ?? "").prefix(240)),
                     "artist": String((result.atIndex(3)?.stringValue ?? "").prefix(240)),
                     "album": String((result.atIndex(4)?.stringValue ?? "").prefix(240)),
@@ -104,8 +118,9 @@ final class AppleMusicSync: AppleMusicAccess {
             self.busy = false
             guard epoch == self.epoch else { return }
             self.playbackQueue = queue; self.nativePlayback = native
-            self.snapshot = MediaSnapshot(value); self.status = status
-            completion(value)
+            let current = MediaPositionTiming.advance(value, now: ProcessInfo.processInfo.systemUptime)
+            self.snapshot = MediaSnapshot(current); self.status = status
+            completion(current)
         }
     }
 

@@ -50,13 +50,13 @@ cp "$ROOT/PeerTransport/target/release/libdroidmirror_peer.dylib" "$APP/Contents
   -framework Foundation "$ROOT/Native/MusicQueueHelper.m" \
   -o "$APP/Contents/Helpers/libDroidMirrorMusicQueue.dylib"
 # The host and background receiver share the same pairing implementation.
-BLE_SOURCES=(Sources/DroidMirror/NotificationAppPreferences.swift Native/BrowserURL.swift Native/LinkSharing.swift Native/MediaSyncState.swift Native/AppleMusicQueue.swift Native/MusicCatalogArtwork.swift Native/AppleMusicSync.swift Native/MediaPlaybackSync.swift Native/WearCompanionState.swift Native/WearCompanion.swift Native/PhoneHotspot.swift Native/TaskContinuation.swift Native/PhoneAppLibrary.swift Native/LibraryIrohChannel.swift Native/ShortcutReveal.swift Native/ClipboardSync.swift Native/NotificationRuntime.swift Native/NotificationPresentationPolicy.swift Native/NotificationDismissal.swift Native/NotificationActions.swift Native/NotificationConversationState.swift
+BLE_SOURCES=(Native/CameraVideoPacket.swift Native/CameraFrameAssembler.swift Native/CameraIPC.swift Native/CameraIrohChannel.swift Native/ContinuityCamera.swift Sources/DroidMirror/NotificationAppPreferences.swift Native/BrowserURL.swift Native/LinkSharing.swift Native/MediaSyncState.swift Native/AppleMusicQueue.swift Native/MusicCatalogArtwork.swift Native/AppleMusicSync.swift Native/PhoneVolumeKeys.swift Native/MediaPlaybackSync.swift Native/WearCompanionState.swift Native/WearCompanion.swift Native/FocusSyncPolicy.swift Native/FocusSync.swift Native/PhoneHotspot.swift Native/TaskContinuation.swift Native/PhoneAppLibrary.swift Native/LibraryIrohChannel.swift Native/ShortcutReveal.swift Native/ClipboardFilePolicy.swift Native/ClipboardSync.swift Native/ApkInstall.swift Native/ClipboardBulkChannel.swift Native/ClipboardIrohChannel.swift Native/ClipboardTransferRace.swift Native/BLEBulkTest.swift Native/NotificationRuntime.swift Native/NotificationPresentationPolicy.swift Native/NotificationDismissal.swift Native/NotificationActions.swift Native/NotificationConversationState.swift
   Native/NotificationIconAttachment.swift Native/NotificationCommunicationContent.swift Native/BLESession.swift Native/BLEController.swift Native/BLEIntegration.swift
   Native/BLEMenu.swift Native/TrackpadHaptics.swift Native/DiscoveryNotifications.swift Native/ActivityClock.swift Native/BLESecurity.swift
   Native/PresenceBeaconAdvertiser.swift Native/ActivityImages.swift Native/AndroidActivityRenderer.swift Native/AndroidActivityMenu.swift Native/AndroidNotificationBridge.swift)
 xcrun swiftc "${SWIFT_FLAGS[@]}" -module-cache-path /private/tmp/droidmirror-swift-module-cache \
   -emit-library -module-name DroidMirrorBLE -target arm64-apple-macosx14.0 \
-  -framework AppKit -framework IOBluetooth -framework CoreBluetooth -framework UserNotifications -framework Security \
+  -framework AppKit -framework IOBluetooth -framework CoreBluetooth -framework UserNotifications -framework Security -framework LocalAuthentication \
   "${BLE_SOURCES[@]}" -o "$APP/Contents/Frameworks/libDroidMirrorBLE.dylib"
 BIN_DIR="$(swift build -c "$CONFIGURATION" --disable-sandbox --scratch-path /tmp/droidmirror-app-build --show-bin-path)"
 cp "$BIN_DIR/DroidMirror" "$APP/Contents/MacOS/DroidMirrorHost"
@@ -70,7 +70,7 @@ mkdir -p "$RECEIVER/MacOS" "$RECEIVER/Resources"
 cp "$ROOT/Resources/NotificationsInfo.plist" "$RECEIVER/Info.plist"
 xcrun swiftc "${SWIFT_FLAGS[@]}" -module-cache-path /private/tmp/droidmirror-swift-module-cache \
   -target arm64-apple-macosx14.0 -framework AppKit -framework IOBluetooth -framework CoreBluetooth \
-  -framework UserNotifications -framework Security "${BLE_SOURCES[@]}" \
+  -framework UserNotifications -framework Security -framework LocalAuthentication "${BLE_SOURCES[@]}" \
   Native/NotificationReceiver.swift -o "$RECEIVER/MacOS/DroidMirrorNotifications"
 /usr/bin/clang "${C_FLAGS[@]}" -fobjc-arc -fblocks -mmacosx-version-min=14.0 -framework AppKit \
   Native/PhoneAppLauncher.m -o "$APP/Contents/Helpers/PhoneAppLauncher"
@@ -82,6 +82,13 @@ xcrun swiftc "${SWIFT_FLAGS[@]}" -module-cache-path /private/tmp/droidmirror-swi
   -parse-as-library -Xlinker -e -Xlinker _NSExtensionMain -module-name DroidMirrorShare -target arm64-apple-macosx14.0 \
   -framework AppKit -framework UniformTypeIdentifiers Native/BrowserURL.swift \
   Native/ShareExtension/ShareViewController.swift -o "$SHARE/MacOS/DroidMirrorShare"
+# Compile only here; activation is an explicit Settings action after installation.
+CAMERA="$APP/Contents/Library/SystemExtensions/app.droidmirror.camera.systemextension/Contents"
+mkdir -p "$CAMERA/MacOS"
+cp "$ROOT/Resources/CameraExtensionInfo.plist" "$CAMERA/Info.plist"
+xcrun swiftc "${SWIFT_FLAGS[@]}" -module-cache-path /private/tmp/droidmirror-swift-module-cache \
+  -target arm64-apple-macosx14.0 -framework CoreMediaIO -framework CoreMedia -framework CoreVideo -framework Security \
+  Native/CameraIPC.swift Native/CameraExtension/main.swift -o "$CAMERA/MacOS/DroidMirrorCamera"
 cp "$ROOT/Resources/Info.plist" "$APP/Contents/Info.plist"
 # Share the existing DroidMirror artwork across the host, viewer and receiver.
 ICONSET="$BUILD_STAGE/DroidMirror.iconset"

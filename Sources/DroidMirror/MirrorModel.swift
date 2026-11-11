@@ -239,6 +239,12 @@ final class MirrorModel: ObservableObject {
             do {
                 let paired = try await ClassicBluetoothTransport.pairedDevices()
                 guard preferences.transport == .bluetoothClassic else { return }
+                // Re-arm auto-start once the remembered phone is seen missing, so it
+                // starts again when it returns (one attempt per reappearance).
+                if let remembered = preferences.bluetoothDeviceID,
+                   !paired.contains(where: { $0.id == remembered }) {
+                    autoStartAttemptedFor = nil
+                }
                 devices = paired
                 restoringBluetoothSelection = true
                 if selectedID == nil || !paired.contains(where: { $0.id == selectedID }) {
@@ -261,6 +267,29 @@ final class MirrorModel: ObservableObject {
                 if !silently && !Task.isCancelled { errorMessage = error.localizedDescription }
             }
         }
+    }
+
+    private let unlockAuthentication = PhoneUnlockAuthentication()
+    /// Read once per start; Touch ID itself waits until the phone connection is confirmed.
+    private var unlockRequiresTouchID = true
+
+    /// Prompts only after the transport has reached the phone. Success authorizes
+    /// just this capture startup; reconnects prompt again.
+    private func authorizeUnlockAfterConnection() async -> Bool {
+        status = "Phone connected · confirm with Touch ID to unlock"
+        let renderer = MirrorRenderer.shared.processIdentifier
+        let mirrorWasFrontmost = renderer != 0
+            && NSWorkspace.shared.frontmostApplication?.processIdentifier == renderer
+        let allowed = await unlockAuthentication.authorize()
+        // Hand focus back so keyboard input reaches the mirror, unless the user
+        // switched to another app while the prompt was up.
+        if mirrorWasFrontmost, NSApp.isActive,
+           let app = NSRunningApplication(processIdentifier: renderer) {
+            NSApp.yieldActivation(to: app)
+            app.activate()
+        }
+        if !allowed { status = "Touch ID skipped · unlock manually on the phone lock screen" }
+        return allowed
     }
 
     func start() {
@@ -289,6 +318,7 @@ final class MirrorModel: ObservableObject {
                 }
             }
             guard !Task.isCancelled else { return }
+            unlockRequiresTouchID = UserDefaults.standard.bool(forKey: PhoneUnlockAuthentication.preferenceKey)
             if preferences.transport == .bluetoothClassic {
                 await startBluetooth()
             } else {
@@ -342,12 +372,22 @@ final class MirrorModel: ObservableObject {
             case .sessionEnded:
                 self.sessionEndedOnPhone = true
                 self.status = "Remote session ended"
+            case .unlockDecisionNeeded:
+                // The phone accepted the session and BLE authenticated; capture
+                // waits for this answer (the helper falls back to manual unlock).
+                let session = self.classicBluetooth.session
+                Task { @MainActor in
+                    let allowed = await self.authorizeUnlockAfterConnection()
+                    guard !self.connectionCancelled else { return }
+                    self.classicBluetooth.sendUnlockDecision(allowed, session: session)
+                }
             }
         }
         do {
             let ports = try await classicBluetooth.connect(address: device.id, wirelessMaxSize: wifiMaxSize,
                                                            wirelessFPS: wifiFPS, wirelessBitRate: wifiBitRate * 1_000_000,
-                                                           audioBufferMs: preferences.wirelessVideoBufferMs)
+                                                           audioBufferMs: preferences.wirelessVideoBufferMs,
+                                                           unlockPolicy: unlockRequiresTouchID ? .afterConnection : .allowed)
             guard !Task.isCancelled, preferences.transport == .bluetoothClassic, !isTerminatingApplication else {
                 classicBluetooth.stop()
                 return
@@ -404,6 +444,12 @@ final class MirrorModel: ObservableObject {
     }
 
     private func startAfterADBCheck() async {
+        if selectedDevice?.isBluetooth == true {
+            // Selection left over from Automatic mode; ADB cannot use a Bluetooth address.
+            errorMessage = "Select a USB or wireless ADB device, then try again."
+            refreshDevices()
+            return
+        }
         guard mirrorProcess == nil, let device = selectedDevice, device.isOnline else {
             if selectedDevice?.isOnline == false { errorMessage = "Authorize USB debugging on the Android device, then refresh." }
             return
@@ -431,6 +477,9 @@ final class MirrorModel: ObservableObject {
         environment["ADB"] = adbPath
         environment["DROIDMIRROR_SERIAL"] = device.id
         environment["DROIDMIRROR_TRANSPORT"] = "adb"
+        // The start gate carries the Touch ID answer; an older client ignores it
+        // and keeps this fail-closed default.
+        environment["DROIDMIRROR_ALLOW_UNLOCK"] = unlockRequiresTouchID ? "0" : "1"
         environment["DROIDMIRROR_CONNECTION_LABEL"] = device.isWireless ? "Wi-Fi" : "USB"
         let gate = FileManager.default.temporaryDirectory.appendingPathComponent("DroidMirror-start-\(UUID().uuidString)")
         environment["DROIDMIRROR_START_GATE"] = gate.path
@@ -520,7 +569,16 @@ final class MirrorModel: ObservableObject {
             let shouldForwardAudio = preferences.forwardAudio &&
                 !androidAudioWasAlreadyPlaying && !macAudioWasAlreadyPlaying
             guard process.isRunning, !Task.isCancelled else { return }
-            try Data((shouldForwardAudio ? "1" : "0").utf8).write(to: gate, options: .atomic)
+            var allowUnlock = !unlockRequiresTouchID
+            if unlockRequiresTouchID {
+                // adb reached the phone and its availability checks passed.
+                allowUnlock = await authorizeUnlockAfterConnection()
+                guard process.isRunning, !Task.isCancelled, !isTerminatingApplication else {
+                    await restoreDeviceStateAndLock()
+                    return
+                }
+            }
+            try Data(((shouldForwardAudio ? "1" : "0") + (allowUnlock ? "1" : "0")).utf8).write(to: gate, options: .atomic)
             approved = true
             isMirroring = true
             status = "Mirroring \(device.displayName)"
@@ -551,6 +609,7 @@ final class MirrorModel: ObservableObject {
 
     func stop() {
         connectionCancelled = true
+        unlockAuthentication.cancel()
         startTask?.cancel()
         classicBluetooth.stop()
         stopLockMonitoring()
@@ -563,6 +622,7 @@ final class MirrorModel: ObservableObject {
     func shutdownForApplicationTermination() async {
         guard !isTerminatingApplication else { return }
         isTerminatingApplication = true
+        unlockAuthentication.cancel()
         startTask?.cancel()
         classicBluetooth.stop()
         refreshTimer?.invalidate()

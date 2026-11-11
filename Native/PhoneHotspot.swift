@@ -100,6 +100,12 @@ final class PhoneHotspot: NSObject {
         refresh()
     }
 
+    deinit {
+        monitor.cancel()
+        timer?.invalidate()
+        if let item { NSStatusBar.system.removeStatusItem(item) }
+    }
+
     func networkChanged(offline: Bool) {
         self.offline = offline
         policy.observe(offline: offline, now: now)
@@ -190,9 +196,11 @@ final class PhoneHotspot: NSObject {
         item?.isVisible = !wifiConnected || (hotspotSSID != nil && ssid == hotspotSSID)
         let button = item?.button
         button?.isEnabled = ready && pending == nil
-        item?.length = isOn ? 48 : NSStatusItem.squareLength
-        button?.image = isOn ? Self.activeImage : Self.inactiveImage
-        button?.setAccessibilityValue(isOn ? "On" : "Off")
+        let confirmedOn = isOn && ready
+        item?.length = confirmedOn ? 48 : NSStatusItem.squareLength
+        button?.image = confirmedOn ? Self.activeImage : Self.inactiveImage
+        button?.setAccessibilityValue(!ready ? "Unknown — phone disconnected or unavailable" :
+            pending.map { $0.enabled ? "Turning on" : "Turning off" } ?? (isOn ? "On" : "Off"))
         if let pending {
             button?.toolTip = pending.enabled ? "Turning on phone hotspot…" : "Turning off phone hotspot…"
         } else {

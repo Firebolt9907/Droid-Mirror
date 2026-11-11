@@ -1,10 +1,12 @@
 import Combine
 import CoreBluetooth
+import CoreGraphics
 import Foundation
 import Darwin
 
 final class BLEController: NSObject, ObservableObject {
     private static let serviceID = CBUUID(string: "7E57B000-9A6B-4C5D-8E7F-102030405060")
+    private static let bulkTestID = CBUUID(string: "7E57B002-9A6B-4C5D-8E7F-102030405060")
     private static let endpointID = CBUUID(string: "7E57B001-9A6B-4C5D-8E7F-102030405060")
     private static let inputServiceID = CBUUID(string: "C356A44E-6F2B-4DA9-85E5-397991B8A610")
     var onEvent: (([String: Any]) -> Void)?
@@ -16,6 +18,7 @@ final class BLEController: NSObject, ObservableObject {
     private var clockSync = ActivityClockSync()
     private var activityTransitMilliseconds: Int?
     private var heartbeatPending = false
+    private var clipboardControlQueueMs = 0
     private var writeStartedAt: TimeInterval?
     // ADB is an explicit legacy action, independent of the idle BLE session.
     static let automaticADBKey = "DroidMirror.BLE.automaticADB"
@@ -25,7 +28,7 @@ final class BLEController: NSObject, ObservableObject {
     private var assembledMessages = 0
     private var staleFrames = 0
     private var acknowledgedWrites = 0
-    var diagnostics: String { "rx=\(receivedFrames) assembled=\(assembledMessages) stale=\(staleFrames) written=\(acknowledgedWrites) queued=\(writes.count) messages=\(outbound.count) requests=\(requests.count) clockRTT=\(clockSync.roundTripMilliseconds.map(String.init) ?? "unknown")ms activityTransit=\(activityTransitMilliseconds.map(String.init) ?? "unknown")ms" }
+    var diagnostics: String { "rx=\(receivedFrames) assembled=\(assembledMessages) stale=\(staleFrames) written=\(acknowledgedWrites) queued=\(writes.count) messages=\(outbound.count) requests=\(requests.count) clockRTT=\(clockSync.roundTripMilliseconds.map(String.init) ?? "unknown")ms activityTransit=\(activityTransitMilliseconds.map(String.init) ?? "unknown")ms clipboardControlQueueMs=\(clipboardControlQueueMs) clipboardIroh=[\(clipboardIroh?.diagnostics ?? "closed") retries=\(clipboardIrohRetries) failure=\(clipboardIrohFailure)] clipboardBulk=[\(clipboardBulk?.diagnostics ?? "closed")] bulkTest=[\(bulkTest?.diagnostics ?? "idle")]" }
     private var session: BLESecureSession?
     private var activityDeltas = ActivityDeltaReceiver()
     private var lastActivityResync: TimeInterval = -.infinity
@@ -36,6 +39,187 @@ final class BLEController: NSObject, ObservableObject {
     private var rejectedPeers = [UUID: Date]()
     private(set) var supportsClipboard = false
     private(set) var supportsClipboardFiles = false
+    private(set) var supportsApkInstall = false
+    private(set) var supportsClipboardDownloads = false
+    private(set) var supportsClipboardBulk = false
+    private var supportsClipboardProgress = false
+    var clipboardPreparingID: String?
+    func prepareClipboardFile(_ id: String, completion: @escaping () -> Void) {
+        clipboardPreparingID = id
+        guard supportsClipboardProgress else { completion(); return }
+        request(["type": "clipboardFilePrepare", "id": id], expecting: "clipboardFilePrepareReady", timeout: 3) { [weak self] _ in
+            guard self?.clipboardPreparingID == id else { return }; completion()
+        }
+        // Active preparation needs a real three-second deadline; the idle health
+        // monitor only expires ordinary requests on its ten-second cadence.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
+            guard let self else { return }; self.requests.expire(now: self.uptime)
+        }
+    }
+    func finishClipboardPreparation(_ id: String, cancelled: Bool) {
+        if clipboardPreparingID == id { clipboardPreparingID = nil }
+        if cancelled && supportsClipboardProgress { send(["type": "clipboardFilePrepareEnd", "id": id]) }
+    }
+    private var supportsClipboardIroh = false
+    private var clipboardIrohEpoch = UUID()
+    private var clipboardIroh: ClipboardIrohChannel?
+    private var clipboardRace: ClipboardTransferRace?
+    private var clipboardIrohAttempted = false
+    var clipboardCanRetry: ((String) -> Bool)?
+    private var clipboardIrohRetries = 0
+    private var clipboardIrohRetryGeneration = UUID()
+    private var clipboardIrohLastProgress: TimeInterval = 0
+    private var clipboardIrohFailure = "none"
+    private func retryClipboardIroh(_ reason: String) {
+        clipboardIrohFailure = reason
+        guard let id = clipboardRace?.activeID, clipboardCanRetry?(id) == true,
+              clipboardIrohRetries < 2 else { return }
+        clipboardIrohRetries += 1
+        let attempt = clipboardIrohRetries, generation = clipboardIrohRetryGeneration
+        NSLog("DroidMirror clipboard IP retry=%d id=%@ reason=%@", attempt, id, reason)
+        DispatchQueue.main.asyncAfter(deadline: .now() + (attempt == 1 ? 1 : 3)) { [weak self] in
+            guard let self, self.clipboardIrohRetryGeneration == generation,
+                  self.clipboardRace?.activeID == id, self.clipboardCanRetry?(id) == true else { return }
+            self.clipboardIroh?.close(); self.clipboardIroh = nil; self.clipboardIrohAttempted = false
+            self.clipboardRace?.restartLane(1)
+            if let channel = self.getClipboardIroh(retrying: true), channel.open() {
+                self.clipboardRace?.catchUp(1)
+            }
+        }
+    }
+    private func watchClipboardIroh(_ generation: UUID) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 8) { [weak self] in
+            guard let self, self.clipboardIrohRetryGeneration == generation,
+                  let id = self.clipboardRace?.activeID, self.clipboardCanRetry?(id) == true else { return }
+            if self.clipboardIroh?.connected == true && self.uptime - self.clipboardIrohLastProgress >= 8 {
+                self.clipboardIroh?.close(); self.clipboardIroh = nil
+                self.retryClipboardIroh("no IP file progress for 8 seconds")
+            }
+            self.watchClipboardIroh(generation)
+        }
+    }
+    private func race() -> ClipboardTransferRace {
+        if let clipboardRace { return clipboardRace }
+        let result = ClipboardTransferRace()
+        result.wire = { [weak self] lane, event in
+            guard let self else { return false }
+            if lane == 0 {
+                let channel = self.getClipboardBulk(); let ok = channel?.send(event) == true
+                if !ok { channel?.close(); self.clipboardBulk = nil }; return ok
+            }
+            return self.getClipboardIroh()?.send(event) == true
+        }
+        result.started = { [weak self] in
+            guard let self else { return }
+            self.clipboardIrohAttempted = self.clipboardIroh != nil
+            self.clipboardIrohRetries = 0; self.clipboardIrohRetryGeneration = UUID()
+            self.clipboardIrohLastProgress = self.uptime
+            self.watchClipboardIroh(self.clipboardIrohRetryGeneration)
+            _ = self.getClipboardIroh()
+        }
+        result.deliver = { [weak self] in self?.onEvent?($0) }
+        result.won = { [weak self] lane in
+            guard let self else { return }
+            NSLog("DroidMirror clipboard race winner=%@", lane == 1 ? "iroh" : "l2cap")
+            if lane == 1 { self.clipboardBulk?.close(); self.clipboardBulk = nil }
+            else { self.clipboardIroh?.close(); self.clipboardIroh = nil }
+        }
+        clipboardRace = result; return result
+    }
+    private func getClipboardIroh(retrying: Bool = false) -> ClipboardIrohChannel? {
+        guard supportsClipboardIroh, clipboardBulkEnabled, clipboardBulkReady, authenticated, let key = BLETrust.key() else { return nil }
+        if let clipboardIroh { return clipboardIroh }
+        guard !clipboardIrohAttempted else { return nil }; clipboardIrohAttempted = true
+        let epoch = UUID(); clipboardIrohEpoch = epoch
+        let result = ClipboardIrohChannel(key: key,
+            request: { [weak self] in self?.send(["type": "clipboardIrohOpen", "retry": retrying]) == true },
+            receive: { [weak self] event in
+                guard let self, self.clipboardIrohEpoch == epoch else { return }
+                self.clipboardIrohLastProgress = self.uptime
+                self.race().receive(event, lane: 1)
+            }, failure: { [weak self] in
+                guard let self, self.clipboardIrohEpoch == epoch else { return }
+                self.clipboardIroh?.close(); self.clipboardIroh = nil
+                if self.clipboardBulk == nil { self.onEvent?(["type": "clipboardBulkFailed"]) }
+                else { self.retryClipboardIroh("IP channel failed") }
+            })
+        clipboardIrohLastProgress = uptime
+        clipboardIroh = result; return result
+    }
+    private var clipboardBulk: ClipboardBulkChannel?
+    private var clipboardBulkEpoch = UUID()
+    private var clipboardOpens = [(peer: UUID, psm: UInt16, epoch: UUID, benchmark: String?)]()
+    private var bulkTestCharacteristic: CBCharacteristic?
+    private var supportsBulkTest = false
+    private var bulkTest: BLEBulkTest?
+    var bulkTestResult: (([String: Any]) -> Void)?
+    private var clipboardBulkEnabled = false
+    private var clipboardBulkReady = false
+    func setClipboardBulkReady(_ value: Bool) {
+        clipboardBulkReady = value
+        if !value { closeClipboardBulk() }
+    }
+    private func closeClipboardBulk() {
+        clipboardBulkEpoch = UUID(); clipboardBulk?.close(); clipboardBulk = nil
+        clipboardIrohRetryGeneration = UUID(); clipboardIrohEpoch = UUID(); clipboardIroh?.close(); clipboardIroh = nil; clipboardRace = nil; clipboardIrohAttempted = false
+    }
+    private func getClipboardBulk() -> ClipboardBulkChannel? {
+        guard clipboardBulkEnabled, clipboardBulkReady, authenticated, let key = BLETrust.key() else { return nil }
+        if let clipboardBulk { return clipboardBulk }
+        let epoch = UUID(); clipboardBulkEpoch = epoch
+        let bulk = ClipboardBulkChannel(key: key,
+            request: { [weak self] in self?.send(["type": "clipboardBulkOpen"]) == true },
+            connect: { [weak self] psm in
+                guard let self, let phone = self.phone, self.clipboardBulkEpoch == epoch else { return }
+                if self.clipboardOpens.count >= 32 { self.clipboardOpens.removeFirst() }
+                self.clipboardOpens.append((phone.identifier, psm, epoch, nil)); phone.openL2CAPChannel(psm)
+            },
+            receive: { [weak self] event in
+                guard let self, self.clipboardBulkEpoch == epoch, self.authenticated else { return }
+                if self.supportsClipboardIroh { self.race().receive(event, lane: 0) } else { self.onEvent?(event) }
+            }, failure: { [weak self] in
+                guard let self, self.clipboardBulkEpoch == epoch else { return }
+                self.clipboardBulk = nil
+                if self.clipboardIroh == nil { self.onEvent?(["type": "clipboardBulkFailed"]) }
+            })
+        clipboardBulk = bulk
+        return bulk
+    }
+    func startBulkTest(_ config: [String: Any]) {
+        guard bulkTest == nil, authenticated, supportsBulkTest, let key = BLETrust.key(),
+              config["transport"] as? String != "gatt" || bulkTestCharacteristic?.properties.contains(.writeWithoutResponse) == true else {
+            bulkTestResult?(["id": config["id"] ?? "", "success": false, "reason": "busy, disconnected or benchmark unsupported"]); return
+        }
+        do {
+            let test = try BLEBulkTest(config: config, key: key, control: { [weak self] in self?.send($0) == true },
+                connect: { [weak self] psm in
+                    guard let self, let phone = self.phone, let test = self.bulkTest else { return }
+                    self.clipboardOpens.append((phone.identifier, psm, UUID(), test.id)); phone.openL2CAPChannel(psm)
+                }, write: { [weak self] data in
+                    guard let self, self.authenticated, let phone = self.phone, let item = self.bulkTestCharacteristic,
+                          phone.canSendWriteWithoutResponse else { return false }
+                    phone.writeValue(data, for: item, type: .withoutResponse); return true
+                }, maximumWrite: { [weak self] in self?.phone?.maximumWriteValueLength(for: .withoutResponse) ?? 0 },
+                finished: { [weak self] result in self?.bulkTest = nil; self?.bulkTestResult?(result) })
+            bulkTest = test; test.start()
+        } catch { bulkTestResult?(["id": config["id"] ?? "", "success": false, "reason": "invalid benchmark configuration"]) }
+    }
+
+    @discardableResult func sendClipboardFile(_ event: [String: Any]) -> Bool {
+        guard let type = event["type"] as? String, ClipboardBulkCodec.files.contains(type) else { return false }
+        if !supportsClipboardBulk { return send(event) }
+        if supportsClipboardIroh {
+            if type == "clipboardFileBegin" { clipboardIrohAttempted = clipboardIroh != nil }
+            return race().send(event)
+        }
+        if type == "clipboardFileCancel", clipboardBulk == nil { return false }
+        guard let bulk = getClipboardBulk() else { return false }
+        if bulk.send(event) { return true }
+        if clipboardBulk === bulk {
+            closeClipboardBulk(); onEvent?(["type": "clipboardBulkFailed"])
+        }
+        return false
+    }
     private(set) var supportsWearCompanion = false
     private(set) var supportsChangePush = false
     private(set) var supportsActivityImages = false
@@ -43,6 +227,7 @@ final class BLEController: NSObject, ObservableObject {
     private(set) var supportsTaskURLs = false
     private(set) var supportsAppLibrary = false
     private(set) var supportsAppLibraryIroh = false
+    private(set) var supportsFocusSync = false
     private(set) var supportsHotspot = false
     private(set) var supportsLinkSharing = false
     var authenticated: Bool { session?.authenticated == true }
@@ -75,6 +260,11 @@ final class BLEController: NSObject, ObservableObject {
     private static let savedIPKey = "DroidMirror.BLE.host"
     private var presenceRadio: PresenceBeaconAdvertiser?
     private var stopped = false
+    private var power = BLESystemSleep()
+    private var backoff = BLEReconnectBackoff()
+    private var reconnectWork: DispatchWorkItem?
+    private var nextScanAt: TimeInterval = 0
+    private var authenticatedAt: TimeInterval?
 
     override init() {
         tailscaleIP = NotificationRuntime.preferences.string(forKey: Self.savedIPKey)
@@ -95,8 +285,92 @@ final class BLEController: NSObject, ObservableObject {
         endpointTimer?.cancel()
     }
 
+    /// Called before system sleep. macOS clears this app's Bluetooth session for
+    /// sleep but keeps the physical link, and the phone still believes it has an
+    /// authenticated session. Anything it then sends wakes the Mac ("AP wakeup by
+    /// LE Data"), so end the phone's subscription first: that revokes the session
+    /// on Android and stops its media, notification and catalog senders.
+    func systemWillSleep() {
+        guard power.willSleep(now: uptime) else { return }
+        reconnectWork?.cancel(); reconnectWork = nil
+        pendingADBConnect = false
+        if central.state == .poweredOn { central.stopScan() }
+        status = "Paused while the Mac sleeps"
+        guard let phone else { return }
+        let endpoint = endpointCharacteristic
+        resetSecurity("Mac sleeping")
+        if phone.state == .connected, let endpoint { releaseSubscription(phone, endpoint) }
+        else { finishRelease(phone) }
+    }
+
+    /// A full wake only; dark wakes stay quiet. Reconnecting authenticates once,
+    /// and the phone's snapshot then brings notifications and media up to date.
+    func systemDidWake() {
+        guard power.didWake() else { return }
+        backoff.reset(); authenticatedAt = nil; nextScanAt = 0
+        if let phone {
+            // Abandon a release that was still in progress.
+            central.cancelPeripheralConnection(phone)
+            clearConnection()
+        }
+        status = "Reconnecting after sleep…"
+        scheduleScan(minimum: 0.5)
+    }
+
+    /// The release may not reach the phone before Bluetooth sleeps. If the phone
+    /// then wakes the Mac, finish it from the dark wake so that wake is the last.
+    private func quiesceSurvivingLink() {
+        guard power.asleep, !power.quiesced, phone == nil, let key = BLETrust.key() else { return }
+        let remembered = BLEDiscovery.remembered(key: key)
+        let linked = central.retrieveConnectedPeripherals(withServices: [Self.serviceID])
+            + central.retrieveConnectedPeripherals(withServices: [Self.inputServiceID])
+        guard let peripheral = linked.first(where: { $0.identifier == remembered }) else {
+            power.markQuiesced()
+            return
+        }
+        connect(peripheral)
+    }
+
+    private func releaseSubscription(_ peripheral: CBPeripheral, _ item: CBCharacteristic) {
+        let action = notificationSubscription.beginRelease(alreadyNotifying: item.isNotifying)
+        peripheral.setNotifyValue(action == .enable, for: item)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self, weak peripheral] in
+            guard let self, let peripheral, self.power.asleep, self.phone === peripheral else { return }
+            self.finishRelease(peripheral)
+        }
+    }
+
+    private func finishRelease(_ peripheral: CBPeripheral) {
+        power.markQuiesced()
+        central.cancelPeripheralConnection(peripheral)
+        clearConnection()
+    }
+
+    private func clearConnection() {
+        serviceCandidates.reset()
+        phone = nil
+        endpointCharacteristic = nil
+        bulkTestCharacteristic = nil
+        bleAttemptStartedAt = nil
+        lastEndpointResponseAt = nil
+        pendingRequestID = nil
+        pendingRequestStartedAt = nil
+    }
+
+    private func scheduleScan(minimum: TimeInterval = 0) {
+        reconnectWork?.cancel()
+        // A session that held up for a while is not part of a failure streak.
+        if let authenticatedAt, uptime - authenticatedAt >= 30 { backoff.reset() }
+        authenticatedAt = nil
+        let delay = max(minimum, backoff.next())
+        nextScanAt = uptime + delay
+        let work = DispatchWorkItem { [weak self] in self?.scan() }
+        reconnectWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+    }
+
     func scan() {
-        guard !stopped else { return }
+        guard !stopped, !power.asleep else { return }
         guard let key = BLETrust.key() else { status = "Choose DroidMirror → Pair Bluetooth… to pair mirroring and notifications"; return }
         guard central.state == .poweredOn else {
             status = "Bluetooth is not ready"
@@ -154,7 +428,7 @@ final class BLEController: NSObject, ObservableObject {
     }
 
     func connectADB(force: Bool = false) {
-        guard !stopped else { return }
+        guard !stopped, !power.asleep else { return }
         wantsADB = true
         guard let port, !tailscaleIP.trimmingCharacters(in: .whitespaces).isEmpty else {
             adbStatus = port == nil ? "Waiting for Android endpoint…" : "Enter the fixed Tailscale IP"
@@ -247,14 +521,23 @@ final class BLEController: NSObject, ObservableObject {
 
     private func maintainBLESession() {
         guard !stopped else { return }
+        if power.asleep {
+            let anyInput = CGEventType(rawValue: ~0)!
+            let idle = CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: anyInput)
+            if power.missedWake(now: uptime, secondsSinceUserInput: idle) {
+                NSLog("DroidMirror BLE: user active without a wake notification; resuming")
+                systemDidWake()
+            }
+            return
+        }
         requests.expire(now: uptime)
         guard let phone else {
-            scan()
+            if uptime >= nextScanAt { scan() }
             return
         }
 
         if let started = writeStartedAt, uptime - started > 15 {
-            rebuildBLESession(phone)
+            rebuildBLESession(phone, reason: "control write stalled")
             return
         }
 
@@ -266,7 +549,7 @@ final class BLEController: NSObject, ObservableObject {
                 pendingRequestID = nil
                 pendingRequestStartedAt = nil
             } else {
-                rebuildBLESession(phone)
+                rebuildBLESession(phone, reason: "endpoint response deadline")
                 return
             }
         }
@@ -276,7 +559,7 @@ final class BLEController: NSObject, ObservableObject {
             // A connected input peripheral can expose stale/missing discovery
             // services. Give advertisements and other candidates a chance.
             if !authenticated { rejectedPeers[phone.identifier] = Date().addingTimeInterval(30) }
-            rebuildBLESession(phone)
+            rebuildBLESession(phone, reason: "authenticated traffic watchdog")
             return
         }
 
@@ -297,7 +580,8 @@ final class BLEController: NSObject, ObservableObject {
         }
     }
 
-    private func rebuildBLESession(_ peripheral: CBPeripheral) {
+    private func rebuildBLESession(_ peripheral: CBPeripheral, reason: String = "BLE connection recovery") {
+        bulkTest?.cancel(reason)
         // A reconnect otherwise selects the same stale cached service forever.
         // Each candidate gets a fresh handshake, queues and sequence counters.
         if !stopped, phone === peripheral, serviceCandidates.current != nil,
@@ -312,9 +596,7 @@ final class BLEController: NSObject, ObservableObject {
         pendingRequestStartedAt = nil
         resetSecurity()
         central.cancelPeripheralConnection(peripheral)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
-            self?.scan()
-        }
+        scheduleScan(minimum: 1)
     }
 
     @discardableResult
@@ -328,7 +610,7 @@ final class BLEController: NSObject, ObservableObject {
         guard let service = serviceCandidates.next() else { return false }
         bleAttemptStartedAt = Date()
         status = "Discovering notification characteristic…"
-        peripheral.discoverCharacteristics([Self.endpointID], for: service)
+        peripheral.discoverCharacteristics([Self.endpointID, Self.bulkTestID], for: service)
         return true
     }
 
@@ -339,7 +621,7 @@ final class BLEController: NSObject, ObservableObject {
     }
 
     private func pollADBState() {
-        guard !stopped, wantsADB, isADBConnected,
+        guard !stopped, !power.asleep, wantsADB, isADBConnected,
               !adbTaskRunning,
               let endpoint = connectedEndpoint,
               let adb = Self.findADB()
@@ -458,10 +740,12 @@ final class BLEController: NSObject, ObservableObject {
         send(["type": "state", "connected": connected])
     }
 
-    private func resetSecurity() {
+    private func resetSecurity(_ reason: String = "BLE session ended") {
         let hadSession = session != nil
         supportsChangePush = false; supportsWearCompanion = false; supportsLinkSharing = false; supportsMedia = false; supportsClipboard = false
-        supportsClipboardFiles = false; supportsTaskURLs = false; supportsAppLibrary = false; supportsAppLibraryIroh = false; supportsHotspot = false
+        bulkTest?.cancel(reason); bulkTest = nil; supportsBulkTest = false
+        closeClipboardBulk(); clipboardBulkReady = false; clipboardBulkEnabled = false; supportsClipboardBulk = false; supportsClipboardIroh = false; supportsClipboardProgress = false; clipboardPreparingID = nil
+        supportsApkInstall = false; supportsClipboardDownloads = false; supportsClipboardFiles = false; supportsTaskURLs = false; supportsAppLibrary = false; supportsAppLibraryIroh = false; supportsHotspot = false; supportsFocusSync = false
         supportsActivityImages = false
         supportsSessionHealth = false; heartbeatPending = false
         clockSync = ActivityClockSync(); activityTransitMilliseconds = nil
@@ -472,9 +756,19 @@ final class BLEController: NSObject, ObservableObject {
         if hadSession { onDisconnected?() }
     }
 
+    /// Camera demand/leases must never accumulate behind a long file transfer.
+    @discardableResult func sendCamera(_ object: [String: Any]) -> Bool {
+        guard ["cameraStart", "cameraStop", "cameraLease", "cameraFrameAck", "cameraKeyframe"].contains(object["type"] as? String ?? "") else { return false }
+        return enqueue(object, deadline: uptime + 1)
+    }
+
     /// True means accepted into the bounded queue, not performed on the phone.
     @discardableResult func send(_ object: [String: Any]) -> Bool {
-        enqueue(object, deadline: uptime + 60)
+        if object["type"] as? String == "clipboardSubscribe" {
+            closeClipboardBulk(); clipboardBulkReady = false
+            clipboardBulkEnabled = supportsClipboardBulk && object["enabled"] as? Bool == true && object["files"] as? Bool == true && object["bulk"] as? Int == 1
+        }
+        return enqueue(object, deadline: uptime + 60)
     }
     private func enqueue(_ object: [String: Any], deadline: TimeInterval) -> Bool {
         guard !stopped, authenticated, endpointCharacteristic != nil,
@@ -516,6 +810,9 @@ final class BLEController: NSObject, ObservableObject {
     }
     private func drain() {
         guard !writing, let phone, let endpointCharacteristic else { return }
+        // Control sends can observe fresh Core Bluetooth credits before its
+        // readiness callback. Give the bounded benchmark burst a turn here too.
+        bulkTest?.drain()
         // Stream authenticated messages while Core Bluetooth has buffer space.
         // Old companions and the authentication handshake retain ATT responses.
         let streaming = authenticated && endpointCharacteristic.properties.contains(.writeWithoutResponse)
@@ -529,7 +826,16 @@ final class BLEController: NSObject, ObservableObject {
                 if message.object["type"] as? String == "ping", let id = message.object["request"] as? String {
                     clockSync.begin(id, now: ActivityClock.now)
                 }
-                do { try queue(session.seal(message.object), startWriting: false) }
+                if (message.object["type"] as? String)?.hasPrefix("clipboard") == true {
+                    clipboardControlQueueMs = Int(max(0, uptime - message.enqueuedAt) * 1000)
+                }
+                var object = message.object
+                if object["type"] as? String == "mediaState" {
+                    let now = ProcessInfo.processInfo.systemUptime
+                    object = MediaPositionTiming.sending(object, now: now,
+                        phoneSampleMilliseconds: clockSync.phoneMilliseconds(localTime: ActivityClock.now))
+                }
+                do { try queue(session.seal(object), startWriting: false) }
                 catch { rebuildBLESession(phone); return }
             }
             if streaming {
@@ -563,14 +869,28 @@ final class BLEController: NSObject, ObservableObject {
             lastEndpointResponseAt = Date()
             let first = fragments.lastMessageStartedAt ?? ActivityClock.now
             plain.removeValue(forKey: "_activitySourceAt")
-            if plain["type"] as? String == "pong", clockSync.accept(plain, receivedAt: first) {
-                for refreshed in activityDeltas.reanchor(using: clockSync) { onEvent?(refreshed) }
+            if plain["type"] as? String == "pong" {
+                let sample = ActivityClock.now
+                let before = clockSync.phoneMilliseconds(localTime: sample)
+                if clockSync.accept(plain, receivedAt: first) {
+                    for refreshed in activityDeltas.reanchor(using: clockSync) { onEvent?(refreshed) }
+                    if let after = clockSync.phoneMilliseconds(localTime: sample),
+                       before == nil || abs(after - before!) > 250 {
+                        // A materially better calibration warrants one corrected timeline, not a heartbeat.
+                        onEvent?(["type": "mediaClockChanged"])
+                    }
+                }
             }
             if let stamp = plain["clockSentElapsedMs"] as? NSNumber,
                let source = clockSync.localTime(phoneMilliseconds: stamp.doubleValue) {
                 // An offset estimate can be ahead by its uncertainty; never anchor in the future.
                 plain["_activitySourceAt"] = min(first, source)
                 if plain["type"] as? String != "pong" { activityTransitMilliseconds = Int(max(0, first-source) * 1000) }
+            }
+            plain.removeValue(forKey: "_mediaPositionAge")
+            if plain["type"] as? String == "mediaState", let sample = plain["positionSampleElapsedMs"] as? Double,
+               let local = clockSync.localTime(phoneMilliseconds: sample) {
+                plain["_mediaPositionAge"] = min(60, max(0, ActivityClock.now - local))
             }
             guard let reconstructed = activityDeltas.receive(plain) else {
                 if activityDeltas.needsSnapshot && uptime - lastActivityResync >= 10 {
@@ -588,20 +908,44 @@ final class BLEController: NSObject, ObservableObject {
                 supportsSessionHealth = plain["sessionHealth"] as? Int == 1
                 supportsClipboard = plain["clipboard"] as? Int == 1
                 supportsClipboardFiles = plain["clipboardFiles"] as? Int == 1
+                supportsApkInstall = plain["apkInstall"] as? Int == 1
+                supportsClipboardDownloads = plain["clipboardDownloads"] as? Int == 1
+                supportsBulkTest = plain["bulkTest"] as? Int == 1
+                supportsClipboardBulk = plain["clipboardBulk"] as? Int == 1
+                supportsClipboardIroh = plain["clipboardIroh"] as? Int == 1
+                supportsClipboardProgress = plain["clipboardProgress"] as? Int == 1
                 supportsChangePush = plain["changePush"] as? Int == 1
                 supportsWearCompanion = plain["watchCompanion"] as? Int == 1
                 supportsMedia = plain["media"] as? Int == 1
                 supportsTaskURLs = plain["taskUrls"] as? Int == 1
                 supportsAppLibrary = plain["appLibrary"] as? Int == 1
                 supportsAppLibraryIroh = plain["appLibraryIroh"] as? Int == 1
+                supportsFocusSync = plain["focusSync"] as? Int == 1
                 supportsHotspot = (plain["hotspot"] as? Int ?? 0) >= 2
                 supportsLinkSharing = plain["linkSharing"] as? Int == 1
                 status = "Authenticated phone connected"
+                authenticatedAt = uptime
                 if wantsADB || !supportsSessionHealth { requestEndpoint() }
                 if supportsSessionHealth { request(["type": "ping"], expecting: "pong", timeout: 12) { _ in } }
                 send(["type": "subscribe", "activityDeltas": 1]); onAuthenticated?()
+            case "bulkTestOffer": bulkTest?.offer(plain)
+            case "bulkTestEvent":
+                if plain["id"] as? String == bulkTest?.id, let event = plain["event"] as? [String: Any] { bulkTest?.receive(event) }
+            case "bulkTestError":
+                if plain["id"] as? String == bulkTest?.id { bulkTest?.cancel(plain["reason"] as? String ?? "peer error") }
+            case "clipboardFileStop":
+                if let id = plain["id"] as? String, (clipboardRace?.activeID == id || clipboardPreparingID == id) {
+                    clipboardPreparingID = nil
+                    closeClipboardBulk()
+                    onEvent?(["type": "clipboardFileCancel", "id": id])
+                }
+            case "clipboardFilePrepareReady": break
+            case "clipboardIrohOffer": getClipboardIroh()?.offer(plain)
+            case "clipboardBulkOffer": getClipboardBulk()?.offer(plain)
+            case "clipboardFileBegin", "clipboardFileChunk", "clipboardFileAck", "clipboardFileCancel":
+                if !clipboardBulkEnabled { onEvent?(plain) }
             case "pong", "activityImageManifest", "activityImageChunk", "appCatalogResult", "appIconResult", "appLaunchResult", "appLibraryOfferResult": break
-            case "appCatalogChanged", "haptic", "watchTicketRequest", "watchPhoneBattery", "watchFindMac", "shareLink", "openLinkResult", "mediaState", "mediaCommand", "mediaArtworkRequest", "mediaArtworkChunk", "mediaStatus", "notification", "activitiesReset", "removed", "actionResult", "dismissResult", "minimizeMirror", "clipboard", "clipboardStatus", "clipboardResult", "clipboardFileBegin", "clipboardFileChunk", "clipboardFileAck", "clipboardFileCancel", "taskContinuation", "hotspotResult": onEvent?(plain)
+            case "clipboardApkInstallResult", "focusState", "appCatalogChanged", "haptic", "watchTicketRequest", "watchPhoneBattery", "watchFindMac", "shareLink", "openLinkResult", "mediaState", "mediaCommand", "mediaArtworkRequest", "mediaArtworkChunk", "mediaStatus", "notification", "activitiesReset", "removed", "actionResult", "dismissResult", "minimizeMirror", "clipboard", "clipboardStatus", "clipboardResult", "taskContinuation", "hotspotResult": onEvent?(plain)
             default: accept(try JSONSerialization.data(withJSONObject: plain))
             }
         } catch {
@@ -624,6 +968,10 @@ extension BLEController: CBCentralManagerDelegate {
         }
         switch central.state {
         case .poweredOn:
+            // macOS cycles this state around every sleep and dark wake. Treating
+            // each one as a fresh start is what turned a single wake into a
+            // self-sustaining reconnect loop.
+            if power.asleep { quiesceSurvivingLink(); return }
             status = "Bluetooth ready"
             scan()
         case .poweredOff: status = "Turn Bluetooth on"
@@ -639,7 +987,7 @@ extension BLEController: CBCentralManagerDelegate {
         advertisementData: [String: Any],
         rssi RSSI: NSNumber
     ) {
-        guard !stopped, phone == nil, let key = BLETrust.key() else { return }
+        guard !stopped, !power.asleep, phone == nil, let key = BLETrust.key() else { return }
         let advertised = (advertisementData[CBAdvertisementDataServiceUUIDsKey] as? [CBUUID] ?? [])
             .compactMap { UUID(uuidString: $0.uuidString) }
         guard BLEDiscovery.permits(peripheral.identifier, remembered: BLEDiscovery.remembered(key: key),
@@ -669,7 +1017,7 @@ extension BLEController: CBCentralManagerDelegate {
         lastEndpointResponseAt = nil
         pendingRequestID = nil
         pendingRequestStartedAt = nil
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in self?.scan() }
+        scheduleScan(minimum: 1)
     }
 
     func centralManager(
@@ -685,9 +1033,9 @@ extension BLEController: CBCentralManagerDelegate {
         lastEndpointResponseAt = nil
         pendingRequestID = nil
         pendingRequestStartedAt = nil
-        status = "Looking for Android over BLE…"
-        resetSecurity()
-        scan()
+        if !power.asleep { status = "Looking for Android over BLE…" }
+        resetSecurity("BLE disconnected: \(error?.localizedDescription ?? "peer disconnected")")
+        if power.asleep { power.markQuiesced() } else { scheduleScan() }
     }
 }
 
@@ -736,7 +1084,9 @@ extension BLEController: CBPeripheralDelegate {
             rebuildBLESession(peripheral)
             return
         }
+        bulkTestCharacteristic = service.characteristics?.first(where: { $0.uuid == Self.bulkTestID })
         endpointCharacteristic = item
+        if power.asleep { releaseSubscription(peripheral, item); return }
         status = "Enabling phone notification updates…"
         // A surviving physical link can retain Core Bluetooth's subscription
         // cache after Android replaces its GATT server. Clear it before enabling
@@ -748,7 +1098,7 @@ extension BLEController: CBPeripheralDelegate {
     func peripheralIsReady(toSendWriteWithoutResponse peripheral: CBPeripheral) {
         guard phone?.identifier == peripheral.identifier, !stopped else { return }
         writeStartedAt = nil
-        drain()
+        bulkTest?.drain(); drain()
     }
 
     func peripheral(_ peripheral: CBPeripheral, didWriteValueFor characteristic: CBCharacteristic, error: Error?) {
@@ -761,7 +1111,8 @@ extension BLEController: CBPeripheralDelegate {
         }
         acknowledgedWrites += 1
         if !authenticated { status = "Waiting for phone authentication response…" }
-        writing = false; writeStartedAt = nil; drain()
+        writing = false; writeStartedAt = nil
+        bulkTest?.drain(); drain()
     }
 
     func peripheral(
@@ -770,6 +1121,15 @@ extension BLEController: CBPeripheralDelegate {
         error: Error?
     ) {
         guard phone?.identifier == peripheral.identifier, characteristic === endpointCharacteristic, !stopped else { return }
+        if power.asleep {
+            if error != nil { finishRelease(peripheral); return }
+            switch notificationSubscription.updated(notifying: characteristic.isNotifying) {
+            case .disable: peripheral.setNotifyValue(false, for: characteristic)
+            case .release: finishRelease(peripheral)
+            default: break
+            }
+            return
+        }
         if let error { status = error.localizedDescription; rebuildBLESession(peripheral); return }
         let action = notificationSubscription.updated(notifying: characteristic.isNotifying)
         if action == .enable {
@@ -778,7 +1138,7 @@ extension BLEController: CBPeripheralDelegate {
         }
         guard action == .authenticate else { return }
         do {
-            resetSecurity()
+            resetSecurity("notification reauthentication")
             status = "Authenticating notification connection…"
             guard let key = BLETrust.key() else { throw BLECryptoError.invalid }
             session = try BLESecureSession(key: key, nonce: BLETrust.random())
@@ -789,10 +1149,31 @@ extension BLEController: CBPeripheralDelegate {
     func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
         receivedFrames += 1
         guard phone?.identifier == peripheral.identifier, characteristic === endpointCharacteristic, !stopped else { staleFrames += 1; return }
+        // The session is gone, so a frame in flight is not an authentication
+        // failure and must not get the phone rejected for the reconnect on wake.
+        guard !power.asleep else { staleFrames += 1; return }
         if let error {
             status = error.localizedDescription
             return
         }
         if let value = characteristic.value { receive(value) }
+    }
+}
+
+extension BLEController {
+    func peripheral(_ peripheral: CBPeripheral, didOpen channel: CBL2CAPChannel?, error: Error?) {
+        let index = clipboardOpens.firstIndex { request in
+            request.peer == peripheral.identifier && (channel == nil || request.psm == channel!.psm)
+        }
+        guard let index else { channel?.inputStream.close(); channel?.outputStream.close(); return }
+        let request = clipboardOpens.remove(at: index)
+        if let id = request.benchmark {
+            guard phone === peripheral, let test = bulkTest, test.id == id else { channel?.inputStream.close(); channel?.outputStream.close(); return }
+            test.attach(channel, error: error); return
+        }
+        guard phone === peripheral, request.epoch == clipboardBulkEpoch, let bulk = clipboardBulk else {
+            channel?.inputStream.close(); channel?.outputStream.close(); return
+        }
+        bulk.attach(channel, error: error)
     }
 }

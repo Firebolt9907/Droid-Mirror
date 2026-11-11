@@ -40,6 +40,11 @@ private final class NotificationAppsModel: NSObject, ObservableObject {
 
 struct NotificationAppsView: View {
     @StateObject private var model = NotificationAppsModel()
+    @State private var search = ""
+    private var packages: [String] {
+        model.packages.filter { search.isEmpty || $0.localizedCaseInsensitiveContains(search) ||
+            (model.apps[$0] ?? "").localizedCaseInsensitiveContains(search) }
+    }
 
     var body: some View {
         Section("Notifications") {
@@ -64,13 +69,18 @@ struct NotificationAppsView: View {
                 Text("No phone notifications received yet. Open the setup checklist above, then send a new message to your phone.")
                     .foregroundStyle(.secondary)
             }
-            ForEach(model.packages, id: \.self) { package in
+            if !model.apps.isEmpty {
+                TextField("Search notification apps", text: $search)
+                if packages.isEmpty { Text("No matching apps.").foregroundStyle(.secondary) }
+            }
+            ForEach(packages, id: \.self) { package in
                 Toggle(isOn: Binding(get: { !model.excluded.contains(package) },
                     set: { model.setAllowed($0, package: package) })) {
                     VStack(alignment: .leading) {
                         Text(model.apps[package] ?? package)
                         Text(package).font(.caption).foregroundStyle(.secondary)
                     }
+                    .fixedSize(horizontal: false, vertical: true)
                 }
             }
         }.onAppear { model.reload() }
@@ -111,6 +121,13 @@ private final class ActivityAppsModel: NSObject, ObservableObject {
 
 struct ActivityAppsView: View {
     @StateObject private var model = ActivityAppsModel()
+    @State private var search = ""
+    private var sources: [String] {
+        model.keys.filter { key in
+            search.isEmpty || key.localizedCaseInsensitiveContains(search) ||
+                (model.sources[key]?.values.contains { $0.localizedCaseInsensitiveContains(search) } ?? false)
+        }
+    }
     var body: some View {
         Section("Live activities") {
             Text("Choose which Android live activities and persistent notifications appear in the menu bar. Each Android notification has its own item. Turning a source off removes its items from this Mac; your phone and regular notification settings stay unchanged.")
@@ -119,7 +136,11 @@ struct ActivityAppsView: View {
                 Text("No live activities received yet. Start an activity on your phone while connected to this Mac.")
                     .foregroundStyle(.secondary)
             }
-            ForEach(model.keys, id: \.self) { source in
+            if !model.sources.isEmpty {
+                TextField("Search live activity sources", text: $search)
+                if sources.isEmpty { Text("No matching sources.").foregroundStyle(.secondary) }
+            }
+            ForEach(sources, id: \.self) { source in
                 let row = model.sources[source] ?? [:]
                 Toggle(isOn: Binding(get: { !model.excluded.contains(source) },
                     set: { model.setAllowed($0, source: source) })) {
@@ -128,6 +149,7 @@ struct ActivityAppsView: View {
                         Text((row["name"] ?? "").isEmpty ? (row["package"] ?? "") : (row["name"] ?? ""))
                             .font(.caption).foregroundStyle(.secondary)
                     }
+                    .fixedSize(horizontal: false, vertical: true)
                 }
             }
         }.onAppear { model.reload() }

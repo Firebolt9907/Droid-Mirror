@@ -34,6 +34,7 @@ final class TaskContinuation: NSObject {
     private var state = TaskContinuationState()
     private(set) var item: NSStatusItem?
     private var timer: Timer?
+    private var stopped = false
     private let openBrowser: (URL) -> Void
 
     init(openBrowser: @escaping (URL) -> Void = { _ = NSWorkspace.shared.open($0) }) {
@@ -43,12 +44,18 @@ final class TaskContinuation: NSObject {
         self.timer = timer
         RunLoop.main.add(timer, forMode: .common)
     }
+    deinit {
+        timer?.invalidate()
+        if let item { NSStatusBar.system.removeStatusItem(item) }
+    }
     func connected() {
+        guard !stopped else { return }
         clear()
         guard controller?.supportsTaskURLs == true else { return }
         controller?.send(["type": "taskSubscribe", "enabled": true, "changeOnly": true])
     }
     func receive(_ event: [String: Any]) {
+        guard !stopped else { return }
         state.receive(event, authenticated: controller?.authenticated == true)
         refresh()
     }
@@ -77,10 +84,11 @@ final class TaskContinuation: NSObject {
         item?.button?.image = image
         let app = state.package == "com.google.android.apps.docs.editors.docs" ? "Google Docs" : "phone"
         item?.button?.toolTip = "Continue from \(app) in your browser — \(url.host ?? "")"
+        item?.button?.setAccessibilityValue(url.host ?? "")
     }
     @objc private func openTask() {
         guard let url = state.currentURL(authenticated: controller?.authenticated == true) else { refresh(); return }
         openBrowser(url)
     }
-    func stop() { timer?.invalidate(); timer = nil; state.clear(); refresh() }
+    func stop() { stopped = true; timer?.invalidate(); timer = nil; state.clear(); refresh() }
 }

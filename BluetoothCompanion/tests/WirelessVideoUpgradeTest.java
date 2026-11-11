@@ -18,6 +18,18 @@ public final class WirelessVideoUpgradeTest {
         while ((length=input.readInt())==-2) check(input.readLong()>0);
         return length;
     }
+    /**
+     * After the commit byte, idle-refresh preview chunks already in flight may
+     * precede the -1 cutoff, exactly as the Mac client tolerates. Drain them.
+     */
+    static void awaitPreviewEnd(DataInputStream input) throws IOException {
+        for (int chunks=0;;chunks++) {
+            int length=previewLength(input);
+            if (length==-1) return;
+            check(length>=0 && length<=8192 && chunks<64);
+            check(input.readNBytes(length).length==length);
+        }
+    }
     static byte[] nonce(DataInputStream input) throws IOException {
         String magic=new String(input.readNBytes(8),java.nio.charset.StandardCharsets.US_ASCII);
         check(magic.equals("DMWIFI05") || magic.equals("DMWIFI06"));
@@ -41,7 +53,7 @@ public final class WirelessVideoUpgradeTest {
         }
         check(frames==3);
         output.writeByte(1); output.flush();
-        check(previewLength(input)==-1);
+        awaitPreviewEnd(input);
         byte[] response=input.readNBytes(48); check(response.length==48);
         check(java.nio.ByteBuffer.wrap(response).getLong()>=3);
         byte[] authenticated=java.nio.ByteBuffer.allocate(20).put(profile).put(response,0,8).array();
@@ -244,7 +256,7 @@ public final class WirelessVideoUpgradeTest {
                 check(!wire.isWireless() && classic.size()>=17);
             }
             output.writeByte(1); output.flush();
-            check(previewLength(input)==-1);
+            awaitPreviewEnd(input);
             byte[] response=input.readNBytes(48); check(response.length==48);
             check(java.nio.ByteBuffer.wrap(response).getLong()==4);
             output.writeByte(1); output.flush();

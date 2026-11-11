@@ -4,7 +4,7 @@ cd "$(dirname "$0")/.."
 work=$(mktemp -d /private/tmp/droidmirror-activities.XXXXXX)
 trap 'rm -rf "$work"' EXIT
 swiftc -module-cache-path /private/tmp/droidmirror-swift-module-cache \
-  Native/ActivityClock.swift Native/AndroidActivityRenderer.swift Native/AndroidActivityMenu.swift Native/AndroidActivityMenuTests.swift -o "$work/activities"
+  Native/ActivityClock.swift Native/AndroidActivityRenderer.swift Native/AndroidActivityMenu.swift Native/ActivitySportsContextTests.swift Native/AndroidActivityMenuTests.swift -o "$work/activities"
 result=$("$work/activities")
 printf '%s\n' "$result"
 if [[ "$result" != *"Android activity menu and timer synchronization tests passed"* ]]; then

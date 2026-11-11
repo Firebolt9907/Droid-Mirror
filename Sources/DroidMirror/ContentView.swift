@@ -29,6 +29,7 @@ struct ContentView: View {
                 }
                 .buttonStyle(.borderless)
                 .help("PIN keypad")
+                .accessibilityLabel("PIN keypad")
                 .popover(isPresented: $showPinPad, arrowEdge: .bottom) {
                     PinPadView(digitCount: $pinDigitCount) { digit in
                         model.enterPinDigit(digit)
@@ -56,12 +57,15 @@ struct ContentView: View {
             }
             .buttonStyle(.borderedProminent)
             .tint(model.isMirroring ? .red : .accentColor)
-            .disabled(model.isStarting || (!model.isMirroring && model.selectedDevice?.isOnline != true))
+            .disabled(model.isStarting || model.isPairingBluetooth || (!model.isMirroring && model.selectedDevice?.isOnline != true))
+            .help(mirrorActionHelp(model))
 
             Button { showSettings.toggle() } label: {
                 Image(systemName: "ellipsis").frame(width: 22, height: 22)
             }
             .buttonStyle(.borderless)
+            .help("Mirror options")
+            .accessibilityLabel("Mirror options")
             .popover(isPresented: $showSettings, arrowEdge: .bottom) { compactSettings }
         }
         .padding(.horizontal, 14)
@@ -107,7 +111,7 @@ struct ContentView: View {
                     Button {
                         model.selectedID = device.id
                     } label: {
-                        Label(device.displayName, systemImage: model.selectedID == device.id ? "checkmark" : (device.isWireless ? "wifi" : "cable.connector"))
+                        Label(device.displayName, systemImage: model.selectedID == device.id ? "checkmark" : (device.isBluetooth ? "antenna.radiowaves.left.and.right" : (device.isWireless ? "wifi" : "cable.connector")))
                     }
                 }
             }
@@ -132,7 +136,7 @@ struct ContentView: View {
 
     private func toolbarButton(_ icon: String, help: String, action: @escaping () -> Void) -> some View {
         Button(action: action) { Image(systemName: icon).frame(width: 20, height: 22) }
-            .buttonStyle(.borderless).help(help)
+            .buttonStyle(.borderless).help(help).accessibilityLabel(help)
     }
 
     private var compactSettings: some View {
@@ -140,9 +144,9 @@ struct ContentView: View {
             Text("Mirror options").font(.headline)
             Picker("Connection", selection: $model.preferences.transport) {
                 ForEach(MirrorTransport.allCases) { Text($0.label).tag($0) }
-            }.disabled(model.isMirroring || model.isStarting)
+            }.disabled(model.isMirroring || model.isStarting || model.isPairingBluetooth)
             if model.preferences.transport == .bluetoothClassic {
-                Text("Connects Bluetooth and direct LAN video in parallel. A ready LAN path can carry video from the start; otherwise video starts over Bluetooth and upgrades when a faster path is ready. Authorize Shizuku and enable Mac connections once on Android. Mouse, keyboard and navigation stay on BLE.")
+                Text("Automatically chooses USB, Wi-Fi or Bluetooth video. Pair your phone and authorize Shizuku in the Android companion once.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             if model.preferences.transport == .wifiAware {
@@ -150,26 +154,28 @@ struct ContentView: View {
                 Button("Check Wi-Fi Aware support") { model.checkWiFiAware() }
                     .disabled(model.isRefreshing)
             }
-            Group {
-            Toggle("Start mirroring automatically", isOn: $model.preferences.autoStart)
-            Toggle("Keep phone screen off", isOn: $model.preferences.turnDeviceScreenOff)
-            Toggle("Forward audio to Mac", isOn: $model.preferences.forwardAudio)
-            Toggle("Always on top", isOn: $model.preferences.alwaysOnTop)
-            Divider()
-            Picker("Scrolling", selection: $model.preferences.scrollMode) {
-                ForEach(ScrollMode.allCases) { mode in Text(mode.label).tag(mode) }
+            if model.preferences.transport != .wifiAware {
+                Toggle("Start mirroring automatically", isOn: $model.preferences.autoStart)
+                if model.preferences.transport == .adb {
+                    Toggle("Keep phone screen off", isOn: $model.preferences.turnDeviceScreenOff)
+                    Toggle("Forward audio to Mac", isOn: $model.preferences.forwardAudio)
+                }
+                Toggle("Keep mirror above other windows", isOn: $model.preferences.alwaysOnTop)
+                Divider()
+                Picker("Scrolling", selection: $model.preferences.scrollMode) {
+                    ForEach(ScrollMode.allCases) { mode in Text(mode.label).tag(mode) }
+                }
+                if model.preferences.scrollMode == .touchSwipe {
+                    Text("Touch-style scrolling supports pull-to-refresh and Android gestures.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                Picker("Resolution limit", selection: $model.preferences.maxSize) {
+                    Text("1280 px").tag(1280); Text("1920 px").tag(1920); Text("Native").tag(0)
+                }
+                Picker("Frame rate", selection: $model.preferences.maxFPS) {
+                    Text("30 fps").tag(30); Text("60 fps").tag(60); Text("90 fps").tag(90)
+                }
             }
-            if model.preferences.scrollMode == .touchSwipe {
-                Text("Converts two-finger and mouse-wheel movement into real Android touch gestures for overscroll, pull-to-refresh, and gesture-driven app features.")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
-            Picker("Quality", selection: $model.preferences.maxSize) {
-                Text("Efficient").tag(1280); Text("High").tag(1920); Text("Native").tag(0)
-            }
-            Picker("Frame rate", selection: $model.preferences.maxFPS) {
-                Text("30 fps").tag(30); Text("60 fps").tag(60); Text("90 fps").tag(90)
-            }
-            }.disabled(model.preferences.transport != .adb)
             Text("Changes apply the next time the mirror starts.")
                 .font(.caption).foregroundStyle(.secondary)
         }
@@ -256,4 +262,15 @@ private struct WindowStyler: NSViewRepresentable {
         window.collectionBehavior.insert(.fullScreenAuxiliary)
         window.invalidateShadow()
     }
+}
+
+@MainActor
+func mirrorActionHelp(_ model: MirrorModel) -> String {
+    if model.isMirroring { return "Stop mirroring" }
+    if model.isPairingBluetooth { return "Finish pairing before starting the mirror" }
+    if model.isStarting { return "Connecting to your phone…" }
+    if model.preferences.transport == .wifiAware { return "Wi-Fi Aware mirroring is unavailable in this build" }
+    guard let device = model.selectedDevice else { return "Select a connected phone to start mirroring" }
+    if !device.isOnline { return "This phone is not connected. Reconnect it and refresh the device list." }
+    return "Start mirroring"
 }

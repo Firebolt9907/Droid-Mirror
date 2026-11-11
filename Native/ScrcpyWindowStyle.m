@@ -4,11 +4,14 @@
 #import <QuartzCore/QuartzCore.h>
 #import <SDL3/SDL.h>
 #import <objc/runtime.h>
+#import <objc/message.h>
 #include "../scrcpy-5.0/app/src/video_filter.h"
 #include "../scrcpy-5.0/app/src/rotation.h"
 #import "PhoneAppearance.h"
+#import "FileDropDestination.h"
 
 static _Thread_local Uint64 DMTrackpadEventTimestamp;
+static BOOL DMGestureNavigationEnabled;
 static Uint64 DMTrackpadSourceTicks(NSTimeInterval source, NSTimeInterval now, Uint64 ticks) {
     if (!isfinite(source) || source<=0 || source>now) return ticks;
     double age=(now-source)*1e9;
@@ -71,6 +74,8 @@ static inline CGFloat DMScreenCornerRadius(CGFloat width) {
 @property(nonatomic) BOOL audioRequested;
 @property(nonatomic) BOOL audioPlaying;
 @property(nonatomic) BOOL audioFailed;
+@property(nonatomic) BOOL audioConnected;
+@property(nonatomic) BOOL audioVolumeKickSent;
 @property(nonatomic) BOOL backgroundAudioOnly;
 @property(nonatomic, strong) NSStatusItem *audioStatusItem;
 @property(nonatomic, strong) NSButton *pinButtonControl;
@@ -133,6 +138,18 @@ static inline CGFloat DMScreenCornerRadius(CGFloat width) {
 @property(nonatomic) NSPoint pinchCenter;
 @property(nonatomic) CGFloat pinchRadius;
 @property(nonatomic) CGFloat pinchMaxRadius;
+@property(nonatomic, strong) id edgeTouchIdentity;
+@property(nonatomic) NSPoint edgeStart;
+@property(nonatomic) NSPoint edgeAnchor;
+@property(nonatomic) NSPoint edgeLast;
+@property(nonatomic) NSInteger edgeKind;
+@property(nonatomic) BOOL edgeActive;
+@property(nonatomic) BOOL edgeCursorFrozen;
+@property(nonatomic) BOOL edgeCursorControlEnabled;
+@property(nonatomic, strong) id edgeMouseMonitor;
+- (void)handleEdgeTouches:(NSEvent *)event;
+- (void)finishEdgeTouch;
+
 - (NSEvent *)handlePhoneGestureEvent:(NSEvent *)event;
 - (void)endPhoneGestures;
 - (void)updateCameraCutouts:(NSArray<NSValue *> *)cutouts;
@@ -146,6 +163,30 @@ static inline CGFloat DMScreenCornerRadius(CGFloat width) {
 - (void)positionPhoneShadow;
 - (void)updatePhoneShadowVisibility;
 @end
+
+// Keep SDL's view and rendering intact; add touch responders to a per-class subclass.
+static void DMEdgeTouches(NSView *view, SEL selector, NSEvent *event) {
+    DMWindowController *controller = objc_getAssociatedObject(view.window, DMControllerKey);
+    [controller handleEdgeTouches:event];
+    struct objc_super parent = { view, class_getSuperclass(object_getClass(view)) };
+    ((void (*)(struct objc_super *, SEL, id))objc_msgSendSuper)(&parent, selector, event);
+}
+static void DMInstallEdgeTouches(NSView *view) {
+    Class base = object_getClass(view);
+    NSString *name = [@"DMEdgeTouch_" stringByAppendingString:NSStringFromClass(base)];
+    Class subclass = NSClassFromString(name);
+    if (!subclass) {
+        subclass = objc_allocateClassPair(base, name.UTF8String, 0);
+        for (NSString *method in @[@"touchesBeganWithEvent:", @"touchesMovedWithEvent:",
+                                   @"touchesEndedWithEvent:", @"touchesCancelledWithEvent:"]) {
+            class_addMethod(subclass, NSSelectorFromString(method), (IMP)DMEdgeTouches, "v@:@");
+        }
+        objc_registerClassPair(subclass);
+    }
+    object_setClass(view, subclass);
+    view.allowedTouchTypes = NSTouchTypeMaskIndirect;
+    view.wantsRestingTouches = YES;
+}
 
 @implementation DMWindowController
 - (instancetype)initWithWindow:(NSWindow *)window {
@@ -168,6 +209,8 @@ static inline CGFloat DMScreenCornerRadius(CGFloat width) {
     _screenView.layer.masksToBounds = YES;
     [self buildToolbar];
     _sessionActive=YES;
+    __weak typeof(self) dropOwner = self;
+    DMInstallFileDrops(_screenView, _bluetoothStream, ^BOOL { return dropOwner.sessionActive; });
     [self buildAudioButton];
     // Keep the phone chrome borderless while allowing the window into the Dock.
     window.styleMask = NSWindowStyleMaskBorderless | NSWindowStyleMaskResizable | NSWindowStyleMaskMiniaturizable;
@@ -201,6 +244,7 @@ static inline CGFloat DMScreenCornerRadius(CGFloat width) {
 }
 
 - (void)dealloc {
+    if (_edgeCursorFrozen) CGAssociateMouseAndMouseCursorPosition(true);
     [self clearBackgroundAudio];
     if (_audioStateObserver) [NSDistributedNotificationCenter.defaultCenter removeObserver:_audioStateObserver];
     [_window removeChildWindow:_audioWindow]; [_audioWindow orderOut:nil];
@@ -222,6 +266,7 @@ static inline CGFloat DMScreenCornerRadius(CGFloat width) {
     if (_keyboardMonitor) [NSEvent removeMonitor:_keyboardMonitor];
     if (_cutoutMouseMonitor) [NSEvent removeMonitor:_cutoutMouseMonitor];
     if (_phoneGestureMonitor) [NSEvent removeMonitor:_phoneGestureMonitor];
+    if (_edgeMouseMonitor) [NSEvent removeMonitor:_edgeMouseMonitor];
     if (_gestureFocusObserver) [[NSNotificationCenter defaultCenter] removeObserver:_gestureFocusObserver];
     [self endPhoneGestures];
     if (_resignActiveObserver) [[NSNotificationCenter defaultCenter] removeObserver:_resignActiveObserver];
@@ -330,6 +375,9 @@ static inline CGFloat DMScreenCornerRadius(CGFloat width) {
 - (NSEvent *)handleVolumeEvent:(NSEvent *)event focused:(BOOL)focused {
     if (!focused || !self.sessionActive || !self.sdlWindow ||
         event.type != NSEventTypeSystemDefined || event.subtype != 8) return event;
+    // While phone audio plays on this Mac, the volume keys control the Mac's
+    // output. Forwarding resumes automatically once audio mirroring ends.
+    if (self.audioRequested) return event;
     uint32_t data = (uint32_t)event.data1;
     unsigned key = data >> 16;
     unsigned state = (data >> 8) & 0xff;
@@ -632,7 +680,7 @@ static inline CGFloat DMScreenCornerRadius(CGFloat width) {
     SDL_Event event;
     SDL_zero(event);
     event.type = type;
-    event.tfinger.timestamp = SDL_GetTicksNS();
+    event.tfinger.timestamp = DMTrackpadEventTimestamp ?: SDL_GetTicksNS();
     event.tfinger.windowID = SDL_GetWindowID(self.sdlWindow);
     event.tfinger.touchID = 1;
     event.tfinger.fingerID = finger;
@@ -642,9 +690,44 @@ static inline CGFloat DMScreenCornerRadius(CGFloat width) {
     SDL_PushEvent(&event);
 }
 
+// Android's ScaleGestureDetector ignores pinches narrower than
+// config_minScalingSpan (27mm, roughly 40% of a phone's short side). Keep the
+// synthetic span above that floor, and lay the fingers along the screen
+// diagonal so both directions have room to scale within one gesture.
+- (NSPoint)pinchAxis {
+    NSSize size = self.screenView.bounds.size;
+    CGFloat length = hypot(size.width, size.height);
+    return length > 0 ? NSMakePoint(size.width / length, size.height / length) : NSMakePoint(1, 0);
+}
+
+- (CGFloat)pinchMinRadius {
+    NSSize size = self.screenView.bounds.size;
+    return MIN(size.width, size.height) * 0.24;
+}
+
+// Clamp a pinch center so contacts at `reach` along the axis stay on screen.
+- (NSPoint)pinchCenterNear:(NSPoint)point reach:(CGFloat)reach {
+    NSRect bounds = self.screenView.bounds;
+    NSPoint axis = self.pinchAxis;
+    CGFloat ex = reach * axis.x + 1, ey = reach * axis.y + 1;
+    CGFloat x = ex * 2 >= bounds.size.width ? NSMidX(bounds) : MIN(NSMaxX(bounds) - ex, MAX(NSMinX(bounds) + ex, point.x));
+    CGFloat y = ey * 2 >= bounds.size.height ? NSMidY(bounds) : MIN(NSMaxY(bounds) - ey, MAX(NSMinY(bounds) + ey, point.y));
+    return NSMakePoint(x, y);
+}
+
+- (CGFloat)pinchReachAt:(NSPoint)center {
+    NSRect bounds = self.screenView.bounds;
+    NSPoint axis = self.pinchAxis;
+    CGFloat rx = MIN(center.x - NSMinX(bounds), NSMaxX(bounds) - center.x) - 1;
+    CGFloat ry = MIN(center.y - NSMinY(bounds), NSMaxY(bounds) - center.y) - 1;
+    return MAX(0, MIN(axis.x > 0 ? rx / axis.x : CGFLOAT_MAX, axis.y > 0 ? ry / axis.y : CGFLOAT_MAX));
+}
+
 - (void)pushPinchType:(Uint32)type {
-    [self pushPhoneFinger:102 type:type at:NSMakePoint(self.pinchCenter.x - self.pinchRadius, self.pinchCenter.y)];
-    [self pushPhoneFinger:103 type:type at:NSMakePoint(self.pinchCenter.x + self.pinchRadius, self.pinchCenter.y)];
+    NSPoint axis = self.pinchAxis, c = self.pinchCenter;
+    CGFloat r = self.pinchRadius;
+    [self pushPhoneFinger:102 type:type at:NSMakePoint(c.x - r * axis.x, c.y - r * axis.y)];
+    [self pushPhoneFinger:103 type:type at:NSMakePoint(c.x + r * axis.x, c.y + r * axis.y)];
 }
 
 - (void)endLongPress {
@@ -656,6 +739,7 @@ static inline CGFloat DMScreenCornerRadius(CGFloat width) {
 }
 
 - (void)endPhoneGestures {
+    [self finishEdgeTouch];
     if (self.directTrackpad) {
         self.pendingWheelX=self.pendingWheelY=0;
         self.wheelScheduled=NO; ++self.wheelGeneration;
@@ -666,7 +750,80 @@ static inline CGFloat DMScreenCornerRadius(CGFloat width) {
     self.pinchActive = NO;
 }
 
+- (void)finishEdgeTouch {
+    if (self.edgeCursorFrozen) {
+        CGAssociateMouseAndMouseCursorPosition(true);
+        self.edgeCursorFrozen = NO;
+    }
+    if (self.edgeActive) [self pushPhoneFinger:104 type:SDL_EVENT_FINGER_UP at:self.edgeLast];
+    self.edgeActive = NO;
+    self.edgeTouchIdentity = nil;
+    self.edgeKind = 0;
+}
+
+- (void)handleEdgeTouches:(NSEvent *)event {
+    if (!self.window.isKeyWindow || !self.sdlWindow) return;
+    if (self.edgeTouchIdentity && self.edgeKind != 2 && !DMGestureNavigationEnabled) { [self finishEdgeTouch]; return; }
+    NSSet<NSTouch *> *touches = [event touchesMatchingPhase:NSTouchPhaseAny inView:self.screenView];
+    NSUInteger live = 0;
+    for (NSTouch *touch in touches) {
+        if (!(touch.phase & (NSTouchPhaseEnded | NSTouchPhaseCancelled)) && !touch.isResting) ++live;
+    }
+    Uint64 previous = DMTrackpadEventTimestamp;
+    DMTrackpadEventTimestamp = DMTrackpadSourceTicks(event.timestamp, NSProcessInfo.processInfo.systemUptime, SDL_GetTicksNS());
+    @try {
+        if (live > 1) { [self finishEdgeTouch]; return; }
+        for (NSTouch *touch in touches) {
+            NSPoint p = touch.normalizedPosition;
+            if (!self.edgeTouchIdentity && touch.phase == NSTouchPhaseBegan && !touch.isResting &&
+                !self.touchActive && !self.pinchActive && !self.longPressActive) {
+                // Bottom/top take priority at corners. Never claim a contact arriving from the center.
+                NSInteger edge = p.y <= .07 ? 1 : p.y >= .93 ? 2 : p.x <= .025 ? 3 : p.x >= .975 ? 4 : 0;
+                if (!edge || (edge != 2 && !DMGestureNavigationEnabled)) continue;
+                if (self.edgeCursorControlEnabled && !self.edgeCursorFrozen) {
+                    self.edgeCursorFrozen = CGAssociateMouseAndMouseCursorPosition(false) == kCGErrorSuccess;
+                }
+                self.edgeTouchIdentity = touch.identity;
+                self.edgeStart = p;
+                self.edgeKind = edge;
+            }
+            if (![touch.identity isEqual:self.edgeTouchIdentity]) continue;
+            if (touch.phase & NSTouchPhaseCancelled) { [self finishEdgeTouch]; continue; }
+            CGFloat dx = p.x - self.edgeStart.x, dy = p.y - self.edgeStart.y;
+            NSSize size = self.screenView.bounds.size;
+            if (!self.edgeActive && !(touch.phase & NSTouchPhaseEnded)) {
+                BOOL direction = self.edgeKind == 1 ? (dy > .025 || fabs(dx) > .025) :
+                    self.edgeKind == 2 ? (-dy > .025 && fabs(dy) > fabs(dx)) :
+                    self.edgeKind == 3 ? (dx > .025 && fabs(dx) > fabs(dy)) :
+                                        (-dx > .025 && fabs(dx) > fabs(dy));
+                if (direction) {
+                    self.edgeAnchor = NSMakePoint(self.edgeKind == 3 ? 1 : self.edgeKind == 4 ? size.width-1 : size.width*.5,
+                        self.edgeKind == 1 ? 1 : self.edgeKind == 2 ? size.height-1 : size.height*.5);
+                    self.edgeLast = self.edgeAnchor;
+                    self.edgeActive = YES;
+                    [self pushPhoneFinger:104 type:SDL_EVENT_FINGER_DOWN at:self.edgeAnchor];
+                }
+            }
+            if (self.edgeActive) {
+                self.edgeLast = NSMakePoint(MAX(1, MIN(size.width-1, self.edgeAnchor.x + dx*size.width*2)),
+                                           MAX(1, MIN(size.height-1, self.edgeAnchor.y + dy*size.height*2)));
+                [self pushPhoneFinger:104 type:SDL_EVENT_FINGER_MOTION at:self.edgeLast];
+            }
+            if (touch.phase & NSTouchPhaseEnded) [self finishEdgeTouch];
+        }
+    } @finally { DMTrackpadEventTimestamp = previous; }
+}
+
 - (void)setupPhoneGestures {
+    self.edgeCursorControlEnabled = YES;
+    DMInstallEdgeTouches(self.screenView);
+    __weak typeof(self) edgeSelf = self;
+    self.edgeMouseMonitor = [NSEvent addLocalMonitorForEventsMatchingMask:
+        NSEventMaskMouseMoved | NSEventMaskLeftMouseDown | NSEventMaskLeftMouseDragged |
+        NSEventMaskLeftMouseUp | NSEventMaskScrollWheel | NSEventMaskMagnify
+        handler:^NSEvent *(NSEvent *event) {
+            return edgeSelf.edgeTouchIdentity && event.window == edgeSelf.window ? nil : event;
+        }];
     __weak typeof(self) weakSelf = self;
     self.phoneGestureMonitor = [NSEvent addLocalMonitorForEventsMatchingMask:
         NSEventMaskRightMouseDown | NSEventMaskRightMouseUp | NSEventMaskRightMouseDragged | NSEventMaskMagnify
@@ -710,17 +867,19 @@ static inline CGFloat DMScreenCornerRadius(CGFloat width) {
         self.pendingWheelX = self.pendingWheelY = 0;
         self.wheelScheduled = NO;
         ++self.wheelGeneration;
-        // Keep both fingers inside the screen, including near its edges.
-        CGFloat margin = MIN(80, bounds.size.width * 0.2);
-        self.pinchCenter = NSMakePoint(MIN(NSMaxX(bounds) - margin - 1, MAX(margin + 1, point.x)),
-                                      MIN(NSMaxY(bounds) - 1, MAX(1, point.y)));
-        self.pinchMaxRadius = MIN(self.pinchCenter.x - 1, NSMaxX(bounds) - self.pinchCenter.x - 1);
-        self.pinchRadius = MIN(margin * 0.5, self.pinchMaxRadius);
+        // Keep both fingers inside the screen, including near its edges, and
+        // start midway (geometrically) between the minimum and maximum span
+        // so zooming in and out get equal headroom with no dead zone.
+        CGFloat minRadius = self.pinchMinRadius;
+        self.pinchCenter = [self pinchCenterNear:point reach:minRadius * 2];
+        self.pinchMaxRadius = MAX(minRadius, [self pinchReachAt:self.pinchCenter]);
+        self.pinchRadius = MIN(self.pinchMaxRadius, sqrt(minRadius * self.pinchMaxRadius));
         self.pinchActive = YES;
         [self pushPinchType:SDL_EVENT_FINGER_DOWN];
     }
     if (self.pinchActive) {
-        self.pinchRadius = MIN(self.pinchMaxRadius, MAX(2, self.pinchRadius * (1 + event.magnification)));
+        self.pinchRadius = MIN(self.pinchMaxRadius, MAX(self.pinchMinRadius,
+            self.pinchRadius * MAX(0.1, 1 + event.magnification)));
         [self pushPinchType:SDL_EVENT_FINGER_MOTION];
         if (event.phase & NSEventPhaseEnded) [self endPhoneGestures];
     }
@@ -784,15 +943,11 @@ static inline CGFloat DMScreenCornerRadius(CGFloat width) {
         // Translate the same two contacts used by magnification. Forwarding a
         // wheel or single-finger drag here would interrupt Android's pinch.
         if (event.hasPreciseScrollingDeltas && event.momentumPhase == NSEventPhaseNone) {
-            NSRect bounds = selfRef.screenView.bounds;
-            CGFloat radius = selfRef.pinchRadius;
-            selfRef.pinchCenter = NSMakePoint(
-                MIN(NSMaxX(bounds) - radius - 1, MAX(radius + 1,
-                    selfRef.pinchCenter.x + event.scrollingDeltaX * 1.5)),
-                MIN(NSMaxY(bounds) - 1, MAX(1,
-                    selfRef.pinchCenter.y - event.scrollingDeltaY * 1.5)));
-            selfRef.pinchMaxRadius = MIN(selfRef.pinchCenter.x - 1,
-                NSMaxX(bounds) - selfRef.pinchCenter.x - 1);
+            selfRef.pinchCenter = [selfRef pinchCenterNear:NSMakePoint(
+                    selfRef.pinchCenter.x + event.scrollingDeltaX * 1.5,
+                    selfRef.pinchCenter.y - event.scrollingDeltaY * 1.5)
+                reach:selfRef.pinchRadius];
+            selfRef.pinchMaxRadius = MAX(selfRef.pinchRadius, [selfRef pinchReachAt:selfRef.pinchCenter]);
             [selfRef pushPinchType:SDL_EVENT_FINGER_MOTION];
         }
         return nil;
@@ -918,7 +1073,12 @@ static inline CGFloat DMScreenCornerRadius(CGFloat width) {
     self.pendingWheelTrackpad=trackpad;
     self.pendingWheelX+=dx; self.pendingWheelY+=dy;
     if (self.wheelScheduled) return;
-    NSTimeInterval delay=MAX(0,self.lastWheelCommand+1.0/30.0-NSProcessInfo.processInfo.systemUptime);
+    // Direct trackpad drags become touch moves. Coarser batches let a mostly
+    // horizontal swipe cross the vertical touch slop in the same event, so
+    // Android single-axis detectors can claim the wrong axis. The BLE queue
+    // already coalesces motion into 60 Hz buckets; wheel playback keeps 30 Hz.
+    NSTimeInterval interval=(trackpad && self.directTrackpad) ? 1.0/60.0 : 1.0/30.0;
+    NSTimeInterval delay=MAX(0,self.lastWheelCommand+interval-NSProcessInfo.processInfo.systemUptime);
     if (delay==0) { [self flushMouseWheelCommands]; return; }
     self.wheelScheduled=YES;
     NSUInteger generation=self.wheelGeneration;
@@ -1180,6 +1340,20 @@ static inline CGFloat DMScreenCornerRadius(CGFloat width) {
     self.audioRequested=[state[@"requested"] boolValue];
     self.audioPlaying=[state[@"playing"] boolValue];
     self.audioFailed=[state[@"failed"] boolValue];
+    self.audioConnected=self.audioRequested && [state[@"connected"] boolValue];
+    if (!self.audioRequested) self.audioVolumeKickSent=NO;
+    else if (self.audioConnected && !self.audioVolumeKickSent) {
+        // Android only starts routing media into the capture after a volume
+        // key press. Send exactly one per audio request, once the phone has
+        // accepted the lane and had a moment to open its capture route.
+        self.audioVolumeKickSent=YES;
+        __weak typeof(self) weakSelf=self;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(0.5*NSEC_PER_SEC)),dispatch_get_main_queue(),^{
+            DMWindowController *controller=weakSelf;
+            if (controller && controller.sessionActive && controller.audioRequested && controller.audioConnected)
+                [controller runAndroidKey:@"KEYCODE_VOLUME_UP"];
+        });
+    }
     self.audioVisible=[state[@"available"] boolValue] || self.audioRequested;
     self.audioButton.title=self.audioRequested
         ? (self.audioPlaying ? @"Stop phone audio" : @"Cancel audio connection…")
@@ -1628,6 +1802,7 @@ void DroidMirrorSessionChrome(NSWindow *window, BOOL active) {
     if (!active) {
         [controller clearBackgroundAudio];
         controller.audioVisible=NO; controller.audioRequested=NO; controller.audioHelperPID=0;
+        controller.audioConnected=NO; controller.audioVolumeKickSent=NO;
     }
     [controller positionAudioButton];
     if (active) {
@@ -1683,4 +1858,15 @@ static void DMInstallScrcpyStyling(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
         [NSTimer scheduledTimerWithTimeInterval:0.15 repeats:YES block:^(__unused NSTimer *timer) { DMInstallToolbar(); }];
     });
+}
+
+// Delivered on SDL's main thread by the device-message receiver. Unknown modes fail closed.
+void DroidMirrorSetNavigationMode(int mode) {
+    DMGestureNavigationEnabled = mode == 2;
+    if (!DMGestureNavigationEnabled) {
+        for (NSWindow *window in NSApp.windows) {
+            DMWindowController *controller = objc_getAssociatedObject(window, DMControllerKey);
+            if (controller.edgeKind != 2) [controller finishEdgeTouch];
+        }
+    }
 }

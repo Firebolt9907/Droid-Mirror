@@ -416,6 +416,8 @@ execute_server(struct sc_server *server,
     const char *transport = getenv("DROIDMIRROR_TRANSPORT");
     if (transport && !strcmp(transport, "adb")) {
         ADD_PARAM("droidmirror_session=true");
+        const char *unlock = getenv("DROIDMIRROR_ALLOW_UNLOCK");
+        ADD_PARAM("droidmirror_allow_unlock=%s", unlock && !strcmp(unlock, "1") ? "true" : "false");
     }
     if (!params->power_on) {
         // By default, power_on is true

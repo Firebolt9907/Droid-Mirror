@@ -1,6 +1,29 @@
 #import "ScrcpyWindowStyle.m"
 #include <assert.h>
 
+@interface DMEdgeTestWindow : NSObject
+@end
+@implementation DMEdgeTestWindow
+- (BOOL)isKeyWindow { return YES; }
+@end
+@interface DMEdgeTestTouch : NSTouch
+@property NSPoint point;
+@property NSTouchPhase testPhase;
+@end
+@implementation DMEdgeTestTouch
+- (NSPoint)normalizedPosition { return self.point; }
+- (NSTouchPhase)phase { return self.testPhase; }
+- (id)identity { return @"edge-test"; }
+- (BOOL)isResting { return NO; }
+@end
+@interface DMEdgeTestEvent : NSEvent
+@property NSSet *contacts;
+@end
+@implementation DMEdgeTestEvent
+- (NSSet *)touchesMatchingPhase:(NSTouchPhase)phase inView:(NSView *)view { return self.contacts; }
+- (NSTimeInterval)timestamp { return NSProcessInfo.processInfo.systemUptime; }
+@end
+
 @interface DMPhoneGestureTestEvent : NSEvent
 @property(nonatomic) NSEventType inputType;
 @property(nonatomic) NSEventPhase inputPhase;
@@ -39,6 +62,53 @@ int main(void) {
         controller.sdlWindow = window;
         controller.screenView = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 400, 800)];
         SDL_FlushEvents(SDL_EVENT_FIRST, SDL_EVENT_LAST);
+        DMEdgeTestWindow *keyWindow = [DMEdgeTestWindow new];
+        controller.window = (NSWindow *)keyWindow;
+        DMEdgeTestTouch *contact = [DMEdgeTestTouch new];
+        DMEdgeTestEvent *edgeEvent = [DMEdgeTestEvent new];
+        edgeEvent.contacts = [NSSet setWithObject:contact];
+        DMGestureNavigationEnabled = YES;
+        // Physical edge determines the Android anchor, independently of the cursor.
+        for (NSInteger edge = 1; edge <= 4; ++edge) {
+            contact.point = edge == 1 ? NSMakePoint(.5,.02) : edge == 2 ? NSMakePoint(.5,.98) :
+                            edge == 3 ? NSMakePoint(.02,.5) : NSMakePoint(.98,.5);
+            contact.testPhase = NSTouchPhaseBegan;
+            [controller handleEdgeTouches:edgeEvent];
+            assert(controller.edgeKind == edge && !controller.edgeActive);
+            assert(!SDL_PollEvent(&(SDL_Event){0}));
+            contact.testPhase = NSTouchPhaseMoved;
+            contact.point = NSMakePoint(contact.point.x + (edge == 3 ? .1 : edge == 4 ? -.1 : 0),
+                                       contact.point.y + (edge == 1 ? .1 : edge == 2 ? -.1 : 0));
+            [controller handleEdgeTouches:edgeEvent];
+            SDL_Event anchor = Next(SDL_EVENT_FINGER_DOWN,104);
+            assert(edge == 1 ? anchor.tfinger.y > .99 : edge == 2 ? anchor.tfinger.y < .01 :
+                   edge == 3 ? anchor.tfinger.x < .01 : anchor.tfinger.x > .99);
+            Next(SDL_EVENT_FINGER_MOTION,104);
+            contact.testPhase = NSTouchPhaseEnded;
+            [controller handleEdgeTouches:edgeEvent];
+            Next(SDL_EVENT_FINGER_MOTION,104);
+            Next(SDL_EVENT_FINGER_UP,104);
+            assert(!controller.edgeTouchIdentity && !controller.edgeActive);
+        }
+        contact.point = NSMakePoint(.5,.5);
+        contact.testPhase = NSTouchPhaseBegan;
+        [controller handleEdgeTouches:edgeEvent];
+        assert(!controller.edgeTouchIdentity);
+        DMGestureNavigationEnabled = NO;
+        for (NSInteger edge = 1; edge <= 4; ++edge) {
+            contact.point = edge == 1 ? NSMakePoint(.5,.02) : edge == 2 ? NSMakePoint(.5,.98) :
+                            edge == 3 ? NSMakePoint(.02,.5) : NSMakePoint(.98,.5);
+            contact.testPhase = NSTouchPhaseBegan;
+            [controller handleEdgeTouches:edgeEvent];
+            assert((controller.edgeTouchIdentity != nil) == (edge == 2));
+            [controller finishEdgeTouch];
+        }
+        DMGestureNavigationEnabled = YES;
+        contact.point = NSMakePoint(.05,.5);
+        contact.testPhase = NSTouchPhaseBegan;
+        [controller handleEdgeTouches:edgeEvent];
+        assert(!controller.edgeTouchIdentity); // Near-edge app swipes remain ordinary input.
+        controller.window = nil;
         DMPhoneGestureTestEvent *event = [DMPhoneGestureTestEvent new];
         event.inputType = NSEventTypeRightMouseDown;
         event.inputPoint = NSMakePoint(100, 200);
@@ -59,7 +129,12 @@ int main(void) {
         event.inputMagnification = 0.5;
         [controller handlePhoneGestureEvent:event];
         SDL_Event left = Next(SDL_EVENT_FINGER_DOWN, 102);
-        Next(SDL_EVENT_FINGER_DOWN, 103);
+        SDL_Event right = Next(SDL_EVENT_FINGER_DOWN, 103);
+        // Android ignores pinches narrower than ~40% of the short side, so the
+        // initial span must leave room to zoom out above that floor.
+        CGFloat startSpan = hypot((right.tfinger.x - left.tfinger.x) * 400, (right.tfinger.y - left.tfinger.y) * 800);
+        assert(startSpan >= 400 * 0.48 * 1.4);
+        assert(controller.pinchMaxRadius / controller.pinchMinRadius >= 2);
         SDL_Event spread = Next(SDL_EVENT_FINGER_MOTION, 102);
         Next(SDL_EVENT_FINGER_MOTION, 103);
         assert(spread.tfinger.x < left.tfinger.x);
@@ -86,6 +161,14 @@ int main(void) {
         SDL_Event inward = Next(SDL_EVENT_FINGER_MOTION, 102);
         Next(SDL_EVENT_FINGER_MOTION, 103);
         assert(inward.tfinger.x > spread.tfinger.x);
+        // Zoom-out bottoms out at the Android minimum span, never below it.
+        event.inputMagnification = -0.9;
+        for (int i = 0; i < 5; ++i) {
+            [controller handlePhoneGestureEvent:event];
+            Next(SDL_EVENT_FINGER_MOTION, 102);
+            Next(SDL_EVENT_FINGER_MOTION, 103);
+        }
+        assert(controller.pinchRadius == controller.pinchMinRadius);
         event.inputPhase = NSEventPhaseEnded;
         event.inputMagnification = 0;
         [controller handlePhoneGestureEvent:event];

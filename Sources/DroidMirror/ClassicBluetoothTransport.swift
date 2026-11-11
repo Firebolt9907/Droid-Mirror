@@ -19,6 +19,8 @@ final class ClassicBluetoothTransport {
         case phoneOn = "PHONE_ON", sessionEnded = "SESSION_ENDED", phoneLocalUse = "PHONE_LOCAL_USE"
         case streamStarted = "STREAM_STARTED", captureFailed = "CAPTURE_FAILED", phoneInUse = "PHONE_IN_USE"
         case pinPaused = "PIN_PAUSED", pinFailed = "PIN_FAILED"
+        /// BLE is authenticated and capture waits (bounded) for the Touch ID answer.
+        case unlockDecisionNeeded = "UNLOCK_DECISION_NEEDED"
         case usbActive = "USB_ACTIVE"
         case wirelessActive = "WIFI_ACTIVE", bluetoothActive = "BLUETOOTH_ACTIVE", wirelessRecovering = "WIFI_RECOVERING"
     }
@@ -148,6 +150,23 @@ final class ClassicBluetoothTransport {
 
     struct Ports { let video: UInt16; let control: UInt16 }
 
+    enum UnlockPolicy {
+        /// Saved-PIN entry may run without a prompt.
+        case allowed
+        /// The helper waits for `sendUnlockDecision` after BLE authenticates.
+        case afterConnection
+    }
+
+    /// Identifies the current helper so a late answer cannot reach a newer session.
+    var session: UUID { generation }
+
+    /// Answers `UNLOCK_DECISION_NEEDED` once; the helper ignores repeats and
+    /// falls back to manual unlock when no answer arrives in time.
+    func sendUnlockDecision(_ allowed: Bool, session: UUID) {
+        guard session == generation, process?.isRunning == true else { return }
+        try? commands?.write(contentsOf: Data("UNLOCK_DECISION \(allowed ? 1 : 0)\n".utf8))
+    }
+
     static func pair(address: String, code: String) async throws {
         guard let key = Data(base64Encoded: code.trimmingCharacters(in: .whitespacesAndNewlines)), key.count == 32 else {
             throw RunnerError.failed("Paste the full BLE pairing code shown in the Android companion.")
@@ -160,7 +179,7 @@ final class ClassicBluetoothTransport {
             Notification.Name("app.droidmirror.receiverConfiguration"), object: nil, userInfo: nil, deliverImmediately: true)
     }
 
-    func connect(address: String, wirelessMaxSize: Int = 1920, wirelessFPS: Int = 60, wirelessBitRate: Int = 12_000_000, audioBufferMs: Int = 50) async throws -> Ports {
+    func connect(address: String, wirelessMaxSize: Int = 1920, wirelessFPS: Int = 60, wirelessBitRate: Int = 12_000_000, audioBufferMs: Int = 50, unlockPolicy: UnlockPolicy) async throws -> Ports {
         stop()
         guard let helper = Self.helperPath else { throw RunnerError.failed("Bluetooth helper missing. Rebuild DroidMirror with build-app.sh.") }
         let token = generation
@@ -173,6 +192,7 @@ final class ClassicBluetoothTransport {
         var environment = ToolProcessEnvironment.clean()
         let device = AndroidDevice(id: address, state: "device", model: "", product: "", transport: "bluetooth-classic")
         environment["DROIDMIRROR_APPEARANCE_CACHE"] = PhoneAppearanceCache.path(for: device)
+        environment["DROIDMIRROR_ALLOW_UNLOCK"] = unlockPolicy == .allowed ? "1" : "defer"
         environment["DROIDMIRROR_AUDIO_BUFFER_MS"] = String(min(200, max(0, audioBufferMs)))
         environment["DROIDMIRROR_WIFI_MAX_SIZE"] = String(wirelessMaxSize)
         environment["DROIDMIRROR_WIFI_FPS"] = String(wirelessFPS)

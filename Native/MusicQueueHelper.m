@@ -2,7 +2,7 @@
 #import <objc/message.h>
 #import <dlfcn.h>
 
-// Loaded only in a short-lived /usr/bin/perl child (see AppleMusicQueue.swift).
+// Loaded only in a /usr/bin/perl child that the parent reuses (see AppleMusicQueue.swift).
 // No private framework is linked into the host or notification receiver.
 static id DMGet(id object, NSString *name) {
     SEL selector = NSSelectorFromString(name);
@@ -47,6 +47,7 @@ static NSDictionary *DMRead(id controller) {
     id metadata = DMGet(items.firstObject, @"metadata");
     double duration = [[metadata valueForKey:@"duration"] doubleValue];
     double position = [[metadata valueForKey:@"elapsedTime"] doubleValue];
+    double positionSampleUptime = NSProcessInfo.processInfo.systemUptime;
     SEL calculate = NSSelectorFromString(@"calculatedPlaybackPositionFromDate:");
     if ([metadata respondsToSelector:calculate]) position = ((double (*)(id, SEL, id))objc_msgSend)(metadata, calculate, NSDate.date);
     NSMutableDictionary *commands = [NSMutableDictionary dictionary];
@@ -60,6 +61,7 @@ static NSDictionary *DMRead(id controller) {
     int repeat = [[response valueForKey:@"repeatMode"] intValue];
     NSDictionary *playback = @{@"title":entries.firstObject[@"title"], @"artist":entries.firstObject[@"artist"],
         @"album":DMString(DMGet(metadata, @"albumName"), 1024), @"duration":@(isfinite(duration) ? fmax(0, duration) : 0),
+        @"_positionSampleUptime":@(positionSampleUptime),
         @"position":@(isfinite(position) ? fmax(0, position) : 0),
         @"playing":@((BOOL)([[response valueForKey:@"playbackRate"] floatValue] > 0)),
         @"shuffle":@((BOOL)([[response valueForKey:@"shuffleMode"] intValue] > 1)),
@@ -107,46 +109,43 @@ static NSDictionary *DMCommandOptions(NSDictionary *request, NSString *control) 
 }
 
 #ifndef DM_MUSIC_QUEUE_TEST
-__attribute__((constructor)) static void DMQueueMain(void) {
-    @autoreleasepool { @try {
-        // The parent supplies bounded JSON on stdin, never shell code.
-        NSMutableData *input = [NSMutableData data];
-        uint8_t buffer[1024]; size_t length;
-        while ((length = fread(buffer, 1, sizeof(buffer), stdin))) {
-            [input appendBytes:buffer length:length];
-            if (input.length > 16384) { DMPrint(@{@"available":@NO}); return; }
-        }
-        NSDictionary *request = [NSJSONSerialization JSONObjectWithData:input options:0 error:nil];
-        if (![request isKindOfClass:NSDictionary.class]) { DMPrint(@{@"available":@NO}); return; }
-        NSString *action = request[@"action"];
-        if (![@[@"read", @"select", @"control", @"validate"] containsObject:action]) { DMPrint(@{@"available":@NO}); return; }
-        if (!dlopen("/System/Library/PrivateFrameworks/MediaRemote.framework/MediaRemote", RTLD_LAZY)) {
-            DMPrint(@{@"available":@NO}); return;
-        }
-        Class controllerClass = NSClassFromString(@"MRNowPlayingController");
-        Class requestClass = NSClassFromString(@"MRPlaybackQueueRequest");
-        SEL rangeSelector = NSSelectorFromString(@"defaultPlaybackQueueRequestWithRange:");
-        if (![requestClass respondsToSelector:rangeSelector]) { DMPrint(@{@"available":@NO}); return; }
-        id controller = DMGet(controllerClass, @"localRouteController");
-        id configuration = DMGet(controller, @"configuration");
-        // Phone playback can own global Now Playing. Resolve Music explicitly.
-        id musicDestination = [DMGet(configuration, @"destination") copy];
-        Class clientClass = NSClassFromString(@"MRClient");
-        SEL clientInitializer = NSSelectorFromString(@"initWithBundleIdentifier:");
-        id allocatedClient = [clientClass alloc];
-        if (![allocatedClient respondsToSelector:clientInitializer]) { DMPrint(@{@"available":@NO}); return; }
-        id musicClient = ((id (*)(id, SEL, id))objc_msgSend)(allocatedClient, clientInitializer, @"com.apple.Music");
-        DMSet(musicDestination, @"setClient:", musicClient);
-        DMSet(configuration, @"setDestination:", musicDestination);
-        id queueRequest = ((id (*)(id, SEL, NSRange))objc_msgSend)(requestClass, rangeSelector, NSMakeRange(0, 32));
-        DMSet(configuration, @"setPlaybackQueueRequest:", queueRequest);
-        SEL wantsQueue = NSSelectorFromString(@"setRequestPlaybackQueue:");
-        if (![configuration respondsToSelector:wantsQueue]) { DMPrint(@{@"available":@NO}); return; }
-        ((void (*)(id, SEL, BOOL))objc_msgSend)(configuration, wantsQueue, YES);
-        DMSet(controller, @"setConfiguration:", configuration);
-        SEL begin = NSSelectorFromString(@"beginLoadingUpdates");
-        if (![controller respondsToSelector:begin]) { DMPrint(@{@"available":@NO}); return; }
-        ((void (*)(id, SEL))objc_msgSend)(controller, begin);
+// Only the most recent Music item known to have no image. Waiting again on every
+// read would add a fixed delay per poll for tracks that never provide one.
+static NSString *DMItemWithoutArtwork;
+
+static void DMHandle(NSDictionary *request) {
+    NSString *action = request[@"action"];
+    if (![@[@"read", @"select", @"control", @"validate"] containsObject:action]) { DMPrint(@{@"available":@NO}); return; }
+    if (!dlopen("/System/Library/PrivateFrameworks/MediaRemote.framework/MediaRemote", RTLD_LAZY)) {
+        DMPrint(@{@"available":@NO}); return;
+    }
+    Class controllerClass = NSClassFromString(@"MRNowPlayingController");
+    Class requestClass = NSClassFromString(@"MRPlaybackQueueRequest");
+    SEL rangeSelector = NSSelectorFromString(@"defaultPlaybackQueueRequestWithRange:");
+    if (![requestClass respondsToSelector:rangeSelector]) { DMPrint(@{@"available":@NO}); return; }
+    // Each request uses a fresh controller, so a reused process reads live state
+    // and holds no MediaRemote registration while blocked between requests.
+    id controller = DMGet(controllerClass, @"localRouteController");
+    id configuration = DMGet(controller, @"configuration");
+    // Phone playback can own global Now Playing. Resolve Music explicitly.
+    id musicDestination = [DMGet(configuration, @"destination") copy];
+    Class clientClass = NSClassFromString(@"MRClient");
+    SEL clientInitializer = NSSelectorFromString(@"initWithBundleIdentifier:");
+    id allocatedClient = [clientClass alloc];
+    if (![allocatedClient respondsToSelector:clientInitializer]) { DMPrint(@{@"available":@NO}); return; }
+    id musicClient = ((id (*)(id, SEL, id))objc_msgSend)(allocatedClient, clientInitializer, @"com.apple.Music");
+    DMSet(musicDestination, @"setClient:", musicClient);
+    DMSet(configuration, @"setDestination:", musicDestination);
+    id queueRequest = ((id (*)(id, SEL, NSRange))objc_msgSend)(requestClass, rangeSelector, NSMakeRange(0, 32));
+    DMSet(configuration, @"setPlaybackQueueRequest:", queueRequest);
+    SEL wantsQueue = NSSelectorFromString(@"setRequestPlaybackQueue:");
+    if (![configuration respondsToSelector:wantsQueue]) { DMPrint(@{@"available":@NO}); return; }
+    ((void (*)(id, SEL, BOOL))objc_msgSend)(configuration, wantsQueue, YES);
+    DMSet(controller, @"setConfiguration:", configuration);
+    SEL begin = NSSelectorFromString(@"beginLoadingUpdates");
+    if (![controller respondsToSelector:begin]) { DMPrint(@{@"available":@NO}); return; }
+    ((void (*)(id, SEL))objc_msgSend)(controller, begin);
+    @try {
         NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:2.5];
         NSDictionary *queue = nil;
         while (deadline.timeIntervalSinceNow > 0) {
@@ -154,9 +153,10 @@ __attribute__((constructor)) static void DMQueueMain(void) {
             queue = DMRead(controller);
             if (queue) {
                 // Artwork can arrive just after the text metadata.
-                if ([action isEqual:@"read"] && !queue[@"artwork"]) {
+                if ([action isEqual:@"read"] && !queue[@"artwork"] && ![DMItemWithoutArtwork isEqual:queue[@"current"]]) {
                     [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.15]];
                     queue = DMRead(controller) ?: queue;
+                    DMItemWithoutArtwork = queue[@"artwork"] ? nil : queue[@"current"];
                 }
                 break;
             }
@@ -190,7 +190,32 @@ __attribute__((constructor)) static void DMQueueMain(void) {
         while (!finished && commandDeadline.timeIntervalSinceNow > 0)
             [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.02]];
         DMPrint(@{@"accepted":@((BOOL)(finished && accepted))});
-    } @catch (NSException *exception) { DMPrint(@{@"available":@NO, @"accepted":@NO}); } }
+    } @finally {
+        SEL end = NSSelectorFromString(@"endLoadingUpdates");
+        if ([controller respondsToSelector:end]) ((void (*)(id, SEL))objc_msgSend)(controller, end);
+    }
+}
+
+// The parent writes one bounded JSON request per line and reads one JSON response
+// per line. This blocks, using no CPU, between requests. EOF ends the process, so
+// it cannot outlive the parent.
+__attribute__((constructor)) static void DMQueueMain(void) {
+    char line[16386];
+    while (fgets(line, sizeof(line), stdin)) {
+        @autoreleasepool { @try {
+            size_t length = strlen(line);
+            if (length == sizeof(line) - 1 && line[length - 1] != '\n') {
+                int next;
+                while ((next = fgetc(stdin)) != EOF && next != '\n') {}
+                DMPrint(@{@"available":@NO});
+                continue;
+            }
+            // The parent supplies bounded JSON on stdin, never shell code.
+            NSDictionary *request = [NSJSONSerialization JSONObjectWithData:[NSData dataWithBytes:line length:length] options:0 error:nil];
+            if (![request isKindOfClass:NSDictionary.class]) { DMPrint(@{@"available":@NO}); continue; }
+            DMHandle(request);
+        } @catch (NSException *exception) { DMPrint(@{@"available":@NO, @"accepted":@NO}); } }
+    }
 }
 
 #endif

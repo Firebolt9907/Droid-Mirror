@@ -91,11 +91,28 @@ protocol MusicQueueAccess: AnyObject {
 /// Process isolation contains private-API exceptions, hangs and OS changes. Perl's
 /// MediaRemote compatibility technique is also used by mediaremote-adapter:
 /// https://github.com/ungive/mediaremote-adapter (no third-party code is bundled).
+/// One child serves many requests, because starting Perl and loading MediaRemote
+/// is the expensive part of a read. It sits blocked between requests and exits
+/// when its stdin closes.
 final class LocalMusicQueueAccess: MusicQueueAccess {
+    /// Bounds anything a private framework might retain over a long-lived process.
+    static let requestsPerProcess = 256
+    private final class Helper {
+        let process: Process
+        let input: FileHandle
+        let output: FileHandle
+        var buffered = Data()
+        var requests = 0
+        init(process: Process, input: FileHandle, output: FileHandle) {
+            self.process = process; self.input = input; self.output = output
+        }
+        // Handles close on release. Closing here could race a write on the worker.
+        func end() { if process.isRunning { process.terminate() } }
+    }
     private let lock = NSLock()
     private var generation = 0
     private var lastReadGeneration: Int?
-    private var running: Process?
+    private var helper: Helper?
     private let library: URL?
     init(library: URL? = nil) {
         let bundle = Bundle.main.bundleURL
@@ -104,39 +121,62 @@ final class LocalMusicQueueAccess: MusicQueueAccess {
             ? bundle.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent() : bundle
         self.library = library ?? root.appendingPathComponent("Contents/Helpers/libDroidMirrorMusicQueue.dylib")
     }
+    deinit { helper?.end() }
     func read() -> [String: Any]? { run(["action": "read"]) }
     func select(_ request: [String: Any]) { _ = run(request) }
     func cancel() {
         lock.lock(); generation += 1; lastReadGeneration = nil
-        if let running, running.isRunning { running.terminate() }
+        helper?.end(); helper = nil
         lock.unlock()
     }
-    // Called only on AppleMusicSync's serial worker, never on the UI thread.
-    private func run(_ request: [String: Any]) -> [String: Any]? {
-        guard let library, FileManager.default.fileExists(atPath: library.path),
-              let input = try? JSONSerialization.data(withJSONObject: request), input.count <= 16384 else { return nil }
+    private func launch(_ library: URL) -> Helper? {
         let process = Process(), output = Pipe(), stdin = Pipe()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/perl")
         process.arguments = ["-MDynaLoader", "-e", "DynaLoader::dl_load_file($ARGV[0],0) or die DynaLoader::dl_error()", library.path]
         process.environment = ["PATH": "/usr/bin:/bin"]
         process.standardInput = stdin; process.standardOutput = output; process.standardError = FileHandle.nullDevice
+        // A child that died between requests must fail the write, not kill this process.
+        _ = fcntl(stdin.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1)
+        do { try process.run() } catch { return nil }
+        return Helper(process: process, input: stdin.fileHandleForWriting, output: output.fileHandleForReading)
+    }
+    private func discard(_ failed: Helper) {
+        failed.end()
+        lock.lock(); if helper === failed { helper = nil }; lock.unlock()
+    }
+    // Called only on AppleMusicSync's serial worker, never on the UI thread.
+    private func run(_ request: [String: Any]) -> [String: Any]? {
+        guard let library, FileManager.default.fileExists(atPath: library.path),
+              var input = try? JSONSerialization.data(withJSONObject: request), input.count <= 16384 else { return nil }
+        input.append(0x0A)
         lock.lock()
         let epoch = generation
         if request["action"] as? String != "read", lastReadGeneration != epoch { lock.unlock(); return nil }
-        do { try process.run(); running = process } catch { lock.unlock(); return nil }
+        if let current = helper, !current.process.isRunning || current.requests >= Self.requestsPerProcess {
+            current.end(); helper = nil
+        }
+        guard let active = helper ?? launch(library) else { lock.unlock(); return nil }
+        helper = active; active.requests += 1
         lock.unlock()
-        try? stdin.fileHandleForWriting.write(contentsOf: input)
-        try? stdin.fileHandleForWriting.close()
-        let timeout = DispatchWorkItem { if process.isRunning { process.terminate() } }
+        do { try active.input.write(contentsOf: input) } catch { discard(active); return nil }
+        let timeout = DispatchWorkItem { if active.process.isRunning { active.process.terminate() } }
         DispatchQueue.global().asyncAfter(deadline: .now() + 4, execute: timeout)
-        // The helper caps output at 512 KB and exits within 3.3 seconds. Read before
-        // waitUntilExit so even a full pipe cannot deadlock child and parent.
-        let data = output.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit(); timeout.cancel()
-        lock.lock(); running = nil; let valid = epoch == generation
+        defer { timeout.cancel() }
+        // The helper caps a response at 512 KB and answers within 3.3 seconds. A
+        // killed or crashed child ends this read with EOF.
+        while !active.buffered.contains(0x0A) {
+            guard let chunk = try? active.output.read(upToCount: 65536), !chunk.isEmpty,
+                  active.buffered.count + chunk.count <= 524289 else { discard(active); return nil }
+            active.buffered.append(chunk)
+        }
+        let end = active.buffered.firstIndex(of: 0x0A)!
+        let data = active.buffered.prefix(upTo: end)
+        active.buffered = Data(active.buffered.suffix(from: active.buffered.index(after: end)))
+        lock.lock()
+        let valid = epoch == generation
         if valid, request["action"] as? String == "read" { lastReadGeneration = epoch }
         lock.unlock()
-        guard valid, process.terminationStatus == 0, data.count <= 524288 else { return nil }
+        guard valid else { return nil }
         return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
     }
 }

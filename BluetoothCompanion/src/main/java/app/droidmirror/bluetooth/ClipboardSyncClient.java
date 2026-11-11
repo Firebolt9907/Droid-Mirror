@@ -26,6 +26,8 @@ public final class ClipboardSyncClient implements AutoCloseable {
     private volatile IClipboardBridge remote;
     private volatile boolean closed;
     private boolean binding;
+    private final java.util.Set<String> cancelledFiles = java.util.concurrent.ConcurrentHashMap.newKeySet();
+    private final java.util.ArrayDeque<String> cancelledOrder = new java.util.ArrayDeque<>();
     private final ClipboardChangeTracker changes = new ClipboardChangeTracker();
     private String lastStatus = "";
 
@@ -48,10 +50,10 @@ public final class ClipboardSyncClient implements AutoCloseable {
         }
     };
 
-    public ClipboardSyncClient(Context context, boolean filesEnabled, Consumer<JSONObject> events) {
+    public ClipboardSyncClient(Context context, boolean filesEnabled, boolean bulkEnabled, Consumer<JSONObject> events) {
         this.events = events;
         this.filesEnabled = filesEnabled;
-        this.files = new ClipboardFileTransfer(context, event -> main.post(() -> { if (!closed) events.accept(event); }));
+        this.files = new ClipboardFileTransfer(context, event -> main.post(() -> { if (!closed && !cancelledFiles.contains(event.optString("id"))) events.accept(event); }), android.os.SystemClock::elapsedRealtime, bulkEnabled ? 32 : ClipboardFilePolicy.WINDOW, value -> Log.i(TAG, value));
         this.args = new Shizuku.UserServiceArgs(new ComponentName(context.getPackageName(), ClipboardBridgeService.class.getName()))
             .daemon(false)
             .processNameSuffix("clipboard_bridge")
@@ -114,10 +116,35 @@ public final class ClipboardSyncClient implements AutoCloseable {
             Log.e(TAG, "unexpected error during poll", failure);
         }
     }
+    public void bulkFailed() {
+        if (closed || !filesEnabled) return;
+        try { work.execute(() -> { if (!closed) files.bulkFailed(); }); }
+        catch (java.util.concurrent.RejectedExecutionException ignored) {}
+    }
+    public void canReplayFile(String id, Consumer<Boolean> done) {
+        try { work.execute(() -> {
+            boolean allowed = false;
+            try { allowed = !closed && !cancelledFiles.contains(id) && remote != null && files.canReplay(id, remote); }
+            catch (Exception ignored) {}
+            final boolean result = allowed;
+            main.post(() -> done.accept(result));
+        }); } catch (java.util.concurrent.RejectedExecutionException ignored) { main.post(() -> done.accept(false)); }
+    }
+    public void cancelFile(String id) {
+        if (closed) return;
+        files.requestCancel(id);
+        // Stop queued receive/apply work and already-posted send callbacks immediately.
+        synchronized (cancelledOrder) {
+            if (cancelledFiles.add(id)) cancelledOrder.addLast(id);
+            if (cancelledOrder.size() > 128) cancelledFiles.remove(cancelledOrder.removeFirst());
+        }
+        try { work.execute(() -> { if (!closed) files.cancel(id); }); }
+        catch (java.util.concurrent.RejectedExecutionException ignored) {}
+    }
     public void fileEvent(JSONObject event) {
         if (closed || !filesEnabled) return;
         try { work.execute(() -> {
-            if (closed) return;
+            if (closed || cancelledFiles.contains(event.optString("id"))) return;
             try {
                 if (remote != null && ShizukuDisplayClient.authorized()) files.receive(event, remote);
             } catch (Exception failure) {
@@ -150,9 +177,12 @@ public final class ClipboardSyncClient implements AutoCloseable {
         try { Shizuku.unbindUserService(args, connection, false); } catch (RuntimeException ignored) {}
     }
     @Override public void close() {
+        if (closed) return;
         closed = true; remote = null;
         main.removeCallbacksAndMessages(null);
-        work.shutdownNow();
+        files.requestCancel("*");
+        work.execute(files::reset);
+        work.shutdown();
         main.post(this::unbind);
     }
 }

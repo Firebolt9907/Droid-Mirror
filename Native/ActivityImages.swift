@@ -14,6 +14,11 @@ final class ActivityImages {
     private var attemptedAssets = Set<String>()
     private var cache = [String: Data]()
     private var encodedCache = [String: String]()
+    // Custom-node positions and the aggregate revision can change when leader
+    // panels rotate. A logo's own revision still identifies its cached artwork.
+    private let nodeAssets: NSCache<NSString, NSString> = {
+        let cache = NSCache<NSString, NSString>(); cache.countLimit = 512; return cache
+    }()
     var cachedAssetCount: Int { cache.count }
     private var order = [String]()
     private var cacheBytes = 0
@@ -23,7 +28,7 @@ final class ActivityImages {
     static func validField(_ field: String) -> Bool {
         if ["appIcon", "activityIcon", "contactImage", "contentImage", "progressStartIcon", "progressEndIcon", "progressTrackerIcon"].contains(field) { return true }
         let pieces = field.split(separator: "/")
-        return pieces.count == 3 && pieces[0] == "customNodes" && pieces[2] == "image" && Int(pieces[1]).map { (0..<24).contains($0) } == true
+        return pieces.count == 3 && pieces[0] == "customNodes" && pieces[2] == "image" && Int(pieces[1]).map { (0..<32).contains($0) } == true
     }
     private static func image(_ field: String, in event: [String: Any]) -> String? {
         if !field.contains("/") { return event[field] as? String }
@@ -38,7 +43,7 @@ final class ActivityImages {
         nodes[index]["image"] = image; event["customNodes"] = nodes
     }
     private static func signature(_ event: [String: Any]) -> String {
-        let fields = ["appIcon", "activityIcon", "contactImage", "contentImage", "progressStartIcon", "progressEndIcon", "progressTrackerIcon"] + (0..<24).map { "customNodes/\($0)/image" }
+        let fields = ["appIcon", "activityIcon", "contactImage", "contentImage", "progressStartIcon", "progressEndIcon", "progressTrackerIcon"] + (0..<32).map { "customNodes/\($0)/image" }
         let joined = (event["activityImageRevision"] as? String ?? "") + fields.map { $0 + ":" + (image($0, in: event) ?? "") }.joined(separator: "\n")
         return SHA256.hash(data: Data(joined.utf8)).map { String(format: "%02x", $0) }.joined()
     }
@@ -58,6 +63,15 @@ final class ActivityImages {
     }
     func rendered(_ id: String) -> [String: Any]? {
         guard var event = events[id] else { return nil }
+        if var nodes = event["customNodes"] as? [[String: Any]] {
+            for i in nodes.indices {
+                if let revision = nodes[i]["imageRevision"] as? String,
+                   let hash = nodeAssets.object(forKey: revision as NSString) as String?, let encoded = encodedCache[hash] {
+                    nodes[i]["image"] = encoded
+                }
+            }
+            event["customNodes"] = nodes
+        }
         for (field, hash) in manifests[id] ?? [:] {
             if let encoded = encodedCache[hash] { Self.set(field, image: encoded, in: &event) }
         }
@@ -66,7 +80,7 @@ final class ActivityImages {
     func remove(_ id: String) { events.removeValue(forKey: id); signatures.removeValue(forKey: id); manifests.removeValue(forKey: id); attempted.removeValue(forKey: id); retryVersions.removeValue(forKey: id) }
     func reconcile(_ ids: Set<String>) { for id in Array(events.keys) where !ids.contains(id) { remove(id) } }
     func suspend() { suspended = true; busy = nil; attempted.removeAll(); retryVersions.removeAll(); attemptedAssets.removeAll() }
-    func reset() { suspend(); events.removeAll(); signatures.removeAll(); manifests.removeAll(); cache.removeAll(); encodedCache.removeAll(); order.removeAll(); cacheBytes = 0 }
+    func reset() { suspend(); events.removeAll(); signatures.removeAll(); manifests.removeAll(); cache.removeAll(); encodedCache.removeAll(); nodeAssets.removeAllObjects(); order.removeAll(); cacheBytes = 0 }
     private func pump() {
         guard !suspended, busy == nil, let request else { return }
         for id in events.keys.sorted() {
@@ -83,8 +97,17 @@ final class ActivityImages {
                     }
                     if self.signatures[id] == signature, response?["success"] as? Bool == true,
                        (event["activityImageRevision"] == nil || response?["imageRevision"] as? String == event["activityImageRevision"] as? String),
-                       let images = response?["images"] as? [String: String], images.count <= 31 {
+                       let images = response?["images"] as? [String: String], images.count <= 39 {
                         self.manifests[id] = images.filter { Self.validField($0.key) && $0.value.count == 64 && $0.value.allSatisfy { "0123456789abcdef".contains($0) } }
+                        if let nodes = self.events[id]?["customNodes"] as? [[String: Any]] {
+                            for (field, hash) in self.manifests[id] ?? [:] {
+                                let parts = field.split(separator: "/")
+                                if parts.count == 3, parts[0] == "customNodes", let index = Int(parts[1]), nodes.indices.contains(index),
+                                   let revision = nodes[index]["imageRevision"] as? String, revision.count == 64 {
+                                    self.nodeAssets.setObject(hash as NSString, forKey: revision as NSString)
+                                }
+                            }
+                        }
                         if let updated = self.rendered(id) { self.onUpdate?(updated) }
                     }
                     self.pump()

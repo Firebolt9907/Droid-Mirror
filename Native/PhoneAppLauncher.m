@@ -1,14 +1,30 @@
 #import <AppKit/AppKit.h>
 
+static NSString *const Receiver = @"Contents/Helpers/DroidMirror Notifications.app";
+
+// Older copies share app.droidmirror.mac but predate droidmirror-app.
+static BOOL HandlesLaunch(NSURL *host) {
+    if (!host) return NO;
+    NSBundle *receiver = [NSBundle bundleWithURL:[host URLByAppendingPathComponent:Receiver]];
+    for (NSDictionary *type in receiver.infoDictionary[@"CFBundleURLTypes"])
+        if ([type[@"CFBundleURLSchemes"] containsObject:@"droidmirror-app"]) return YES;
+    return NO;
+}
+
 // Identical tiny executable in every generated app; destination lives in its plist.
 int main(void) {
     @autoreleasepool {
         NSDictionary *info = NSBundle.mainBundle.infoDictionary;
         NSURL *url = [NSURL URLWithString:info[@"DroidMirrorLaunchURL"] ?: @""];
-        NSURL *host = [NSWorkspace.sharedWorkspace URLForApplicationWithBundleIdentifier:@"app.droidmirror.mac"];
-        if (!host) host = [NSURL fileURLWithPath:info[@"DroidMirrorHostPath"] ?: @""];
-        NSURL *receiver = [host URLByAppendingPathComponent:@"Contents/Helpers/DroidMirror Notifications.app"];
-        if (![url.scheme isEqual:@"droidmirror-app"] || ![NSFileManager.defaultManager fileExistsAtPath:receiver.path]) return 1;
+        if (![url.scheme isEqual:@"droidmirror-app"]) return 1;
+        // Prefer the host that wrote this shortcut over LaunchServices' pick.
+        NSMutableArray<NSURL *> *candidates = [NSMutableArray array];
+        if ([info[@"DroidMirrorHostPath"] length]) [candidates addObject:[NSURL fileURLWithPath:info[@"DroidMirrorHostPath"]]];
+        [candidates addObjectsFromArray:[NSWorkspace.sharedWorkspace URLsForApplicationsWithBundleIdentifier:@"app.droidmirror.mac"]];
+        NSURL *host = nil;
+        for (NSURL *candidate in candidates) if (HandlesLaunch(candidate)) { host = candidate; break; }
+        if (!host) return 1;
+        NSURL *receiver = [host URLByAppendingPathComponent:Receiver];
         NSWorkspaceOpenConfiguration *configuration = [NSWorkspaceOpenConfiguration configuration];
         configuration.activates = NO;
         __block BOOL done = NO;

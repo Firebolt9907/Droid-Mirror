@@ -82,8 +82,12 @@
 @property(nonatomic) NSUInteger requests;
 @property(nonatomic) uint64_t received;
 @property(nonatomic, strong) NSData *sent;
+@property(nonatomic) BOOL awaitingUnlockDecision;
+@property(nonatomic) NSUInteger unlockAnswers;
+@property(nonatomic) BOOL unlockAllowed;
 @end
 @implementation DMVideoAckBLE
+- (void)resolveUnlockDecision:(BOOL)allowed { ++_unlockAnswers; _unlockAllowed=allowed; }
 - (BOOL)acknowledgeVideo:(uint64_t)count { ++_requests; _received=count; return YES; }
 - (BOOL)send:(NSData *)bytes { self.sent=[bytes copy]; return YES; }
 @end
@@ -209,11 +213,65 @@ static void TestWirelessStartupAppearance(void) {
 static CBMutableService *RecoveryService(void) {
     CBMutableService *service=[[CBMutableService alloc] initWithType:[CBUUID UUIDWithString:DMInputService] primary:YES];
     NSMutableArray *attributes=[NSMutableArray array];
-    for (NSString *uuid in @[DMInputCharacteristic,DMInputProof,DMInputReturn,DMInputKey,DMInputClock,DMInputResume,DMInputReplay])
+    for (NSString *uuid in @[DMInputCharacteristic,DMInputProof,DMInputReturn,DMInputKey,DMInputClock,DMInputResume,DMInputReplay,DMInputUnlockDecision])
         [attributes addObject:[[CBMutableCharacteristic alloc] initWithType:[CBUUID UUIDWithString:uuid]
             properties:CBCharacteristicPropertyRead|CBCharacteristicPropertyWrite value:nil
             permissions:CBAttributePermissionsReadable|CBAttributePermissionsWriteable]];
     service.characteristics=attributes; return service;
+}
+
+static void TestUnlockStartupDecision(void) {
+    const char *previous=getenv("DROIDMIRROR_ALLOW_UNLOCK");
+    NSString *saved=previous ? [NSString stringWithUTF8String:previous] : nil;
+    setenv("DROIDMIRROR_ALLOW_UNLOCK","defer",1); assert(DMUnlockDecisionFromEnvironment()==-1);
+    setenv("DROIDMIRROR_ALLOW_UNLOCK","1",1); assert(DMUnlockDecisionFromEnvironment()==1);
+    setenv("DROIDMIRROR_ALLOW_UNLOCK","0",1); assert(DMUnlockDecisionFromEnvironment()==0);
+    setenv("DROIDMIRROR_ALLOW_UNLOCK","yes",1); assert(DMUnlockDecisionFromEnvironment()==0);
+    unsetenv("DROIDMIRROR_ALLOW_UNLOCK"); assert(DMUnlockDecisionFromEnvironment()==0);
+    for (NSString *decision in @[@"0", @"1", @"defer-0", @"defer-1"]) {
+        BOOL deferred=[decision hasPrefix:@"defer-"];
+        NSInteger allowed=[[decision substringFromIndex:deferred ? 6 : 0] integerValue];
+        DMRecoveryTransport *ble=[DMRecoveryTransport new];
+        ble.unlockDecision=deferred ? -1 : allowed;
+        DMStartupPeripheral *peer=[DMStartupPeripheral new];
+        ble.peripheral=(CBPeripheral *)peer; ble.pending=[DMBleInputQueue new];
+        ble.pairingKey=[NSMutableData dataWithLength:32]; ble.sessionNonce=[NSMutableData dataWithLength:32];
+        CBMutableCharacteristic *nonce=[[CBMutableCharacteristic alloc] initWithType:[CBUUID UUIDWithString:DMInputKey]
+            properties:CBCharacteristicPropertyRead value:ble.sessionNonce permissions:CBAttributePermissionsReadable];
+        ble.nonceCharacteristic=nonce;
+        [ble peripheral:(CBPeripheral *)peer didUpdateValueForCharacteristic:nonce error:nil];
+        ble.input=RecoveryService().characteristics[0];
+        ble.ready=YES; ble.sequence=1; ble.startupAuthorizationPending=YES;
+        ble.returnIndications=YES; ble.drainEnabled=YES;
+        NSUInteger writes=peer.writes;
+        if (deferred) {
+            // Connection is authenticated, but no record (heartbeat or input)
+            // leaves until the host answers; a second answer cannot override it.
+            [ble.pending acknowledgeVideo:1];
+            [ble drain];
+            assert(peer.writes==writes && ble.awaitingUnlockDecision);
+            ble.queue=dispatch_queue_create("unlock-test",DISPATCH_QUEUE_SERIAL);
+            [ble resolveUnlockDecision:allowed==1];
+            [ble resolveUnlockDecision:allowed!=1];
+            dispatch_sync(ble.queue,^{});
+            assert(!ble.awaitingUnlockDecision);
+        } else [ble drain];
+        assert(peer.writes==writes+1 && !ble.startupAuthorizationPending);
+        DMBleInputKeys keys=[ble testKeys:NO]; uint8_t plain[6];
+        assert(peer.lastWrite.length==30 && dm_ble_input_open(&keys,1,peer.lastWrite.bytes,peer.lastWrite.length,plain));
+        const uint8_t expected[]={0x71,0,0,0,1,(uint8_t)allowed};
+        assert(!memcmp(plain,expected,sizeof(expected)));
+    }
+    if (saved) setenv("DROIDMIRROR_ALLOW_UNLOCK",saved.UTF8String,1);
+    else unsetenv("DROIDMIRROR_ALLOW_UNLOCK");
+    DMRecoveryTransport *legacy=[DMRecoveryTransport new];
+    DMStartupPeripheral *peer=[DMStartupPeripheral new]; legacy.peripheral=(CBPeripheral *)peer;
+    CBMutableService *service=RecoveryService();
+    service.characteristics=[service.characteristics subarrayWithRange:NSMakeRange(0,7)];
+    legacy.inputService=service;
+    [legacy peripheral:(CBPeripheral *)peer didDiscoverCharacteristicsForService:service error:nil];
+    assert([legacy.failure containsString:@"Update the Android companion"] && peer.writes==0);
+    puts("Touch ID startup: deferred and sealed allow/deny decisions and legacy-companion rejection passed");
 }
 
 static void TestInputReadFairness(void) {
@@ -556,7 +614,7 @@ static void TestDelayedInputService(void) {
     [ble retryDiscoveryAtTime:ble.nextDiscovery];
     CBMutableService *fresh=[[CBMutableService alloc] initWithType:service.UUID primary:YES];
     NSMutableArray *attributes=[NSMutableArray array];
-    for (NSString *uuid in @[DMInputCharacteristic,DMInputProof,DMInputReturn,DMInputKey,DMInputClock,DMInputResume,DMInputReplay]) {
+    for (NSString *uuid in @[DMInputCharacteristic,DMInputProof,DMInputReturn,DMInputKey,DMInputClock,DMInputResume,DMInputReplay,DMInputUnlockDecision]) {
         [attributes addObject:[[CBMutableCharacteristic alloc] initWithType:[CBUUID UUIDWithString:uuid]
             properties:CBCharacteristicPropertyRead|CBCharacteristicPropertyWrite value:nil
             permissions:CBAttributePermissionsReadable|CBAttributePermissionsWriteable]];
@@ -996,8 +1054,32 @@ static void testLiveVideoRecovery(void) {
     puts("Live fallback: partial codec packet discarded, fresh session/frame delivered, cumulative offset validated");
 }
 
+// Touch ID is requested only once BLE authenticated; the startup watchdog
+// pauses while waiting, and one bounded answer (host or timeout) is relayed.
+static void TestDeferredUnlockDecisionBridge(void) {
+    for (int answer=0; answer<3; ++answer) {
+        DMStartupBridge *bridge=[DMStartupBridge new];
+        DMVideoAckBLE *ble=[DMVideoAckBLE new]; ble.awaitingUnlockDecision=YES;
+        bridge.ble=(DMBleInputTransport *)ble; bridge.listener=-1; bridge.l2capReady=YES;
+        [bridge announceReady]; assert(!bridge.unlockDecisionRequestedAt); // BLE not authenticated.
+        ble.ready=YES;
+        [bridge announceReady];
+        NSTimeInterval asked=bridge.unlockDecisionRequestedAt; assert(asked>0);
+        [bridge holdStartupForUnlockDecisionAtTime:asked+20];
+        assert(bridge.lastData==asked+20 && ble.unlockAnswers==0);
+        if (answer<2) [bridge resolveUnlockDecision:answer==1 reason:"test"];
+        else [bridge holdStartupForUnlockDecisionAtTime:asked+31];
+        assert(ble.unlockAnswers==1 && ble.unlockAllowed==(answer==1));
+        [bridge resolveUnlockDecision:YES reason:"late"];
+        [bridge holdStartupForUnlockDecisionAtTime:asked+60];
+        assert(ble.unlockAnswers==1 && bridge.lastData==asked+31*(answer==2)+20*(answer!=2));
+    }
+    puts("Touch ID startup: bridge prompts after authentication and relays one bounded answer");
+}
+
 int main(int argc, const char *argv[]) {
     @autoreleasepool {
+        if (argc==2 && !strcmp(argv[1],"--unlock-only")) { TestUnlockStartupDecision(); return 0; }
         assert(DMInputPacketLimit(512,20)==128);
         assert(DMInputPacketLimit(512,182)==182);
         assert(DMInputPacketLimit(512,512)==512);
@@ -1021,6 +1103,8 @@ int main(int argc, const char *argv[]) {
         [earlyClient announceReady]; assert(!earlyClient.announcedReady);
         earlyClient.l2capReady = YES;
         [earlyClient announceReady]; assert(earlyClient.announcedReady);
+        assert(!earlyClient.unlockDecisionRequestedAt); // Not deferred: no host prompt.
+        TestDeferredUnlockDecisionBridge();
         DMClassicBridge *busyBridge = [DMClassicBridge new];
         [busyBridge receiveEvent:8];
         [busyBridge receiveEvent:8];
@@ -1029,6 +1113,7 @@ int main(int argc, const char *argv[]) {
         [busyBridge receiveEvent:10]; [busyBridge receiveEvent:10];
         assert(busyBridge.eventMask == 0x380); // PIN reasons survive beyond the old 8-bit mask.
         TestActiveServiceRecovery();
+        TestUnlockStartupDecision();
         TestInputReadFairness();
         TestIndicatedReturnsDoNotBlockInput();
         TestDelayedVideoAcknowledgement();

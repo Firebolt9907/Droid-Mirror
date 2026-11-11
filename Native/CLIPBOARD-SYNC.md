@@ -45,6 +45,56 @@ them. Each device keeps at most ten received files (under 50 MB); older entries 
 removed when another file arrives, and the OS may evict cache data sooner. Android
 exposes completed files through a read-only content provider with URI permissions.
 
+## Dedicated BLE file channel
+
+Updated peers negotiate `clipboardBulk: 1` (Android 10+). Clipboard text and readiness
+messages keep using the existing encrypted GATT channel. Files, images, their
+metadata, cumulative acknowledgments and cancellations use a dedicated LE L2CAP
+CoC. The channel opens on the first file operation, stays open without an extra
+heartbeat or idle polling, and closes on session replacement/disconnect, opt-out,
+lock/unavailable status or transport failure. No IP connection is used.
+
+Android advertises an ephemeral PSM and 32-byte token only over the authenticated
+GATT session. The socket avoids a new OS pairing prompt; application authentication
+and encryption are mandatory. HKDF-SHA256 derives independent 256-bit directional
+keys from the existing pairing key and token, with clipboard-specific labels.
+An encrypted hello/ready exchange precedes file events. Each length-prefixed
+record carries a strictly ordered 64-bit sequence and AES-GCM ciphertext/tag;
+nonces use direction prefixes and the sequence. A fresh offer creates new keys.
+Old-session callbacks cannot attach to a newer channel.
+
+Chunk bodies carry the transfer UUID, byte offset and raw bytes, eliminating both
+Base64 layers on the L2CAP wire. Metadata is bounded JSON inside the same AEAD
+record. The channel rejects text, media and other unrelated command types.
+Unsent data is bounded to 256 KiB, records to 64 KiB, channel authentication to ten
+seconds and blocked writes to sixty seconds. Existing file size, offset, clipboard
+privacy and completion checks remain in force. Opening an idle channel alone does
+not replay pre-existing clipboard contents.
+
+If a bulk channel fails, each source retains its bounded file snapshot and may
+replay it twice, after approximately one and three seconds. Before replay the Mac
+checks the original pasteboard change count; Android checks its original clipboard
+token. Both must still be ready in the same authenticated subscription. A changed
+clipboard, lock, disconnect, opt-out or exhausted retries discards the pending
+replay. Each retry starts at offset zero with a fresh transfer ID and fresh channel
+authentication. A receiver may already have applied a file whose final ACK was
+lost; replay is allowed and does not constitute exactly-once delivery.
+
+`bash Native/test-clipboard-bulk.sh` exercises actual Swift/Android encryption,
+raw binary records, Unicode metadata, wrong keys/tokens, replay/tampering, message
+allowlisting and bounds. It also tests the real Mac stream state machine with
+partial I/O, backpressure, fragmented readiness, idle silence and teardown.
+`bash Native/test-clipboard-sync.sh` covers unchanged-source replay, fresh transfer
+IDs, retry limits, clipboard-change/lock/disconnect cancellation and the original
+clipboard behaviors. Hardware CoC compatibility and radio throughput still require
+installation and a live phone/Mac transfer; no speed claim is inferred from host tests.
+
+## Compatibility with older peers
+
+Peers without `clipboardBulk` retain the existing GATT file transport. On bulk-capable
+peers, setup failure does not silently move file data back onto GATT. Text continues
+to work independently while a bulk transfer is retrying or unavailable.
+
 Files use a separately negotiated `clipboardFiles` capability, enabled in the
 clipboard subscription. Older companions continue to support text sync. File events
 (`clipboardFileBegin`, `clipboardFileChunk`, `clipboardFileAck`, `clipboardFileCancel`)
@@ -105,3 +155,200 @@ closed and open, Unicode, lock/unlock, Shizuku stop/restart, Bluetooth reconnect
 and disabling sync. Vendor restrictions on shell clipboard access may vary.
 End active mirror sessions gracefully before installing either updated component;
 this change does not make replacement during an active session seamless.
+
+L2CAP negotiates up to 32 chunks (96 KiB) per cumulative acknowledgement; legacy GATT remains capped at eight. Android writes each length-prefixed encrypted record in one socket write to avoid a separate tiny SDU for the length. Android checks clipboard generation at window boundaries and atomically when applying the completed file; chunk offsets and size bounds are checked on every chunk.
+
+For an authenticated L2CAP file transfer, Android requests the 2M PHY when supported. A GATT client attaches to the already connected peer solely to request `CONNECTION_PRIORITY_HIGH` while file IDs are active; it performs no discovery or clipboard I/O. Final cumulative ACKs and cancellations return the link to `BALANCED`. A 60-second active-only watchdog and channel teardown also release the request. Registration/parameter failures leave the encrypted file channel usable at its negotiated rate, without repeated connection attempts. The idle L2CAP socket sends no keepalive.
+
+Live Mac-to-phone measurement (2026-10-30): an unchanged 2,882,182-byte PNG
+completed and applied in 89,010 ms (32.4 decimal KB/s), with 2M PHY and an
+accepted HIGH request (15 ms interval, peripheral latency 1). The final ACK
+returned the request to BALANCED. Initial measurements before the radio request
+were about 19 KB/s; batching alone produced no material further gain in the full
+transfer. These are measured results on this device pair, not a general BLE
+throughput guarantee. A lock during an earlier test cancelled the partial file
+as intended. The installed build includes byte-count/timing diagnostics without
+image contents or filenames for these file-channel events.
+
+
+### Further BLE throughput investigation (2026-10-30)
+
+The measured 32.4 KB/s is not established as a BLE hardware ceiling. It is
+approximately 0.259 Mbps. A 2M PHY is an on-air bit rate, not application goodput:
+packet headers, acknowledgements, inter-frame spacing and idle radio time all
+consume capacity. Nordic documents about 1.32 Mbps GATT goodput and 1.44 Mbps raw
+LL throughput in an interference-free, single-connection setup with events filled
+with packets. Those embedded-controller figures are a reference, not a guarantee
+for Core Bluetooth and Android.
+
+At 15 ms, our measured goodput is about 486 application bytes per connection
+interval. This is consistent with roughly two full-size LL payloads per interval,
+but does not establish an actual packet count: retransmissions, pauses and
+fragmentation require a trace to distinguish. A short interval and a 2M PHY do
+not demonstrate that each event is filled with packets. Our earlier mostly-idle
+CPU sample also cannot distinguish host socket backpressure, L2CAP credit stalls
+or limited controller airtime.
+
+The next local diagnostics now include queued serialization cost, pending frames,
+wire byte counts, largest accepted stream write and backpressure observations.
+Android logs the negotiated socket RX/TX packet sizes at channel authentication.
+These are local counters only; they add no radio traffic or idle timer. They have
+been deployed and measured with the independent
+[locked-phone synthetic benchmark](BLE-BULK-TEST.md). A 262,144-byte L2CAP run
+completed in 8,501 ms (30.8 KB/s), with a matching SHA-256 and the phone locked
+at both start and finish. This establishes a repeatable test without clipboard
+access; it does not establish the remaining radio bottleneck.
+
+Next experiments, in order:
+
+1. Sample the queue counters during a synthetic encrypted transfer, then compare
+   it with the full clipboard path. Persistent backlog and blocked output would
+   place the remaining bottleneck below the producer; empty queues would direct
+   attention back to application pacing.
+2. Capture HCI metadata during that transfer: actual LL lengths, L2CAP MTU/MPS,
+   credit replenishment, packet bursts, connection updates and retransmission
+   information where available. Normal service dumps did not supply this evidence.
+3. Compare equivalent, backpressured GATT writes without response and CoC using
+   the same negotiated PHY and parameters. Preserve authentication, sequencing and
+   bounds. This is a transport benchmark, not permission to move file traffic back
+   onto the existing text/control channel.
+4. Repeat with other transfers inactive to separate coexistence/scheduler effects.
+   Only if a trace identifies a CoC-specific limit should we prototype alternative
+   channel scheduling or reversed central/peripheral roles.
+
+Apple's Universal Clipboard is not a BLE-only throughput reference. Apple documents
+Handoff bootstrapping with BLE, upgrading larger transfers to encrypted peer-to-peer
+Wi-Fi, and Universal Clipboard using Handoff.
+
+Primary references:
+
+- [Apple Handoff security](https://support.apple.com/guide/security/handoff-security-secf78dbe639/web)
+- [Nordic measured BLE throughput](https://docs.nordicsemi.com/r/bundle/sds_s145/page/sds/s1xx/ble_data_throughput/ble_data_throughput.html)
+- [Android BluetoothSocket packet-size APIs](https://developer.android.com/reference/android/bluetooth/BluetoothSocket#getMaxReceivePacketSize())
+- [AOSP Bluetooth debugging and HCI snoop capture](https://source.android.com/docs/core/connect/bluetooth/verifying_debugging)
+
+The Android 36 SDK source also confirms that the normal application API does not
+expose a configurable CoC MPS/credit window or connection-event duration. The
+maximum packet-size builder setting is a hidden hardware-offload setting, and
+`requestLeConnectionUpdate` is hidden; these are not ordinary portable app knobs.
+
+## Parallel direct-IP clipboard race
+
+During an active file transfer, the Mac retries a failed IP lane up to twice,
+after one and three seconds, while BLE continues. Eight seconds without IP file
+events on an established lane also triggers this recovery. A fresh channel
+negotiation resets only that lane's partial copy and replays the retained file
+prefix. The source must still hold the same clipboard snapshot; on Android,
+new IP chunks wait until that check and prefix replay finish. Cancellation,
+completion, a new file or disconnect invalidates pending retries. There is no
+idle retry timer or additional freshness traffic. If IP remains unavailable,
+BLE still determines the transfer speed.
+
+Peers advertising `clipboardIroh: 1` negotiate `race: 1` in the authenticated
+clipboard subscription. Images/files immediately start the existing LE L2CAP
+path and independently bootstrap a dedicated iroh channel using BLE-delivered
+IP candidates and a fresh capability. Text still uses the existing GATT channel.
+A missing IP path does not delay L2CAP. Public relays and public discovery remain
+disabled; a reachable LAN/VPN IP route is required.
+
+The native iroh tunnel uses `droidmirror/clipboard/1` ALPN and separately derived
+`phone-clipboard`/`mac-clipboard` identities. Its length-prefixed AEAD records use
+an additional `DroidMirror clipboard Iroh v1` HMAC domain and fresh per-channel
+token, with independent send/receive sequences. The native endpoint and local
+abstract socket do not expose clipboard operations until this proof succeeds.
+Offers and address hints travel only over the existing authenticated BLE session.
+
+Both paths carry the same transfer UUID, size, name and SHA-256. Each receiver
+assembles each path independently, verifies the complete copy, then hands only
+the winning bytes to the existing clipboard receiver. The initial begin reaches
+that receiver immediately so its destination-change baseline is captured before
+the transfer, not after it. Existing source-change, destination-change, unlock,
+file-name, size, retry and atomic Android apply checks remain in force. Late
+copies and duplicate ACKs cannot apply the clipboard twice. After successful
+application, the losing connection is closed; the winning iroh channel remains
+available for subsequent files until its connection/session ends. Each new file
+also starts L2CAP again. Failure of one path does not cancel a live competing path.
+
+Queues are bounded: L2CAP retains its 256 KiB budget, the direct-IP channel has
+an 8 MB internal serialization budget, replay history is bounded to 7 MB, and
+each incoming copy remains below the existing decimal 5 MB file limit. Android
+also bounds callbacks waiting on the main handler to 128 records. A lagging
+L2CAP queue may be dropped while the iroh copy continues. Session teardown,
+clipboard disable, lock/unavailable status and subscription replacement discard
+both channels and the race state. While a full copy is buffered, local-only
+progress events keep the existing receive timeout current; these events never
+travel over either radio channel. Idle connections generate no new application
+heartbeat or clipboard freshness traffic.
+
+Validation: `bash Native/test-clipboard-race.sh` tests both production race
+implementations with either winner, late duplicates and independent copies. Swift
+also covers corrupt-copy rejection and local cancellation. Rust transport tests
+exercise a separately identified clipboard QUIC lane progressing with video
+blocked. `bash Native/test-clipboard-sync.sh` covers existing clipboard policies.
+The independent benchmark also accepts `--transport iroh` while the phone is
+locked; it uses the benchmark key domain and never accesses the clipboard.
+
+## File-sync Live Activity and cancellation
+
+Android shows one ongoing progress notification while a real clipboard image/file
+is sending or receiving. Android 16+ is asked to promote it to a Live Update;
+older releases (or devices where promotion is disabled) retain the ongoing
+notification with the same Cancel action. Text and idle connections create no
+activity. Progress comes from existing chunks/ACKs, counts the maximum received
+copy rather than adding race paths, and waits for the final apply ACK to finish.
+Updates are coalesced to at most four per second and only posted when the percent
+changes. There are no extra radio progress messages. Completion, errors,
+subscription replacement, lock and teardown remove the activity; an OS timeout
+also bounds a stale notification after an unexpected process failure.
+
+Cancel uses a private explicit immutable PendingIntent with a fresh operation
+capability. Each transfer also receives a fresh notification tag, so a previous
+activity dismissal cannot be reused as the next file's notification identity.
+Only progress for that same transfer reuses its tag. A stale button cannot cancel
+a newer transfer. The runtime marks
+queued clipboard work cancelled before closing both bulk paths, sends a
+session-authenticated `clipboardFileStop` on GATT, and suppresses replay of that
+source snapshot. The Mac accepts the stop only for its current race transfer ID.
+New clipboard changes remain eligible to sync. An apply already committed before
+the cancellation is received cannot be undone.
+
+Tests: `bash Native/test-clipboard-activity.sh`, `bash Native/test-clipboard-race.sh`
+and `bash Native/test-clipboard-sync.sh` cover progress, duplicate/late events,
+stale buttons, cancellation, replay suppression and destination protection.
+
+### Activity start latency
+
+File preparation now has its own authenticated `clipboardFilePrepare` control
+message, sent before clipboard data is materialized or a bulk channel opens.
+The phone posts the preparing activity before replying `clipboardFilePrepareReady`.
+The source then reads the snapshot, keeping the same transfer UUID so the eventual
+bulk begin upgrades that activity without replacing its Cancel capability. Failed
+or obsolete preparation sends `clipboardFilePrepareEnd`. Cancel is accepted for
+both a pending preparation ID and an active bulk race ID. Android source snapshots
+also announce preparation locally before their chunk-reading loop and check a
+thread-safe cancellation marker while reading.
+
+The Mac performs disk reads and TIFF-to-PNG encoding on a serial worker, then
+rechecks the clipboard change count, readiness and preparation ID on the main
+queue before sending. Pasteboard representations themselves are still requested
+on the main queue; an external owner delaying those reads is distinguished by
+local timestamps. Preparation and setup controls are prioritized ahead of ordinary
+metadata on both peers, before encryption/fragmentation. Existing message framing
+and authenticated sequence order remain intact. This addresses an observed
+14–17-message control backlog; it is not proof of the cause of every reported
+15-second pause.
+
+`clipboardDiagnostics` in the existing local receiver-status notification records
+bounded timestamps for detection, preparing acknowledgement, pasteboard reads,
+snapshot readiness and first/final data ACKs. `clipboardControlQueueMs` reports the
+last clipboard control's queue residence. These diagnostics add no BLE messages.
+The preparing handshake is per file, with a three-second fallback deadline, not
+an idle heartbeat. The long-delay case still requires an actual timed reproduction
+to establish its remaining cause or verify complete resolution.
+
+Post-install reproduction attempts confirmed the preparing notification was
+acknowledged 95–639 ms after Mac clipboard detection, with PNG materialization
+about 2 ms in those captures. Several roughly 2.8 MB screenshots then applied
+in about 3.2–3.7 seconds of receive time. The user confirmed the activity appeared
+quickly. This validates the prioritized start path in those attempts; the earlier
+intermittent 15-second pause was not reproduced with the new diagnostics.

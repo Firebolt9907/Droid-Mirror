@@ -15,6 +15,7 @@
 void sc_log(enum sc_log_level level, const char *format, ...) { abort(); }
 extern void DroidMirrorShowConnecting(SDL_Window *window);
 extern void DroidMirrorPumpPresentation(void);
+extern void DroidMirrorSessionFinished(int code);
 
 static BOOL reduceMotion;
 static NSUInteger readinessRequests;
@@ -273,6 +274,20 @@ int main(void) {
         for (NSView *view in native.contentView.subviews)
             assert(![view.identifier isEqualToString:@"DroidMirrorConnecting"]);
         assert(native.windowNumber == number);
+        // A session that ends in landscape returns the phone to portrait around
+        // its center, keeping its short edge and a finite portrait aspect lock.
+        assert(SDL_SetWindowAspectRatio(loading, 2.f, 2.f));
+        [native setFrame:NSMakeRect(200, 200, 760, 380) display:YES];
+        NSPoint landscapeCenter = NSMakePoint(NSMidX(native.frame), NSMidY(native.frame));
+        DroidMirrorSessionFinished(0);
+        assert(fabs(native.frame.size.width - 380) < 1 && fabs(native.frame.size.height - 760) < 1);
+        assert(fabs(NSMidX(native.frame) - landscapeCenter.x) < 1);
+        NSSize portraitAspect = native.contentAspectRatio;
+        assert(isfinite(portraitAspect.width) && portraitAspect.width > 0 && portraitAspect.height > portraitAspect.width);
+        // Portrait windows are left exactly as the user sized them.
+        NSRect portraitFrame = native.frame;
+        DroidMirrorSessionFinished(0);
+        assert(NSEqualRects(native.frame, portraitFrame));
         CGPathRelease(loadingPath);
         SDL_DestroyRenderer(renderer);
         SDL_DestroyWindow(video);

@@ -17,6 +17,46 @@ import Foundation
         precondition(subscription.updated(notifying: true) == .authenticate)
         precondition(subscription.updated(notifying: true) == .none)
 
+        // Sleep release: a live subscription is simply disabled.
+        var release = BLENotificationSubscription()
+        precondition(release.beginRelease(alreadyNotifying: true) == .disable)
+        precondition(release.updated(notifying: true) == .disable) // Late cached callback.
+        precondition(release.updated(notifying: false) == .release)
+        precondition(release.updated(notifying: false) == .none)
+        // A session cleared for sleep needs a real descriptor write, and the
+        // release must never go on to authenticate a new session.
+        precondition(release.beginRelease(alreadyNotifying: false) == .enable)
+        precondition(release.updated(notifying: true) == .disable)
+        precondition(release.updated(notifying: false) == .release)
+        precondition(release.updated(notifying: true) == .none)
+        // Normal subscription still works after a release.
+        precondition(release.begin(alreadyNotifying: false) == .enable)
+        precondition(release.updated(notifying: true) == .authenticate)
+
+        var backoff = BLEReconnectBackoff()
+        let delays = (0..<10).map { _ in backoff.next() }
+        precondition(delays == [0, 1, 2, 4, 8, 16, 32, 60, 60, 60], "\(delays)")
+        backoff.reset()
+        precondition(backoff.next() == 0)
+        for _ in 0..<100 { precondition(backoff.next() <= BLEReconnectBackoff.maximum) }
+
+        var power = BLESystemSleep()
+        precondition(!power.asleep && !power.didWake())
+        power.markQuiesced()
+        precondition(!power.quiesced, "An awake Mac has nothing to quiesce")
+        precondition(power.willSleep(now: 100) && power.asleep && !power.willSleep(now: 101))
+        power.markQuiesced()
+        precondition(power.quiesced, "Dark wakes within one sleep must not repeat the release")
+        // Dark wake: no input since sleeping, however long it has been awake.
+        precondition(!power.missedWake(now: 1000, secondsSinceUserInput: 901))
+        // Typing just before sleep, seen while the system is still going down.
+        precondition(!power.missedWake(now: 105, secondsSinceUserInput: 1))
+        // The user is back but the wake notification never arrived.
+        precondition(power.missedWake(now: 140, secondsSinceUserInput: 2))
+        precondition(power.didWake() && !power.asleep && !power.quiesced)
+        precondition(!power.missedWake(now: 200, secondsSinceUserInput: 0))
+        precondition(power.willSleep(now: 300) && !power.quiesced, "Each sleep gets its own release")
+
         final class Service { let uuid = "same-service" }
         let stale = Service(), live = Service()
         var candidates = BLEServiceCandidates<Service>()
@@ -79,6 +119,13 @@ import Foundation
         precondition(queue.append(["type": "appCatalogRequest"], deadline: 60))
         precondition(queue.append(["type": "appLaunch"], deadline: 60))
         precondition(queue.next(now: 1)!.object["type"] as? String == "appLaunch")
+        for type in ["clipboardFilePrepare", "clipboardBulkOpen", "clipboardIrohOpen", "clipboardFileStop"] {
+            var setup = BLEOutboundQueue()
+            for _ in 0..<17 { precondition(setup.append(["type": "mediaState"], deadline: 60)) }
+            precondition(setup.append(["type": type], deadline: 60))
+            precondition(setup.next(now: 1)!.object["type"] as? String == type)
+        }
+
         precondition(queue.next(now: 1)!.object["type"] as? String == "appIconRequest")
         precondition(queue.next(now: 1)!.object["type"] as? String == "appCatalogRequest")
         precondition(queue.append(["type": "openLink"], deadline: 10))

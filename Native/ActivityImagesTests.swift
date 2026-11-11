@@ -25,6 +25,52 @@ import ImageIO
     static func main() {
         let data = png(width: 96, height: 96)
         let hash = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        let logos = ActivityImages()
+        let logoRevision = String(repeating: "a", count: 64)
+        var logoIndex = 0, logoReady = false, logoManifests = 0
+        var logoSource: [String: Any] = ["id": "game", "version": "v1", "activityImageRevision": "panel-one",
+            "customNodes": [["kind": "image", "imageRevision": logoRevision]]]
+        logos.request = { command, reply in DispatchQueue.main.async {
+            if command["type"] as? String == "activityImageManifestRequest" {
+                logoManifests += 1
+                reply(["success": true, "imageRevision": command["imageRevision"]!, "images": ["customNodes/\(logoIndex)/image": hash]])
+            } else {
+                let offset = command["offset"] as! Int
+                let end = min(data.count, offset + 768)
+                reply(["success": true, "asset": hash, "offset": offset, "total": data.count,
+                       "data": data.subdata(in: offset..<end).base64EncodedString()])
+            }
+        } }
+        logos.onUpdate = { event in
+            let nodes = event["customNodes"] as! [[String: Any]]
+            logoReady = nodes[logoIndex]["image"] as? String == data.base64EncodedString()
+        }
+        _ = logos.observe(logoSource); spin { logoReady }
+        let logoBytes = logos.transferredBytes
+        // A rotating leader panel moves the same logo and changes the aggregate revision.
+        logoIndex = 1; logoReady = false
+        logoSource["version"] = "v2"; logoSource["activityImageRevision"] = "panel-two"
+        logoSource["customNodes"] = [["kind": "text", "text": "Passing"], ["kind": "image", "imageRevision": logoRevision]]
+        let reused = logos.observe(logoSource)
+        precondition((reused["customNodes"] as! [[String: Any]])[1]["image"] as? String == data.base64EncodedString(),
+                     "Unchanged logos must hydrate immediately even when node indices and panel revision change")
+        precondition(reused["version"] as? String == "v2")
+        spin { logoManifests == 2 && logoReady }
+        precondition(logos.transferredBytes == logoBytes, "Panel changes cannot redownload unchanged team logos")
+        logoIndex = 31; logoReady = false
+        logoSource["activityImageRevision"] = "rich-five-set-panel"
+        var richNodes = Array(repeating: ["kind": "text", "text": "set"], count: 32)
+        richNodes[31] = ["kind": "image", "imageRevision": logoRevision]
+        logoSource["customNodes"] = richNodes
+        let rich = logos.observe(logoSource)
+        precondition((rich["customNodes"] as! [[String: Any]])[31]["image"] as? String == data.base64EncodedString())
+        spin { logoManifests == 3 && logoReady }
+        precondition(logos.transferredBytes == logoBytes)
+        logoSource["activityImageRevision"] = "new-artwork"
+        logoSource["customNodes"] = [["kind": "image", "imageRevision": String(repeating: "b", count: 64)]]
+        let changed = logos.observe(logoSource)
+        precondition((changed["customNodes"] as! [[String: Any]])[0]["image"] == nil, "Changed artwork cannot reuse a different logo")
+        logos.reset()
         let client = ActivityImages()
         var calls = [[String: Any]](), finished = false
         var source: [String: Any] = ["id": "one", "version": "v1", "appIcon": "preview", "clockOffsetMs": 30000, "_clockReceivedAt": 1000.0]
@@ -97,7 +143,7 @@ import ImageIO
         _ = corrupt.observe(source); spin { chunks == 1 }
         RunLoop.current.run(until: Date().addingTimeInterval(0.02))
         precondition(corrupt.rendered("one")?["appIcon"] as? String == "preview" && chunks == 1)
-        precondition(!ActivityImages.validField("customNodes/24/image") && !ActivityImages.validField("title"))
+        precondition(ActivityImages.validField("customNodes/31/image") && !ActivityImages.validField("customNodes/32/image") && !ActivityImages.validField("title"))
         let bounded = ActivityImages()
         let fields = ["appIcon", "activityIcon", "contactImage", "contentImage", "progressStartIcon", "progressEndIcon", "progressTrackerIcon"] + (0..<24).map { "customNodes/\($0)/image" }
         var payloads = [String: Data](), maps = [String: [String: String]]()

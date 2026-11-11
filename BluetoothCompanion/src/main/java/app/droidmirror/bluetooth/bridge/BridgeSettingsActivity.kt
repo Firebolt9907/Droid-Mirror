@@ -78,6 +78,23 @@ class BridgeSettingsActivity : Activity() {
         layout.addView(TextView(this).apply {
             text = "If access is allowed but the listener stays disconnected, turn DroidMirror notification access off and on again. On your Mac, keep DroidMirror running and allow notifications for DroidMirror Notifications in System Settings → Notifications. Enable the phone app in DroidMirror Settings → Notifications. Test with a new incoming message; existing or silent notifications may appear only in Notification Center. Focus can silence banners. Shizuku and wireless debugging are not required to read and forward notifications."
         })
+        heading("Focus sync (optional)")
+        val focusPreferences = getSharedPreferences("focus_sync", MODE_PRIVATE)
+        for ((key, label) in listOf("macToPhone" to "Let Mac Focus change phone Do Not Disturb", "phoneToMac" to "Share phone Do Not Disturb with Mac")) {
+            layout.addView(Switch(this).apply {
+                text = label; isChecked = focusPreferences.getBoolean(key, false)
+                setOnCheckedChangeListener { _, enabled -> focusPreferences.edit().putBoolean(key, enabled).apply() }
+            })
+        }
+        button("Allow Do Not Disturb policy access") { startActivity(Intent(Settings.ACTION_NOTIFICATION_POLICY_ACCESS_SETTINGS)) }
+        layout.addView(TextView(this).apply { text = "Also enable each direction on the Mac. Mac Focus uses priority interruptions on this phone; Focus off releases DroidMirror’s DND request (other Android modes may stay active). Mac changes require your configured Shortcuts." })
+        heading("Phone Camera")
+        button("Arm Phone Camera for Mac apps") {
+            startActivity(Intent(this, ContinuityCameraPermissionActivity::class.java))
+        }
+        layout.addView(TextView(this).apply {
+            text = "Camera stays off until a Mac app selects DroidMirror Phone Camera. Stop sharing in the camera notification to disarm. Android requires this foreground consent after restarting the phone service."
+        })
         heading("Left-behind alerts (optional)")
         layout.addView(Switch(this).apply {
             text = "Mac left-behind alerts"
@@ -90,8 +107,27 @@ class BridgeSettingsActivity : Activity() {
         })
         layout.addView(TextView(this).apply {
             text = if (LeftBehindMonitor.supported(this@BridgeSettingsActivity))
-                "Uses the selected Mac Bluetooth beacon detector (formerly #2). Requires the background bridge and the paired Mac running DroidMirror. After first detecting the beacon nearby, recent movement and two failed scans can produce a reminder. Sleep, Bluetooth settings and interference can still cause false alerts."
+                "Uses the selected Mac Bluetooth beacon detector (formerly #2). Requires the background bridge and the paired Mac running DroidMirror. After first detecting the beacon nearby, recent movement and repeated missed scans can produce a reminder. Alert confirmation controls how much absence is required. Sleep, Bluetooth settings and interference can still cause false alerts."
             else "Left-behind alerts are unavailable: this phone has no significant-motion sensor."
+        })
+        val confirmation = Button(this).apply {
+            text = "Alert confirmation: ${LeftBehindMonitor.confirmationName(this@BridgeSettingsActivity)}"
+            setOnClickListener {
+                var selected = LeftBehindMonitor.confirmationMode(this@BridgeSettingsActivity)
+                val labels = app.droidmirror.bluetooth.LeftBehindBeaconState.PRESET_NAMES.mapIndexed { index, name ->
+                    "$name — ${app.droidmirror.bluetooth.LeftBehindBeaconState.PRESET_DESCRIPTIONS[index]}"
+                }.toTypedArray()
+                android.app.AlertDialog.Builder(this@BridgeSettingsActivity).setTitle("Alert confirmation")
+                    .setSingleChoiceItems(labels, selected) { _, which -> selected = which }
+                    .setPositiveButton("Save") { _, _ ->
+                        LeftBehindMonitor.setConfirmationMode(this@BridgeSettingsActivity, selected)
+                        text = "Alert confirmation: ${LeftBehindMonitor.confirmationName(this@BridgeSettingsActivity)}"
+                    }.setNegativeButton("Cancel", null).show()
+            }
+        }
+        layout.addView(confirmation)
+        layout.addView(TextView(this).apply {
+            text = "Balanced tolerates short signal dropouts. Conservative waits longer for more missed scans. These are confirmation rules, not probability scores. More confirmation reduces brief false alerts but delays real departure alerts. A sleeping Mac or a long radio blackout can still look absent. Any received beacon, even weak, cancels the miss streak."
         })
         layout.addView(Switch(this).apply {
             text = "Show left-behind reminders"
@@ -106,6 +142,7 @@ class BridgeSettingsActivity : Activity() {
         layout.addView(TextView(this).apply {
             text = "Off: a normal notification. On: an ongoing Live Activity. Both go away when the Mac beacon is detected again or you tap Dismiss. There is no timer. Android controls Live Activity promotion; older versions show an ongoing notification with the same behavior. This setting applies to the next reminder. Historical experiment records are retained below."
         })
+        button("Trusted places (pause detection at Home, etc.)") { startActivity(Intent(this, TrustedPlacesActivity::class.java)) }
         experimentStats = TextView(this).apply {
             text = LeftBehindMonitor.stats(this@BridgeSettingsActivity)
             setTextIsSelectable(true)

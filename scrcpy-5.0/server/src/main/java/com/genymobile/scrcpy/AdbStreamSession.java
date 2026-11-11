@@ -29,6 +29,7 @@ public final class AdbStreamSession implements AutoCloseable {
     private final java.util.concurrent.atomic.AtomicBoolean unlockRequested = new java.util.concurrent.atomic.AtomicBoolean();
     private final Handler main = new Handler(Looper.getMainLooper());
     private final CleanUp cleanUp;
+    private final boolean allowAutomaticUnlock;
     private boolean armed;
     private boolean localUse;
     private boolean closed;
@@ -62,6 +63,7 @@ public final class AdbStreamSession implements AutoCloseable {
                 boolean success = false;
                 try {
                     if (!unlockRequested.compareAndSet(false, true)) throw new IllegalStateException("Unlock already attempted");
+                    if (pin != null && !allowAutomaticUnlock) throw new IllegalStateException("Automatic unlock not authorized");
                     if (pin != null) unlock(pin);
                     success = true;
                 } catch (Exception error) { Ln.w("Automatic unlock failed; check the saved PIN in the Android app"); }
@@ -100,8 +102,9 @@ public final class AdbStreamSession implements AutoCloseable {
         }
     };
 
-    public AdbStreamSession(CleanUp cleanUp) throws java.io.IOException {
+    public AdbStreamSession(CleanUp cleanUp, boolean allowAutomaticUnlock) throws java.io.IOException {
         this.cleanUp = cleanUp;
+        this.allowAutomaticUnlock = allowAutomaticUnlock;
         // The app returns the PIN only over phone-local Binder. Nothing travels on
         // the Mac control channel, command line, environment or video stream.
         if (announce(true)) {
@@ -133,6 +136,7 @@ public final class AdbStreamSession implements AutoCloseable {
         extras.putBinder("owner", owner);
         extras.putLong("startedElapsed", SystemClock.elapsedRealtime());
         extras.putBoolean("prepareUnlock", prepareUnlock);
+        extras.putBoolean("allowAutomaticUnlock", allowAutomaticUnlock);
         intent.putExtras(extras);
         try {
             boolean started = ServiceManager.getActivityManager().startForegroundService(intent) != null;

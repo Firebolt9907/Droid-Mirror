@@ -209,6 +209,7 @@ single, double and triple clicks, and Control-to-Home uses the same shorter dela
 - One-click borderless mirror with 60 fps, zero video buffering, audio forwarding, and clipboard support
 - Insert Mac emojis into the focused phone text field with **Control–Command–Space** or **Edit → Emoji & Symbols** (ADB and Bluetooth). Emoji insertion updates the phone clipboard and preserves the Mac clipboard.
 - **Command–Backspace** deletes from the cursor to the start of the current line, using Shift–Home followed by Backspace.
+- **Option–Backspace** deletes the previous word, translating to Android Control–Backspace.
 - Optional device-screen-off, stay-awake, always-on-top, HEVC, and UHID keyboard modes
 - Native Back, Home, Recents, volume, and power controls (Esc for Back, Control for Home, double-tap Control for App Switcher)
 - Optional touch-style scrolling converts wheel/trackpad movement into real Android swipes, preserving overscroll and pull-to-refresh behavior

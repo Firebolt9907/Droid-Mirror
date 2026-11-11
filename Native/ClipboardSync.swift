@@ -1,3 +1,4 @@
+import CryptoKit
 import AppKit
 
 struct ClipboardTextPolicy {
@@ -14,17 +15,6 @@ struct ClipboardTextPolicy {
     }
 }
 
-struct ClipboardFilePolicy {
-    static let limit = 5_000_000
-    static let chunk = 3072
-    static let window = 8
-    static func allowed(_ size: Int) -> Bool { size >= 0 && size < limit }
-    static func nameAllowed(_ name: String) -> Bool {
-        !name.isEmpty && name != "." && name != ".." && name.utf8.count <= 240
-            && !name.unicodeScalars.contains { $0.value < 32 || $0.value == 127 || "/\\:".unicodeScalars.contains($0) }
-    }
-}
-
 /// Owned only by the background BLE receiver. Received files use a bounded private cache.
 final class ClipboardSync {
     static let enabledKey = "DroidMirror.clipboard.enabled"
@@ -33,6 +23,8 @@ final class ClipboardSync {
     private let pasteboard: NSPasteboard
     private var changeCount: Int
     private var ready = false
+    private var retryAttempts = 0
+    private var retryWork: DispatchWorkItem?
     private struct Transfer {
         var id: String
         var name: String
@@ -41,15 +33,102 @@ final class ClipboardSync {
         var offset = 0
         var window = 1
         var chunksSinceAck = 0
+        let startedAt = Date()
         var changedAt = Date()
     }
+    private var preparing: (id: String, change: Int, started: TimeInterval)?
+    private let preparationQueue = DispatchQueue(label: "app.droidmirror.clipboard-prepare", qos: .userInitiated)
     private var incoming: Transfer?
     private var outgoing: Transfer?
     private let fileCache: URL
+    private let retryDelay: (Int) -> TimeInterval
 
-    private(set) var status = "Clipboard mirroring off"
+    private var timeline = [String]()
+    var diagnostics: String { timeline.joined(separator: " | ") }
+    private func trace(_ phase: String) {
+        timeline.append("\(Int(Date().timeIntervalSince1970 * 1000)):\(phase)")
+        if timeline.count > 12 { timeline.removeFirst() }
+    }
+    var canInstallApk: Bool { enabled && ready && controller?.authenticated == true && controller?.supportsApkInstall == true }
+    var installStatus: ((_ message: String, _ finished: Bool, _ succeeded: Bool) -> Void)?
+    private var installing = false
+    private var installWait: (id: String, since: Date)?
+    private func finishInstall(_ message: String, success: Bool = false) {
+        guard installing else { return }
+        installing = false; installWait = nil
+        installStatus?(message, true, success)
+    }
+    @discardableResult func installApk(_ url: URL) -> Bool {
+        guard canInstallApk else {
+            installStatus?("Update the DroidMirror companion and make sure Shizuku is running", true, false); return false
+        }
+        guard !installing, preparing == nil, incoming == nil, outgoing == nil else {
+            installStatus?("A file transfer is already active. Try again when it finishes.", true, false); return false
+        }
+        guard ApkInstallPolicy.nameAllowed(url.lastPathComponent) else {
+            installStatus?("Choose a readable .apk file smaller than 256 MiB", true, false); return false
+        }
+        installing = true; changeCount = pasteboard.changeCount
+        let id = UUID().uuidString
+        preparing = (id, changeCount, ProcessInfo.processInfo.systemUptime)
+        status = "Preparing APK…"
+        controller?.prepareClipboardFile(id) { [weak self] in
+            guard let self, self.preparing?.id == id else { return }
+            self.preparationQueue.async { [weak self] in
+                let access = url.startAccessingSecurityScopedResource()
+                defer { if access { url.stopAccessingSecurityScopedResource() } }
+                var snapshot: Data?
+                do {
+                    let info = try url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey])
+                    guard info.isRegularFile == true, info.isSymbolicLink != true,
+                          let size = info.fileSize, ApkInstallPolicy.allowed(size) else { throw CocoaError(.fileReadCorruptFile) }
+                    // A private copy freezes the bytes before mapping and hashing them.
+                    let copy = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+                    defer { try? FileManager.default.removeItem(at: copy) }
+                    try FileManager.default.copyItem(at: url, to: copy)
+                    let data = try Data(contentsOf: copy, options: .alwaysMapped)
+                    if data.count == size { snapshot = data }
+                } catch {}
+                let result = snapshot
+                DispatchQueue.main.async { self?.finishPreparation(id, data: result, name: url.lastPathComponent, error: "Choose a readable .apk file smaller than 256 MiB") }
+            }
+        }
+        return true
+    }
+    var dropStatus: ((String) -> Void)?
+    private var dropping = false
+    private(set) var status = "Clipboard mirroring off" {
+        didSet { if dropping { dropStatus?(status) }; if installing { installStatus?(status, false, false) } }
+    }
 
-    init(pasteboard: NSPasteboard = .general, fileCache: URL? = nil) {
+    /// Explicit drops snapshot a URL without replacing the user's pasteboard.
+    @discardableResult func sendDroppedFile(_ url: URL) -> Bool {
+        guard enabled, ready, controller?.authenticated == true,
+              controller?.supportsClipboardDownloads == true else {
+            dropStatus?("Enable clipboard sync, unlock the phone, and connect an updated companion."); return false
+        }
+        guard !installing, preparing == nil, outgoing == nil, incoming == nil else {
+            dropStatus?("A file transfer is already active. Try again when it finishes."); return false
+        }
+        dropping = true
+        changeCount = pasteboard.changeCount
+        let id = UUID().uuidString
+        preparing = (id, changeCount, ProcessInfo.processInfo.systemUptime)
+        status = "Preparing file for Downloads…"
+        controller?.prepareClipboardFile(id) { [weak self] in
+            guard let self, self.preparing?.id == id else { return }
+            self.preparationQueue.async { [weak self] in
+                let access = url.startAccessingSecurityScopedResource()
+                defer { if access { url.stopAccessingSecurityScopedResource() } }
+                let data = try? Self.readClipboardFile(url)
+                DispatchQueue.main.async { self?.finishPreparation(id, data: data, name: url.lastPathComponent) }
+            }
+        }
+        return true
+    }
+
+    init(pasteboard: NSPasteboard = .general, fileCache: URL? = nil, retryDelay: @escaping (Int) -> TimeInterval = { $0 == 1 ? 1 : 3 }) {
+        self.retryDelay = retryDelay
         self.fileCache = fileCache ?? FileManager.default.temporaryDirectory.appendingPathComponent("DroidMirror-Clipboard", isDirectory: true)
         self.pasteboard = pasteboard
         self.changeCount = pasteboard.changeCount
@@ -57,6 +136,7 @@ final class ClipboardSync {
         self.timer = timer
         RunLoop.main.add(timer, forMode: .common)
     }
+    private var fileWindow: Int { controller?.supportsClipboardBulk == true ? ClipboardFilePolicy.bulkWindow : ClipboardFilePolicy.window }
     private var enabled: Bool { NotificationRuntime.preferences.bool(forKey: Self.enabledKey) }
     func connected() {
         ready = false; resetFiles()
@@ -64,7 +144,7 @@ final class ClipboardSync {
         guard enabled else { status = "Clipboard mirroring off"; return }
         guard controller?.supportsClipboard == true else { status = "Clipboard needs an updated Android app"; return }
         status = "Starting clipboard mirroring…"
-        controller?.send(["type": "clipboardSubscribe", "enabled": true, "files": controller?.supportsClipboardFiles == true])
+        controller?.send(["type": "clipboardSubscribe", "enabled": true, "files": controller?.supportsClipboardFiles == true, "bulk": controller?.supportsClipboardBulk == true ? 1 : 0, "race": 1])
     }
     func disconnected() {
         ready = false; resetFiles(); changeCount = pasteboard.changeCount
@@ -80,14 +160,23 @@ final class ClipboardSync {
     func receive(_ event: [String: Any]) {
         guard enabled, controller?.authenticated == true else { return }
         switch event["type"] as? String {
+        case "clipboardApkInstallResult":
+            guard installing, let id = event["id"] as? String,
+                  id == outgoing?.id || id == installWait?.id else { return }
+            outgoing = nil
+            finishInstall(event["message"] as? String ?? "APK installation failed", success: event["ok"] as? Bool == true)
         case "clipboardStatus":
             let available = event["status"] as? String == "ready"
             if available && !ready { changeCount = pasteboard.changeCount }
             if !available { resetFiles() }
             ready = available
+            controller?.setClipboardBulkReady(available)
             if available { status = "Clipboard mirroring ready" }
             else if event["status"] as? String == "locked" { status = "Clipboard paused while phone is locked" }
             else { status = "Clipboard waiting for Shizuku" }
+        case "clipboardFileRaceProgress":
+            if ready, incoming?.id == event["id"] as? String { incoming?.changedAt = Date() }
+        case "clipboardBulkFailed": bulkFailed()
         case "clipboardFileBegin", "clipboardFileChunk", "clipboardFileAck", "clipboardFileCancel":
             guard ready, controller?.supportsClipboardFiles == true else { return }
             receiveFile(event)
@@ -112,6 +201,7 @@ final class ClipboardSync {
             status = enabled ? "Clipboard waiting for Bluetooth" : "Clipboard mirroring off"
             return
         }
+        if let wait = installWait, Date().timeIntervalSince(wait.since) > 150 { resetFiles(notify: true) }
         if let incoming, Date().timeIntervalSince(incoming.changedAt) > 60 { resetFiles(notify: true) }
         if let outgoing, Date().timeIntervalSince(outgoing.changedAt) > 60 { resetFiles(notify: true) }
         guard ready, pasteboard.changeCount != changeCount else { return }
@@ -121,82 +211,157 @@ final class ClipboardSync {
         let excluded = ["org.nspasteboard.ConcealedType", "org.nspasteboard.TransientType", "org.nspasteboard.AutoGeneratedType"]
         guard !excluded.contains(where: { pasteboard.types?.contains(NSPasteboard.PasteboardType($0)) == true }) else { return }
         if pasteboard.types?.contains(.fileURL) == true {
-            sendFile(); return
+            prepareFile(image: false); return
         }
         if pasteboard.types?.contains(.png) == true || pasteboard.types?.contains(.tiff) == true {
-            sendImage(); return
+            prepareFile(image: true); return
         }
         guard let text = pasteboard.string(forType: .string), ClipboardTextPolicy.allowed(text) else { return }
         if controller?.send(["type": "clipboardSet", "text": text]) != true { status = "Clipboard connection interrupted" }
     }
     private func resetFiles(notify: Bool = false) {
+        retryWork?.cancel(); retryWork = nil; retryAttempts = 0
+        if let preparing { controller?.finishClipboardPreparation(preparing.id, cancelled: true); self.preparing = nil }
         if notify {
+            if let wait = installWait { controller?.sendClipboardFile(["type": "clipboardFileCancel", "id": wait.id]) }
             for transfer in [incoming, outgoing].compactMap({ $0 }) {
-                controller?.send(["type": "clipboardFileCancel", "id": transfer.id])
+                controller?.sendClipboardFile(["type": "clipboardFileCancel", "id": transfer.id])
             }
         }
+        if dropping { dropStatus?("File transfer ended before completion."); dropping = false }
+        finishInstall("APK installation cancelled or connection interrupted")
         incoming = nil; outgoing = nil
     }
-    private func sendFile() {
+    private func prepareFile(image: Bool) {
         guard controller?.supportsClipboardFiles == true else { status = "File clipboard needs an updated Android app"; return }
-        guard let urls = pasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL],
-              urls.count == 1, let url = urls.first else { status = "Copy one file at a time"; return }
-        do {
-            let info = try url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey])
-            guard info.isRegularFile == true, info.isSymbolicLink != true,
-                  ClipboardFilePolicy.nameAllowed(url.lastPathComponent) else { status = "Clipboard file is unsupported"; return }
-            guard let size = info.fileSize, ClipboardFilePolicy.allowed(size) else { status = "Clipboard files must be less than 5 MB"; return }
-            let file = try FileHandle(forReadingFrom: url)
-            defer { try? file.close() }
-            // Read at most the limit even if a source grows after its size was checked.
-            var data = Data()
-            while data.count < ClipboardFilePolicy.limit {
-                guard let chunk = try file.read(upToCount: min(65_536, ClipboardFilePolicy.limit - data.count)), !chunk.isEmpty else { break }
-                data.append(chunk)
+        let id = UUID().uuidString
+        preparing = (id, changeCount, ProcessInfo.processInfo.systemUptime)
+        status = "Preparing clipboard file…"
+        trace("detected \(id.prefix(8))")
+        NSLog("DroidMirror clipboard preparation detected id=%@", id)
+        controller?.prepareClipboardFile(id) { [weak self] in
+            guard let self, self.preparing?.id == id else { return }
+            guard self.enabled, self.ready, self.controller?.authenticated == true, self.pasteboard.changeCount == self.preparing?.change else {
+                self.finishPreparation(id, data: nil, name: "", error: "Clipboard changed"); return
             }
-            guard data.count == size, ClipboardFilePolicy.allowed(data.count) else { status = "Clipboard file changed or exceeds the size limit"; return }
-            sendFileData(data, name: url.lastPathComponent)
-        } catch { status = "Clipboard file could not be read" }
+            self.trace("prepare-ready \(id.prefix(8))")
+            if image {
+                self.trace("read-png-start")
+                if let png = self.pasteboard.data(forType: .png) {
+                    self.trace("read-png-end")
+                    self.finishPreparation(id, data: png.isEmpty ? nil : png, name: "Clipboard Image.png"); return
+                }
+                self.trace("read-tiff-start")
+                guard let tiff = self.pasteboard.data(forType: .tiff) else {
+                    self.finishPreparation(id, data: nil, name: "", error: "Clipboard image could not be read"); return
+                }
+                self.trace("read-tiff-end; encoding")
+                self.preparationQueue.async { [weak self] in
+                    let data = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:])
+                    DispatchQueue.main.async { self?.finishPreparation(id, data: data, name: "Clipboard Image.png") }
+                }
+            } else {
+                guard let urls = self.pasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL],
+                      urls.count == 1, let url = urls.first else {
+                    self.finishPreparation(id, data: nil, name: "", error: "Copy one file at a time"); return
+                }
+                self.preparationQueue.async { [weak self] in
+                    let data = try? Self.readClipboardFile(url)
+                    DispatchQueue.main.async { self?.finishPreparation(id, data: data, name: url.lastPathComponent) }
+                }
+            }
+        }
     }
-    private func sendImage() {
-        guard controller?.supportsClipboardFiles == true else { status = "Image clipboard needs an updated Android app"; return }
-        // Screenshots and Copy Image usually contain bitmap data, without a file URL.
-        let data: Data?
-        if let png = pasteboard.data(forType: .png) { data = png }
-        else if let tiff = pasteboard.data(forType: .tiff), let bitmap = NSBitmapImageRep(data: tiff) {
-            data = bitmap.representation(using: .png, properties: [:])
-        } else { data = nil }
-        guard let data, !data.isEmpty else { status = "Clipboard image could not be read"; return }
-        guard ClipboardFilePolicy.allowed(data.count) else { status = "Clipboard images must be less than 5 MB"; return }
-        sendFileData(data, name: "Clipboard Image.png")
+    private static func readClipboardFile(_ url: URL) throws -> Data {
+        let info = try url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey])
+        guard info.isRegularFile == true, info.isSymbolicLink != true, ClipboardFilePolicy.nameAllowed(url.lastPathComponent),
+              let size = info.fileSize, ClipboardFilePolicy.allowed(size) else { throw CocoaError(.fileReadUnsupportedScheme) }
+        let file = try FileHandle(forReadingFrom: url); defer { try? file.close() }
+        var data = Data()
+        while data.count < ClipboardFilePolicy.limit {
+            guard let chunk = try file.read(upToCount: min(65_536, ClipboardFilePolicy.limit - data.count)), !chunk.isEmpty else { break }
+            data.append(chunk)
+        }
+        guard data.count == size, ClipboardFilePolicy.allowed(data.count) else { throw CocoaError(.fileReadCorruptFile) }
+        return data
     }
-    private func sendFileData(_ data: Data, name: String) {
-        let transfer = Transfer(id: UUID().uuidString, name: name, size: data.count, data: data)
+    private func finishPreparation(_ id: String, data: Data?, name: String, error: String = "Clipboard files must be less than 5 MB and readable") {
+        guard let preparing, preparing.id == id else { return }
+        self.preparing = nil
+        trace("snapshot-ready \(id.prefix(8))")
+        let valid = enabled && ready && controller?.authenticated == true && pasteboard.changeCount == preparing.change
+        guard valid, let data, (installing ? ApkInstallPolicy.allowed(data.count) && ApkInstallPolicy.nameAllowed(name) : ClipboardFilePolicy.allowed(data.count) && ClipboardFilePolicy.nameAllowed(name)) else {
+            controller?.finishClipboardPreparation(id, cancelled: true); status = error; dropping = false; finishInstall(error); return
+        }
+        NSLog("DroidMirror clipboard preparation ready id=%@ bytes=%d elapsedMs=%d", id, data.count,
+              Int((ProcessInfo.processInfo.systemUptime - preparing.started) * 1000))
+        controller?.finishClipboardPreparation(id, cancelled: false)
+        sendFileData(data, name: name, id: id)
+    }
+    func canRetryFile(_ id: String) -> Bool {
+        enabled && ready && controller?.authenticated == true && pasteboard.changeCount == changeCount &&
+            (outgoing?.id == id || incoming?.id == id)
+    }
+    private func bulkFailed() {
+        if installing { resetFiles(notify: true); return }
+        incoming = nil
+        guard retryWork == nil else { return }
+        guard let transfer = outgoing, retryAttempts < 2, enabled, ready,
+              controller?.authenticated == true, pasteboard.changeCount == changeCount else {
+            resetFiles(); status = "Clipboard file transfer failed"; return
+        }
+        retryAttempts += 1
+        status = "Retrying clipboard file…"
+        let id = transfer.id
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.retryWork = nil
+            guard self.outgoing?.id == id, self.enabled, self.ready,
+                  self.controller?.authenticated == true, self.pasteboard.changeCount == self.changeCount else {
+                self.resetFiles(); return
+            }
+            self.sendFileData(transfer.data, name: transfer.name)
+        }
+        retryWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + retryDelay(retryAttempts), execute: work)
+    }
+    private func fileSendFailed() {
+        if controller?.supportsClipboardBulk == true { bulkFailed() } else { resetFiles() }
+    }
+    private func sendFileData(_ data: Data, name: String, id: String = UUID().uuidString) {
+        let transfer = Transfer(id: id, name: name, size: data.count, data: data)
         outgoing = transfer
-        if controller?.send(["type": "clipboardFileBegin", "id": transfer.id, "name": transfer.name, "size": transfer.size, "window": ClipboardFilePolicy.window]) != true { resetFiles(); return }
-        status = "Sending clipboard file…"
+        trace("bulk-begin \(transfer.id.prefix(8)) bytes=\(data.count)")
+        NSLog("DroidMirror clipboard send begin bytes=%d bulk=%d window=%d", data.count, controller?.supportsClipboardBulk == true ? 1 : 0, fileWindow)
+        var begin: [String: Any] = ["type": "clipboardFileBegin", "id": transfer.id, "name": transfer.name, "size": transfer.size, "window": fileWindow, "sha256": SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()]
+        if installing { begin["destination"] = "install" }
+        else if dropping { begin["destination"] = "downloads" }
+        if controller?.sendClipboardFile(begin) != true { fileSendFailed(); return }
+        status = installing ? "Sending APK…" : dropping ? "Sending file to Downloads…" : "Sending clipboard file…"
     }
     private func receiveFile(_ event: [String: Any]) {
         guard let id = event["id"] as? String, UUID(uuidString: id) != nil else { return }
         let type = event["type"] as? String
         if type == "clipboardFileCancel" {
+            if preparing?.id == id { preparing = nil; controller?.finishClipboardPreparation(id, cancelled: true) }
             if incoming?.id == id { incoming = nil }
             if outgoing?.id == id { outgoing = nil }
-            status = "Clipboard file transfer cancelled"
+            finishInstall("APK transfer cancelled by phone")
+            status = "Clipboard file transfer cancelled"; dropping = false
             return
         }
-        guard pasteboard.changeCount == changeCount else { resetFiles(notify: true); controller?.send(["type": "clipboardFileCancel", "id": id]); return }
+        guard pasteboard.changeCount == changeCount else { resetFiles(notify: true); controller?.sendClipboardFile(["type": "clipboardFileCancel", "id": id]); return }
         switch type {
         case "clipboardFileBegin":
             guard let size = event["size"] as? Int, ClipboardFilePolicy.allowed(size),
                   let name = event["name"] as? String, ClipboardFilePolicy.nameAllowed(name) else {
-                controller?.send(["type": "clipboardFileCancel", "id": id]); return
+                controller?.sendClipboardFile(["type": "clipboardFileCancel", "id": id]); return
             }
             resetFiles(notify: true)
             incoming = Transfer(id: id, name: name, size: size, data: Data())
-            incoming!.window = max(1, min(event["window"] as? Int ?? 1, ClipboardFilePolicy.window))
+            incoming!.window = max(1, min(event["window"] as? Int ?? 1, fileWindow))
             status = "Receiving clipboard file…"
-            if size == 0 { completeFile() } else { controller?.send(["type": "clipboardFileAck", "id": id, "offset": 0, "window": incoming!.window]) }
+            if size == 0 { completeFile() } else { controller?.sendClipboardFile(["type": "clipboardFileAck", "id": id, "offset": 0, "window": incoming!.window]) }
         case "clipboardFileChunk":
             guard incoming?.id == id else { return }
             guard event["offset"] as? Int == incoming!.data.count,
@@ -208,21 +373,28 @@ final class ClipboardSync {
             if incoming!.data.count == incoming!.size { completeFile() }
             else if incoming!.chunksSinceAck == incoming!.window {
                 incoming!.chunksSinceAck = 0
-                controller?.send(["type": "clipboardFileAck", "id": id, "offset": incoming!.data.count])
+                controller?.sendClipboardFile(["type": "clipboardFileAck", "id": id, "offset": incoming!.data.count])
             }
         case "clipboardFileAck":
             guard var transfer = outgoing, transfer.id == id else { return }
             guard event["offset"] as? Int == transfer.offset else { resetFiles(notify: true); return }
-            if transfer.offset == transfer.size { outgoing = nil; status = "Clipboard mirroring ready"; return }
+            if installing { status = "Sending APK: \(transfer.offset * 100 / max(1, transfer.size))%" }
+            if dropping { status = "Sending to Downloads: \(transfer.offset * 100 / max(1, transfer.size))%" }
+            NSLog("DroidMirror clipboard acknowledged bytes=%d elapsedMs=%d", transfer.offset, Int(Date().timeIntervalSince(transfer.startedAt) * 1000))
+            if installing && transfer.offset == transfer.size {
+                outgoing = nil; installWait = (id, Date()); status = "Installing APK on phone…"; return
+            }
+            if transfer.offset == transfer.size { trace("complete \(id.prefix(8))"); outgoing = nil; retryAttempts = 0; status = dropping ? "Saved to phone Downloads" : "Clipboard mirroring ready"; dropping = false; return }
             if transfer.offset == 0 {
-                transfer.window = max(1, min(event["window"] as? Int ?? 1, ClipboardFilePolicy.window))
+                trace("first-ack \(id.prefix(8))")
+                transfer.window = max(1, min(event["window"] as? Int ?? 1, fileWindow))
             }
             // Bound queued bulk data and wait for one cumulative acknowledgment.
             // A peer without window support keeps the original one-chunk protocol.
             for _ in 0..<transfer.window {
                 let end = min(transfer.offset + ClipboardFilePolicy.chunk, transfer.size)
                 let chunk = transfer.data.subdata(in: transfer.offset..<end)
-                guard controller?.send(["type": "clipboardFileChunk", "id": id, "offset": transfer.offset, "data": chunk.base64EncodedString().replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_")]) == true else { resetFiles(notify: true); return }
+                guard controller?.sendClipboardFile(["type": "clipboardFileChunk", "id": id, "offset": transfer.offset, "data": chunk.base64EncodedString().replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_")]) == true else { fileSendFailed(); return }
                 transfer.offset = end
                 if end == transfer.size { break }
             }
@@ -257,12 +429,12 @@ final class ClipboardSync {
             pasteboard.clearContents()
             guard pasteboard.writeObjects([item]) else { throw CocoaError(.fileWriteUnknown) }
             changeCount = pasteboard.changeCount
-            controller?.send(["type": "clipboardFileAck", "id": transfer.id, "offset": transfer.size])
+            controller?.sendClipboardFile(["type": "clipboardFileAck", "id": transfer.id, "offset": transfer.size])
             incoming = nil; status = "Clipboard mirroring ready"
         } catch {
             if let directory { try? manager.removeItem(at: directory) }
             resetFiles(notify: true); status = "Clipboard file could not be received"
         }
     }
-    func stop() { timer?.invalidate(); timer = nil; ready = false; resetFiles() }
+    func stop() { timer?.invalidate(); timer = nil; ready = false; resetFiles(); controller?.setClipboardBulkReady(false) }
 }

@@ -18,11 +18,13 @@ enum sc_device_msg_type {
     DEVICE_MSG_TYPE_UHID_OUTPUT,
     DEVICE_MSG_TYPE_CAMERA_CUTOUT,
     DEVICE_MSG_TYPE_SECURE_WINDOW_STATE,
+    DEVICE_MSG_TYPE_NAVIGATION_MODE,
 };
 
 struct sc_device_msg {
     enum sc_device_msg_type type;
     union {
+        uint8_t navigation_mode;
         struct {
             uint8_t state;
             uint32_t generation;

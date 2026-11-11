@@ -568,9 +568,15 @@ scrcpy(struct scrcpy_options *options) {
                 FILE *file = fopen(gate, "r");
                 if (file) {
                     int audio = fgetc(file);
+                    // The host answers Touch ID only after adb reached the phone.
+                    // Without this byte the launch environment's default stands.
+                    int unlock = fgetc(file);
                     fclose(file);
                     remove(gate);
                     if (audio == '0') { params.audio = options->audio = options->audio_playback = false; }
+                    if (unlock == '0' || unlock == '1') {
+                        setenv("DROIDMIRROR_ALLOW_UNLOCK", unlock == '1' ? "1" : "0", 1);
+                    }
                     break;
                 }
                 SDL_Event event;

@@ -103,7 +103,24 @@ enum ProcessRunner {
     private final class CompletionGate: @unchecked Sendable {
         private let lock = NSLock()
         private var completed = false
+        private var cancelled = false
         private var retainedProcess: Process?
+
+        var isCancelled: Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return cancelled
+        }
+
+        /// Task cancellation: stop the child so its termination handler resumes
+        /// the continuation. A process not yet launched is stopped after `run()`.
+        func cancel() {
+            lock.lock()
+            cancelled = true
+            let process = completed ? nil : retainedProcess
+            lock.unlock()
+            if process?.isRunning == true { process?.terminate() }
+        }
 
         func retain(_ process: Process) {
             lock.lock()
@@ -127,9 +144,10 @@ enum ProcessRunner {
         timeout: TimeInterval? = nil,
         input: Data? = nil
     ) async throws -> String {
-        try await withCheckedThrowingContinuation { continuation in
+        let gate = CompletionGate()
+        return try await withTaskCancellationHandler {
+          try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<String, Error>) in
             let process = Process()
-            let gate = CompletionGate()
             let outputURL = FileManager.default.temporaryDirectory
                 .appendingPathComponent("DroidMirror-command-\(UUID().uuidString).log")
             FileManager.default.createFile(atPath: outputURL.path, contents: nil)
@@ -152,7 +170,9 @@ enum ProcessRunner {
                 let data = (try? Data(contentsOf: outputURL)) ?? Data()
                 try? FileManager.default.removeItem(at: outputURL)
                 let text = String(decoding: data, as: UTF8.self)
-                if process.terminationStatus == 0 {
+                if gate.isCancelled {
+                    continuation.resume(throwing: CancellationError())
+                } else if process.terminationStatus == 0 {
                     continuation.resume(returning: text)
                 } else {
                     continuation.resume(throwing: RunnerError.failed(text.nilIfEmpty ?? "Command failed"))
@@ -160,6 +180,7 @@ enum ProcessRunner {
             }
             do {
                 try process.run()
+                if gate.isCancelled { process.terminate() }
                 if let input, let inputPipe {
                     try inputPipe.fileHandleForWriting.write(contentsOf: input)
                     try inputPipe.fileHandleForWriting.close()
@@ -185,6 +206,9 @@ enum ProcessRunner {
                     continuation.resume(throwing: RunnerError.failed("Command timed out\n\n" + diagnostic))
                 }
             }
+          }
+        } onCancel: {
+            gate.cancel()
         }
     }
 }

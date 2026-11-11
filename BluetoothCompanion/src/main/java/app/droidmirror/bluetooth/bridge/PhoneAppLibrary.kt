@@ -32,21 +32,13 @@ class PhoneAppLibrary(private val context: Context, private val ready: () -> Boo
     private var iconBytes = ByteArray(0)
     @Volatile private var closed = false
     @Volatile private var lane: PhoneLibraryLane? = null
-    private var catalogAuthorized: (() -> Boolean)? = null
-    private var catalogReply: ((JSONObject) -> Unit)? = null
+    private val catalogSubscriptions = CatalogPushSubscriptions()
     private val main = Handler(Looper.getMainLooper())
     private val catalogChanged = Runnable {
         if (!closed) worker.execute {
             if (closed) return@execute
             scannedAt = -60000L
-            val valid = catalogAuthorized
-            val reply = catalogReply
-            if (valid?.invoke() == true && reply != null) {
-                val before = snapshot
-                runCatching { scan() }.onSuccess {
-                    if (snapshot != before && !closed && valid()) reply(JSONObject().put("success", true).put("snapshot", snapshot))
-                }
-            }
+            if (catalogSubscriptions.active()) runCatching { scan() }
         }
     }
     private val packagesChanged = object : BroadcastReceiver() {
@@ -90,6 +82,21 @@ class PhoneAppLibrary(private val context: Context, private val ready: () -> Boo
             "${it.component}:${it.label}:${it.version}"
         }.toByteArray()).joinToString("") { "%02x".format(it) }
         scannedAt = SystemClock.elapsedRealtime()
+        catalogSubscriptions.publish(snapshot)
+    }
+    fun subscribeCatalog(peer: String, authorized: () -> Boolean, reply: (JSONObject) -> Unit) {
+        if (closed) return
+        worker.execute {
+            if (closed || !authorized()) return@execute
+            catalogSubscriptions.subscribe(peer, authorized) { revision ->
+                if (!closed && authorized()) reply(JSONObject().put("success", true).put("snapshot", revision))
+            }
+            scannedAt = -60000L
+            runCatching { scan() }.onFailure {
+                catalogSubscriptions.remove(peer)
+                if (!closed && authorized()) reply(JSONObject().put("success", false))
+            }
+        }
     }
     fun receive(command: JSONObject, authorized: () -> Boolean, reply: (JSONObject) -> Unit, bulk: Boolean = false) {
         if (closed) return
@@ -100,11 +107,6 @@ class PhoneAppLibrary(private val context: Context, private val ready: () -> Boo
             if (closed || !authorized()) return@execute
             val result = runCatching {
                 when (command.optString("type")) {
-                    "appCatalogSubscribe" -> {
-                        catalogAuthorized = authorized; catalogReply = reply
-                        scannedAt = -60000L; scan()
-                        JSONObject().put("success", true).put("snapshot", snapshot)
-                    }
                     "appLibraryOffer" -> {
                         val token = command.getString("token")
                         require(token.matches(Regex("[a-fA-F0-9]{64}")))

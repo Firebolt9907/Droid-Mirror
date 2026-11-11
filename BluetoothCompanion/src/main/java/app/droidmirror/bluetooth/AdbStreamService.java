@@ -130,7 +130,7 @@ public final class AdbStreamService extends Service {
                 verifyCaller(owner);
                 byte[] pin = null;
                 try {
-                    pin = SavedUnlockPin.beginAttempt(this);
+                    pin = intent.getBooleanExtra("allowAutomaticUnlock", false) ? SavedUnlockPin.beginAttempt(this) : null;
                     Parcel request = Parcel.obtain();
                     Parcel reply = Parcel.obtain();
                     try {

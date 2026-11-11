@@ -63,6 +63,27 @@ int main(void) {
     event.key = SDLK_LGUI; event.scancode = SDL_SCANCODE_LGUI; event.mod = 0;
     sc_input_manager_process_key(&im, &event);
     assert(report.data[0] == 0 && last_key.scancode == SC_SCANCODE_LCTRL);
+    const SDL_Keymod options[] = { SDL_KMOD_LALT, SDL_KMOD_RALT };
+    for (unsigned i = 0; i < ARRAY_LEN(options); ++i) {
+        event.key = SDLK_BACKSPACE; event.scancode = SDL_SCANCODE_BACKSPACE;
+        event.mod = options[i];
+        for (unsigned press = 0; press < 2; ++press) {
+            event.type = SDL_EVENT_KEY_DOWN; event.repeat = press != 0;
+            sc_input_manager_process_key(&im, &event);
+            assert(last_key.scancode == SC_SCANCODE_BACKSPACE && last_key.action == SC_ACTION_DOWN);
+            assert(last_key.mods_state == SC_MOD_LCTRL && last_key.repeat == event.repeat);
+            assert(report.data[0] == SC_HID_MOD_LEFT_CONTROL);
+        }
+        event.type = SDL_EVENT_KEY_UP; event.repeat = false;
+        sc_input_manager_process_key(&im, &event);
+        assert(last_key.scancode == SC_SCANCODE_BACKSPACE && last_key.action == SC_ACTION_UP);
+        assert(last_key.mods_state == SC_MOD_LCTRL);
+        event.key = i ? SDLK_RALT : SDLK_LALT;
+        event.scancode = i ? SDL_SCANCODE_RALT : SDL_SCANCODE_LALT;
+        event.mod = 0;
+        sc_input_manager_process_key(&im, &event);
+        assert(report.data[0] == 0);
+    }
     event.type = SDL_EVENT_KEY_DOWN; event.key = SDLK_RCTRL; event.scancode = SDL_SCANCODE_RCTRL; event.mod = SDL_KMOD_RCTRL;
     sc_input_manager_process_key(&im, &event);
     assert(report.data[0] == SC_HID_MOD_RIGHT_GUI);

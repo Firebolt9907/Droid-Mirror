@@ -2,6 +2,7 @@ package com.genymobile.scrcpy.control;
 
 public final class DeviceMessage {
 
+    public static final int TYPE_NAVIGATION_MODE = 5;
     public static final int TYPE_CAMERA_CUTOUT = 3;
     public static final int TYPE_SECURE_WINDOW_STATE = 4;
     public static final int TYPE_CLIPBOARD = 0;
@@ -36,6 +37,13 @@ public final class DeviceMessage {
         event.type = TYPE_UHID_OUTPUT;
         event.id = id;
         event.data = data;
+        return event;
+    }
+
+    public static DeviceMessage createNavigationMode(int mode) {
+        DeviceMessage event = new DeviceMessage();
+        event.type = TYPE_NAVIGATION_MODE;
+        event.id = mode == 2 ? 2 : 0;
         return event;
     }
 

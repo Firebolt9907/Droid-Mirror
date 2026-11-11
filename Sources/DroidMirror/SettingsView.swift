@@ -1,7 +1,9 @@
+import Intents
 import SwiftUI
 
 @MainActor
 private final class ClipboardConnectionStatus: NSObject, ObservableObject {
+    @Published var focusText = "Waiting for the background receiver…"
     @Published var mediaText = "Waiting for the background receiver…"
     @Published var text = "Waiting for the background receiver…"
     override init() {
@@ -10,6 +12,7 @@ private final class ClipboardConnectionStatus: NSObject, ObservableObject {
             name: Notification.Name("app.droidmirror.receiverStatus"), object: nil)
     }
     @objc private func receive(_ event: Notification) {
+        if let status = event.userInfo?["focus"] as? String { focusText = status }
         if let status = event.userInfo?["media"] as? String { mediaText = status }
         if let status = event.userInfo?["clipboard"] as? String { text = status }
     }
@@ -17,13 +20,21 @@ private final class ClipboardConnectionStatus: NSObject, ObservableObject {
 }
 
 struct SettingsView: View {
+    @StateObject private var cameraExtension = CameraExtensionActivation()
+    @AppStorage("DroidMirror.camera.facing") private var cameraFacing = "front"
     @EnvironmentObject private var model: MirrorModel
     @AppStorage("DroidMirror.clipboard.enabled") private var clipboardMirroring = false
     @AppStorage("DroidMirror.hotspot.automatic") private var automaticHotspot = false
     @AppStorage("DroidMirror.media.enabled") private var mediaSync = false
+    @AppStorage("DroidMirror.media.volumeKeys") private var mediaVolumeKeys = false
+    @AppStorage("DroidMirror.unlock.requireTouchID") private var requireTouchID = false
     @StateObject private var clipboardStatus = ClipboardConnectionStatus()
     @StateObject private var backgroundLogin = BackgroundLoginService()
 
+    @AppStorage("DroidMirror.focus.macToPhone") private var focusToPhone = false
+    @AppStorage("DroidMirror.focus.phoneToMac") private var focusFromPhone = false
+    @AppStorage("DroidMirror.focus.onShortcut") private var focusOnShortcut = ""
+    @AppStorage("DroidMirror.focus.offShortcut") private var focusOffShortcut = ""
     var body: some View {
         Form {
             Section("Background service") {
@@ -45,42 +56,40 @@ struct SettingsView: View {
                     Text(backgroundLogin.message).font(.caption).foregroundStyle(.red)
                 }
             }
-            Section("Connection") {
-                Button("Set up a phone…") { OnboardingWindowController.shared.show(model: model) }
-                Text("Follow the guided setup for Bluetooth, phone permissions and your first mirror.")
-                    .font(.caption).foregroundStyle(.secondary)
-                Picker("Transport", selection: $model.preferences.transport) {
-                    ForEach(MirrorTransport.allCases) { Text($0.label).tag($0) }
-                }.disabled(model.isMirroring || model.isStarting || model.isPairingBluetooth)
-                if model.preferences.transport == .bluetoothClassic {
-                    Picker("Paired phone", selection: $model.selectedID) {
-                        Text("Select a phone").tag(String?.none)
-                        ForEach(model.devices) { Text($0.displayName).tag(Optional($0.id)) }
-                    }.disabled(model.isMirroring || model.isStarting || model.isPairingBluetooth)
-                    QRPairingButton()
-                    HStack {
-                        SecureField("BLE pairing code from Android", text: $model.bluetoothPairingCode)
-                        Button("Pair Mac") { model.pairBluetooth() }
-                            .disabled(model.selectedDevice == nil || model.bluetoothPairingCode.isEmpty || model.isPairingBluetooth)
-                    }.disabled(model.isMirroring || model.isStarting)
-                    Text("Once per phone: select this Mac in DroidMirror on Android and tap Scan Mac QR code after showing a QR code here, or paste its code manually. This pairs mirroring, notification forwarding and ADB discovery together. Allow notification forwarding on Android once.")
-                        .font(.caption).foregroundStyle(.secondary)
-                    HStack {
-                        Button("Refresh") { model.refreshDevices() }.disabled(model.isStarting || model.isMirroring)
-                        Button(model.isMirroring || model.isStarting ? "Stop" : "Mirror") {
-                            if model.isMirroring || model.isStarting { model.stop() } else { model.start() }
-                        }.disabled(!model.isMirroring && !model.isStarting && model.selectedDevice == nil)
+            connectionSettings
+            Section("Focus sync") {
+                Toggle("Sync Mac Focus to phone Do Not Disturb", isOn: $focusToPhone)
+                    .onChange(of: focusToPhone) { _, enabled in
+                        if enabled { INFocusStatusCenter.default.requestAuthorization { _ in } }
                     }
-                    Text(model.status).font(.caption).foregroundStyle(.secondary)
-                }
-                if model.preferences.transport == .wifiAware {
-                    Text(model.wifiAwareStatus).font(.caption).foregroundStyle(.secondary)
-                    Button("Check Wi-Fi Aware support") { model.checkWiFiAware() }
-                        .disabled(model.isRefreshing || model.isMirroring || model.isStarting)
-                    Text("Experimental direct connection. Mirroring is unavailable in this build.")
+                Toggle("Sync phone Do Not Disturb to Mac Shortcuts", isOn: $focusFromPhone)
+                TextField("Focus on Shortcut name", text: $focusOnShortcut)
+                TextField("Focus off Shortcut name", text: $focusOffShortcut)
+                Text(clipboardStatus.focusText).font(.caption).foregroundStyle(.secondary)
+                Text("Enable matching directions and notification policy access in Android Bridge Settings. Mac Focus requires Share Focus Status permission. Configure two Shortcuts with Set Focus actions; names are passed directly to shortcuts run. Unknown status leaves the phone unchanged.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Section("Phone unlock") {
+                Toggle("Require Touch ID to unlock phone", isOn: $requireTouchID)
+                    .disabled(model.isMirroring || model.isStarting || (!requireTouchID && !PhoneUnlockAuthentication.available))
+                Text("Uses Touch ID before entering the PIN saved on Android. Cancel to mirror the lock screen and unlock manually. No Mac password or Apple Watch fallback. Applies to new sessions.")
+                    .font(.caption).foregroundStyle(.secondary)
+                if !PhoneUnlockAuthentication.available {
+                    Text("Touch ID is unavailable or locked out. Set up Touch ID in System Settings. In clamshell mode, use a supported external Touch ID keyboard or open the lid; otherwise unlock Android manually.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
-                Text("Automatic mode detects supported USB accessory connections without ADB and prefers USB video with no added playback buffer. Android may ask you to approve the accessory on first connection. Bluetooth and direct LAN video connect in parallel. LAN can carry the first video packet; otherwise Bluetooth starts at 320p, up to 15 fps, and a 128 kbps HEVC ceiling, then upgrades to the picture settings below. Video tries direct LAN or Tailscale IPs first, then an already-paired wireless ADB connection, then stays on Bluetooth. Relays and public Iroh discovery are disabled. Wireless ADB fallback requires Wireless debugging and one-time ADB pairing. Mouse, keyboard and navigation stay on Bluetooth. Audio requires a direct ADB session. Authorize Shizuku and enable the background bridge once in the Android companion.")
+            }
+            Section("Phone Camera") {
+                Button("Enable Mac Camera Extension…") { cameraExtension.activate() }
+                    .disabled(model.isMirroring || model.isStarting || !CameraExtensionActivation.bundled)
+                Picker("Camera", selection: $cameraFacing) {
+                    Text("Front").tag("front")
+                    Text("Back").tag("back")
+                }
+                Text("Wi-Fi: 1280 × 720 at 30 fps, 3 Mbps. Bluetooth: 320 × 240 at 15 fps, 128 kbps. Quality switches automatically during calls.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Text(cameraExtension.status).font(.caption).foregroundStyle(.secondary)
+                Text("Appears while BLE is connected. The phone camera turns on only while a Mac app uses it. Arm Phone Camera in Android Bridge Settings first. Uses direct encrypted IP when available, otherwise Bluetooth.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section("Phone hotspot") {
@@ -119,64 +128,146 @@ struct SettingsView: View {
                     }
                 Text(mediaSync ? clipboardStatus.mediaText : "Media syncing off")
                     .font(.caption).foregroundStyle(.secondary)
+                Toggle("Volume keys control phone media", isOn: $mediaVolumeKeys)
+                    .disabled(!mediaSync)
+                    .onChange(of: mediaVolumeKeys) { _, _ in
+                        UserDefaults.standard.synchronize()
+                        DistributedNotificationCenter.default().postNotificationName(
+                            Notification.Name("app.droidmirror.mediaConfiguration"), object: nil,
+                            userInfo: nil, deliverImmediately: true)
+                    }
+                Text("While phone media appears in macOS Now Playing, the keyboard volume and mute keys adjust the phone instead of the Mac, in any app, and show the phone's volume. Allow DroidMirror Notifications under Privacy & Security → Accessibility.")
+                    .font(.caption).foregroundStyle(.secondary)
                 Text("Show phone media in macOS Now Playing and Apple Music on your phone. Syncs track details and playback controls over paired Bluetooth; audio stays on its original device. Allow notification access on Android and Music Automation permission on Mac. Local playback takes priority on each device.")
                     .font(.caption).foregroundStyle(.secondary)
             }
-            Section("iPhone-like behavior") {
-                Toggle("Turn the Android display off while mirroring", isOn: $model.preferences.turnDeviceScreenOff)
-                Toggle("Keep the device awake while connected", isOn: $model.preferences.stayAwake)
-                Toggle("Keep the mirror above other windows", isOn: $model.preferences.alwaysOnTop)
-                Toggle("Forward audio when no media is already playing", isOn: $model.preferences.forwardAudio)
-            }
-            .disabled(model.preferences.transport != .adb)
-            Section("Picture (Wi-Fi / ADB)") {
-                if model.preferences.transport == .bluetoothClassic {
-                    LabeledContent("Codec", value: "HEVC (H.265)")
-                } else {
-                    Picker("Codec", selection: $model.preferences.codec) {
-                        ForEach(VideoCodec.allCases) { Text($0.label).tag($0) }
-                    }
-                }
-                Picker("Frame rate", selection: $model.preferences.maxFPS) {
-                    Text("30 fps").tag(30); Text("60 fps").tag(60); Text("90 fps").tag(90)
-                }
-                Picker("Resolution limit", selection: $model.preferences.maxSize) {
-                    Text("1280 px").tag(1280); Text("1920 px").tag(1920); Text("Native").tag(0)
-                }
-                Stepper("Bit rate: \(model.preferences.bitRateMbps) Mbps", value: $model.preferences.bitRateMbps, in: 4...32, step: 2)
-                Stepper("Wireless video buffer: \(model.preferences.wirelessVideoBufferMs) ms",
-                        value: $model.preferences.wirelessVideoBufferMs, in: 0...200, step: 25)
-                Text("A small buffer smooths uneven Wi-Fi frame delivery by adding playback delay. Default: 50 ms; 0 ms prioritizes latency. Applies next session to wireless ADB and automatic Bluetooth / Wi-Fi sessions.")
-                    .font(.caption).foregroundStyle(.secondary)
-                if model.preferences.transport == .bluetoothClassic {
-                    Text("These targets apply after the Wi-Fi handoff on your next session. Hybrid sessions keep regular HEVC throughout; input stays on BLE. Direct ADB sessions use their own selected codec and ADB input.")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
-            }
-            .disabled(model.preferences.transport == .wifiAware)
-            Section("Input") {
-                Picker("Scrolling", selection: $model.preferences.scrollMode) {
-                    ForEach(ScrollMode.allCases) { Text($0.label).tag($0) }
-                }
-                Picker("Keyboard", selection: $model.preferences.keyboard) {
-                    ForEach(KeyboardMode.allCases) { Text($0.label).tag($0) }
-                }
-                Toggle("Show physical touches on Android", isOn: $model.preferences.showTouches)
-                Text("Touch-style scrolling is handled inside the mirror and does not require Accessibility permission. Smart text input gives the best clipboard behavior; UHID behaves like a physical keyboard.")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
-            .disabled(model.preferences.transport != .adb)
+            mirrorPreferences
         }.formStyle(.grouped).padding(.vertical, 12)
             .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
                 backgroundLogin.refresh()
             }
 
     }
+
+    private var connectionSettings: some View {
+            Section("Connection") {
+                Button("Set up a phone…") { OnboardingWindowController.shared.show(model: model) }
+                Text("Follow the guided setup for Bluetooth, phone permissions and your first mirror.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Picker("Connection", selection: $model.preferences.transport) {
+                    ForEach(MirrorTransport.allCases) { Text($0.label).tag($0) }
+                }.disabled(model.isMirroring || model.isStarting || model.isPairingBluetooth)
+                if model.preferences.transport == .bluetoothClassic {
+                    Picker("Paired phone", selection: $model.selectedID) {
+                        Text("Select a phone").tag(String?.none)
+                        ForEach(model.devices) { Text($0.displayName).tag(Optional($0.id)) }
+                    }.disabled(model.isMirroring || model.isStarting || model.isPairingBluetooth)
+                    QRPairingButton()
+                    HStack {
+                        SecureField("BLE pairing code from Android", text: $model.bluetoothPairingCode)
+                        Button(model.isPairingBluetooth ? "Pairing…" : "Pair Mac") {
+                            model.bluetoothPairingCode = model.bluetoothPairingCode.trimmingCharacters(in: .whitespacesAndNewlines)
+                            model.pairBluetooth()
+                        }
+                            .disabled(model.selectedDevice?.isBluetooth != true || model.bluetoothPairingCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.isPairingBluetooth)
+                    }.disabled(model.isMirroring || model.isStarting)
+                    Text("Scan this Mac’s QR code from DroidMirror on Android, or enter the phone’s pairing code here. Pairing also enables notification forwarding and ADB discovery.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    HStack {
+                        Button("Refresh") { model.refreshDevices() }.disabled(model.isRefreshing || model.isStarting || model.isMirroring || model.isPairingBluetooth)
+                        Button(model.isStarting ? "Cancel" : (model.isMirroring ? "Stop" : "Mirror")) {
+                            if model.isMirroring || model.isStarting { model.stop() } else { model.start() }
+                        }
+                        .disabled(!model.isMirroring && !model.isStarting && (model.isPairingBluetooth || model.selectedDevice?.isOnline != true))
+                        .help(model.isStarting ? "Cancel the connection attempt" : mirrorActionHelp(model))
+                    }
+                    Text(model.status).font(.caption).foregroundStyle(.secondary)
+                }
+                if model.preferences.transport == .wifiAware {
+                    Text(model.wifiAwareStatus).font(.caption).foregroundStyle(.secondary)
+                    Button("Check Wi-Fi Aware support") { model.checkWiFiAware() }
+                        .disabled(model.isRefreshing || model.isMirroring || model.isStarting)
+                    Text("Experimental direct connection. Mirroring is unavailable in this build.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                if model.preferences.transport == .bluetoothClassic {
+                    Text("Automatic chooses the best available video connection; mouse and keyboard use Bluetooth. Authorize Shizuku and enable the Android background bridge once.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    DisclosureGroup("How Automatic works") {
+                        Text("USB accessory video is preferred with no added buffer. Otherwise, direct LAN and Bluetooth connect in parallel; Bluetooth video upgrades when a faster path is ready.")
+                        Text("Direct LAN or Tailscale is tried before paired wireless ADB. ADB fallback needs Wireless debugging and one-time pairing; relays and public discovery are disabled.")
+                        Text("Bluetooth video starts at 320p, up to 15 fps and 128 kbps using HEVC. Audio forwarding requires an ADB session.")
+                    }.font(.caption).foregroundStyle(.secondary)
+                }
+                if model.preferences.transport != .wifiAware {
+                    Toggle("Start mirroring automatically", isOn: $model.preferences.autoStart)
+                }
+            }
+    }
+
+    @ViewBuilder
+    private var mirrorPreferences: some View {
+            if model.preferences.transport != .wifiAware {
+                Section("iPhone-like behavior") {
+                    if model.preferences.transport == .adb {
+                        Toggle("Keep phone screen off", isOn: $model.preferences.turnDeviceScreenOff)
+                        Toggle("Keep the device awake while connected", isOn: $model.preferences.stayAwake)
+                        Toggle("Forward audio to Mac", isOn: $model.preferences.forwardAudio)
+                    }
+                    Toggle("Keep mirror above other windows", isOn: $model.preferences.alwaysOnTop)
+                }
+                Section("Video quality") {
+                    if model.preferences.transport == .bluetoothClassic {
+                        LabeledContent("Codec", value: "HEVC (H.265)")
+                    } else {
+                        Picker("Codec", selection: $model.preferences.codec) {
+                            ForEach(VideoCodec.allCases) { Text($0.label).tag($0) }
+                        }
+                    }
+                    Picker("Frame rate", selection: $model.preferences.maxFPS) {
+                        Text("30 fps").tag(30); Text("60 fps").tag(60); Text("90 fps").tag(90)
+                    }
+                    Picker("Resolution limit", selection: $model.preferences.maxSize) {
+                        Text("1280 px").tag(1280); Text("1920 px").tag(1920); Text("Native").tag(0)
+                    }
+                    Stepper("Bit rate: \(model.preferences.bitRateMbps) Mbps", value: $model.preferences.bitRateMbps, in: 4...32, step: 2)
+                    Stepper("Wireless video buffer: \(model.preferences.wirelessVideoBufferMs) ms",
+                            value: $model.preferences.wirelessVideoBufferMs, in: 0...200, step: 25)
+                    Text("A buffer smooths wireless video at the cost of delay. Use 0 ms for lowest latency; the default is 50 ms.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    if model.preferences.transport == .bluetoothClassic {
+                        Text("These targets apply when Automatic uses a faster video path. Bluetooth fallback uses lower quality and HEVC.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+                Section("Input") {
+                    Picker("Scrolling", selection: $model.preferences.scrollMode) {
+                        ForEach(ScrollMode.allCases) { Text($0.label).tag($0) }
+                    }
+                    if model.preferences.transport == .adb {
+                        Picker("Keyboard", selection: $model.preferences.keyboard) {
+                            ForEach(KeyboardMode.allCases) { Text($0.label).tag($0) }
+                        }
+                        Toggle("Show physical touches on Android", isOn: $model.preferences.showTouches)
+                        Text("Smart text input supports clipboard integration; UHID acts like a physical keyboard.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    Text("Touch-style scrolling supports Android gestures without Accessibility permission.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            Text("Changes apply the next time the mirror starts.")
+                .font(.caption).foregroundStyle(.secondary)
+    }
 }
 
 struct WirelessView: View {
     @EnvironmentObject private var model: MirrorModel
     @Environment(\.dismiss) private var dismiss
+
+    private func trimmed(_ value: String) -> String {
+        value.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -194,13 +285,33 @@ struct WirelessView: View {
                     GridRow { Text("Pair address"); TextField("192.168.1.20:37123", text: $model.pairingAddress) }
                     GridRow { Text("Pairing code"); SecureField("123456", text: $model.pairingCode) }
                 }.padding(8)
-                Button("Pair") { model.pair() }.buttonStyle(.borderedProminent).disabled(model.pairingAddress.isEmpty || model.pairingCode.isEmpty)
+                Button("Pair") {
+                    model.pairingAddress = trimmed(model.pairingAddress)
+                    model.pairingCode = trimmed(model.pairingCode)
+                    model.pair()
+                }.buttonStyle(.borderedProminent)
+                    .disabled(trimmed(model.pairingAddress).isEmpty || trimmed(model.pairingCode).isEmpty || model.isRefreshing)
             }
             GroupBox("Connect") {
                 HStack {
                     TextField("IP address and port", text: $model.connectAddress)
-                    Button("Connect") { model.connect() }.buttonStyle(.borderedProminent).disabled(model.connectAddress.isEmpty)
+                    Button("Connect") {
+                        model.connectAddress = trimmed(model.connectAddress)
+                        model.connect()
+                    }.buttonStyle(.borderedProminent)
+                        .disabled(trimmed(model.connectAddress).isEmpty || model.isRefreshing)
                 }.padding(8)
+            }
+            Text("Use IP address:port, for example 192.168.1.20:37123. Pairing and connection ports differ; use the connection address on the main Wireless debugging screen after pairing.")
+                .font(.caption).foregroundStyle(.secondary)
+            HStack {
+                if model.isRefreshing {
+                    ProgressView().controlSize(.small).accessibilityLabel("Refreshing devices")
+                }
+                Text(model.status).font(.callout).textSelection(.enabled)
+            }
+            if let error = model.errorMessage {
+                Text(error).font(.caption).foregroundStyle(.red).textSelection(.enabled)
             }
             HStack { Spacer(); Button("Done") { dismiss() }.keyboardShortcut(.defaultAction) }
         }.padding(24).frame(width: 520)

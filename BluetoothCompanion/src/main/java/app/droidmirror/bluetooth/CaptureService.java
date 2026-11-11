@@ -278,6 +278,10 @@ public final class CaptureService extends Service {
             // enqueue seconds of old video even though the radio is reliable.
             wire.setVideoWindow(state.videoWindow);
             if (!ShizukuDisplayClient.authorized()) { wire.event(BluetoothWire.CAPTURE_FAILED); status("Authorize Shizuku on the phone once to enable Mac-initiated capture"); return; }
+            // Reject local use before BLE starts: the Mac's Touch ID prompt waits
+            // for authenticated BLE, and the guard would refuse capture anyway.
+            // The guard's own check stays authoritative for later races.
+            if (phoneInUse()) throw new IllegalStateException(PhoneUsePolicy.ERROR);
             state.hasGuard = true;
             state.guard = new ShizukuDisplayClient(this, getSharedPreferences("ready", MODE_PRIVATE).getBoolean("panelOff", true), this::status,
                 (cause, awake) -> {
@@ -317,7 +321,7 @@ public final class CaptureService extends Service {
                 if (!state.ble.awaitInput()) throw new IOException("BLE input connection timed out");
                 if (peerTransport != null) peerTransport.attach(wire);
                 if (SavedUnlockPin.paused(this)) wire.event(BluetoothWire.PIN_PAUSED);
-                state.guard.startVideo(output, remoteControls, state.computerName);
+                state.guard.startVideo(output, remoteControls, state.computerName, state.ble.automaticUnlockAllowed());
                 // Capture startup wakes the logical display while preserving the
                 // panel-off lease. Live wallpaper layers are unavailable before
                 // that wake. Read off the video loop with bounded render retries.
@@ -384,6 +388,12 @@ public final class CaptureService extends Service {
         } finally {
             stopSession(); status("Ready for your paired Mac");
         }
+    }
+    /** Same signal as the guard (awake and unlocked); unknown state defers to the guard. */
+    private boolean phoneInUse() {
+        PowerManager power = getSystemService(PowerManager.class);
+        KeyguardManager keyguard = getSystemService(KeyguardManager.class);
+        return power != null && keyguard != null && power.isInteractive() && !keyguard.isKeyguardLocked();
     }
     private void refreshAppearance(SessionState state, BluetoothWire wire) {
         // Re-read on every stream; an unavailable wallpaper leaves

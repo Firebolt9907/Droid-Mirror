@@ -5,6 +5,7 @@ import IOKit
 /// The background receiver is the sole owner of both Now Playing proxies.
 final class MediaPlaybackSync {
     static let enabledKey = "DroidMirror.media.enabled"
+    static let volumeKeysKey = "DroidMirror.media.volumeKeys"
     weak var controller: BLEController?
     private let music: AppleMusicAccess
     private let artwork = MediaArtworkTransfer()
@@ -29,6 +30,15 @@ final class MediaPlaybackSync {
         return lease.allows(phone, now: ProcessInfo.processInfo.systemUptime)
     }
     private var timer: Timer?
+    private var observers = [(NotificationCenter, NSObjectProtocol)]()
+    private var asleep = false
+    private var screenAsleep = false
+    private var stopped = false
+    private var schedule = MusicPollSchedule()
+    private var refreshQueued = false
+    private var pendingCommand: [String: Any]?
+    private var lastPublication: String?
+    private var phoneArtworkSource: String?
     private var targets = [(MPRemoteCommand, Any)]()
     private var published = false
     private var subscribed = false
@@ -38,15 +48,68 @@ final class MediaPlaybackSync {
     private var epoch = 0
     private(set) var status = "Media syncing off"
     private var enabled: Bool { NotificationRuntime.preferences.bool(forKey: Self.enabledKey) }
+    private let volumeKeys = PhoneVolumeKeyTap()
+    private let volumeHUD = PhoneVolumeHUD()
+    private var phoneVolume: PhoneVolumeState?
+    private var volumePressedAt = -Double.infinity
+    private var volumeKeysWanted: Bool {
+        guard published, NotificationRuntime.preferences.bool(forKey: Self.volumeKeysKey),
+              let phone, phone.volumeControl else { return false }
+        return true
+    }
 
     init(music: AppleMusicAccess = AppleMusicSync()) {
         self.music = music
-        sleepObserver = NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
-            self?.lease.invalidate(); self?.render()
+        volumeKeys.onPress = { [weak self] action in self?.sendVolume(action) }
+        let workspace = NSWorkspace.shared.notificationCenter
+        sleepObserver = workspace.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
+            guard let self else { return }
+            self.lease.invalidate(); self.render()
+            self.asleep = true
+            self.timer?.invalidate(); self.timer = nil
         }
+        observe(workspace, NSWorkspace.didWakeNotification) { [weak self] _ in
+            guard let self else { return }
+            self.asleep = false
+            self.startTimer()
+            self.schedule.requestSoon(); self.tick()
+        }
+        observe(workspace, NSWorkspace.screensDidSleepNotification) { [weak self] _ in self?.screenAsleep = true }
+        observe(workspace, NSWorkspace.screensDidWakeNotification) { [weak self] _ in self?.screenAsleep = false; self?.refreshMusicSoon() }
+        for name in [NSWorkspace.didLaunchApplicationNotification, NSWorkspace.didTerminateApplicationNotification] {
+            observe(workspace, name) { [weak self] note in
+                let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+                if app?.bundleIdentifier == "com.apple.Music" { self?.refreshMusicSoon() }
+            }
+        }
+        observe(DistributedNotificationCenter.default(), Notification.Name("com.apple.Music.playerInfo")) { [weak self] _ in self?.refreshMusicSoon() }
+        startTimer()
+    }
+    private func observe(_ center: NotificationCenter, _ name: Notification.Name, _ block: @escaping (Notification) -> Void) {
+        observers.append((center, center.addObserver(forName: name, object: nil, queue: .main, using: block)))
+    }
+    private func startTimer() {
+        guard timer == nil, !stopped else { return }
         let timer = Timer(timeInterval: 2, repeats: true) { [weak self] _ in self?.tick() }
+        timer.tolerance = 1
         self.timer = timer
         RunLoop.main.add(timer, forMode: .common)
+    }
+    /// Coalesces bursts of change signals into a single read.
+    private func refreshMusicSoon() {
+        schedule.requestSoon()
+        guard !refreshQueued, !asleep else { return }
+        refreshQueued = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+            self?.refreshQueued = false
+            self?.tick()
+        }
+    }
+    private func updatePhoneArtwork(_ source: String?) {
+        // Keeping the same image object also keeps Now Playing from being republished.
+        guard source != phoneArtworkSource else { return }
+        phoneArtworkSource = source
+        phoneArtwork = MediaArtwork.decode(source)
     }
     func connected() { configure() }
     func configure() {
@@ -59,27 +122,41 @@ final class MediaPlaybackSync {
     func receive(_ event: [String: Any]) {
         guard enabled, subscribed, controller?.authenticated == true else { return }
         switch event["type"] as? String {
+        case "mediaClockChanged":
+            wire.refreshTiming(); refreshMusicSoon()
         case "mediaState":
             guard let event = wire.receive(event) else { return }
             checkContinuity()
             phone = MediaSnapshot(event, sessionScoped: wire.peerSupportsLocalTimeline)
             lease.observe(phone, now: ProcessInfo.processInfo.systemUptime)
             artwork.observe(phone == nil ? [:] : event)
-            phoneArtwork = phone == nil ? nil : MediaArtwork.decode(artwork.completed ?? (event["artwork"] as? String))
+            updatePhoneArtwork(phone == nil ? nil : artwork.completed ?? (event["artwork"] as? String))
             requestArtwork()
             render()
+            if wire.needsAcknowledgment { refreshMusicSoon() }
         case "mediaArtworkRequest":
-            if music.snapshot?.fresh() == true, let reply = artwork.reply(event) { controller?.send(reply) }
+            // The transfer is bound to the advertised digest, not to how recently Music was read.
+            if music.snapshot != nil, let reply = artwork.reply(event) { controller?.send(reply) }
         case "mediaArtworkChunk":
             guard phone?.fresh() == true, artwork.receive(event) else { return }
-            phoneArtwork = MediaArtwork.decode(artwork.completed)
+            updatePhoneArtwork(artwork.completed)
             requestArtwork(); render()
-        case "mediaCommand": music.command(event)
+        case "mediaCommand":
+            // Reads are no longer continuous. Keep the requirement that a command
+            // acts on a fresh snapshot by reading first when the last one has aged.
+            if music.snapshot?.fresh() == true { music.command(event); refreshMusicSoon() }
+            else { pendingCommand = event; schedule.requestSoon(); tick() }
+        case "mediaVolumeState":
+            guard let state = PhoneVolumeState(event, expectedID: phone?.id) else { return }
+            phoneVolume = state
+            // Only key presses on this Mac present the HUD; phone-side changes stay silent.
+            if ProcessInfo.processInfo.systemUptime - volumePressedAt < 2 { volumeHUD.show(state) }
         case "mediaStatus": phoneStatus = event["message"] as? String ?? "Phone media unavailable"
         default: break
         }
     }
     private func tick() {
+        guard !asleep else { return }
         guard enabled, subscribed, controller?.authenticated == true else {
             clear()
             status = enabled ? "Waiting for a paired phone with media support" : "Media syncing off"
@@ -87,6 +164,9 @@ final class MediaPlaybackSync {
         }
         render()
         if phone?.fresh() == true { requestArtwork() }
+        let started = ProcessInfo.processInfo.systemUptime
+        guard schedule.due(now: started) else { return }
+        schedule.begin(now: started)
         let generation = epoch
         music.poll { [weak self] value in
             guard let self, self.epoch == generation, self.enabled, self.subscribed,
@@ -102,21 +182,54 @@ final class MediaPlaybackSync {
                 } else { self.sentQueueRevision = "" }
             }
             self.status = self.phoneStatus.isEmpty ? self.music.status : self.phoneStatus + " · " + self.music.status
+            if self.volumeKeys.needsPermission, NotificationRuntime.preferences.bool(forKey: Self.volumeKeysKey) {
+                self.status += " · Allow DroidMirror Notifications in Accessibility for phone volume keys"
+            }
+            self.schedule.finish(now: ProcessInfo.processInfo.systemUptime, interval: MusicPollSchedule.interval(
+                localTimeline: self.wire.peerSupportsLocalTimeline, playing: self.music.snapshot?.playing == true,
+                screenAwake: !self.screenAsleep))
+            if let command = self.pendingCommand {
+                self.pendingCommand = nil
+                self.music.command(command)
+                self.schedule.requestSoon()
+            }
             self.render()
+            if self.schedule.soon { self.refreshMusicSoon() }
         }
     }
     private func requestArtwork() {
         if let request = artwork.request() { controller?.send(request) }
     }
+    private func updateVolumeKeys() {
+        let wanted = volumeKeysWanted
+        volumeKeys.retryIfPermitted(wanted)
+        volumeKeys.setActive(wanted)
+        if !wanted { volumeHUD.hide() }
+    }
+    private func sendVolume(_ action: String) {
+        checkContinuity()
+        guard enabled, subscribed, controller?.authenticated == true, volumeKeysWanted,
+              let phone, phone.fresh(), phoneEligible else { updateVolumeKeys(); return }
+        guard controller?.send(["type": "mediaVolume", "id": phone.id, "action": action]) == true else { return }
+        volumePressedAt = ProcessInfo.processInfo.systemUptime
+        if let state = phoneVolume, state.id == phone.id {
+            phoneVolume = state.predicting(action); volumeHUD.show(phoneVolume!)
+        }
+    }
     private func render() {
         checkContinuity()
+        defer { updateVolumeKeys() }
         guard let phone, phone.fresh(), phoneEligible else { unpublish(); return }
+        if phoneVolume?.id != phone.id { phoneVolume = nil }
         if !published { installCommands(); published = true }
+        let publication = phone.publicationKey + (phoneArtwork.map { "\(ObjectIdentifier($0))" } ?? "")
+        guard publication != lastPublication else { return }
+        lastPublication = publication
         var info: [String: Any] = [
             MPMediaItemPropertyTitle: phone.title, MPMediaItemPropertyArtist: phone.artist,
             MPMediaItemPropertyAlbumTitle: phone.album, MPMediaItemPropertyPlaybackDuration: phone.duration,
             MPNowPlayingInfoPropertyElapsedPlaybackTime: phone.elapsed(),
-            MPNowPlayingInfoPropertyPlaybackRate: phone.playing ? 1.0 : 0.0]
+            MPNowPlayingInfoPropertyPlaybackRate: phone.rate]
         if let image = phoneArtwork {
             info[MPMediaItemPropertyArtwork] = MPMediaItemArtwork(boundsSize: image.size) { _ in image }
         }
@@ -159,15 +272,23 @@ final class MediaPlaybackSync {
         MPNowPlayingInfoCenter.default().playbackState = .stopped
         MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
         published = false
+        lastPublication = nil
+        phoneVolume = nil
+        updateVolumeKeys()
     }
     func clear() {
         lease.invalidate()
         wire = MediaStateWire()
-        epoch += 1; sentQueueRevision = ""; subscribed = false; phoneStatus = ""; phone = nil; phoneArtwork = nil; artwork.clear(); music.clear(); unpublish()
+        schedule.reset(); pendingCommand = nil
+        epoch += 1; sentQueueRevision = ""; subscribed = false; phoneStatus = ""; phone = nil; phoneArtwork = nil; phoneArtworkSource = nil; artwork.clear(); music.clear(); unpublish()
     }
-    deinit { if let sleepObserver { NSWorkspace.shared.notificationCenter.removeObserver(sleepObserver) } }
+    deinit {
+        if let sleepObserver { NSWorkspace.shared.notificationCenter.removeObserver(sleepObserver) }
+        observers.forEach { $0.0.removeObserver($0.1) }
+    }
     func stop() {
+        stopped = true
         controller?.send(["type": "mediaSubscribe", "enabled": false])
-        clear(); timer?.invalidate(); timer = nil
+        clear(); volumeKeys.stop(); timer?.invalidate(); timer = nil
     }
 }

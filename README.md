@@ -78,7 +78,11 @@ any active mirror before updating, then restart the phone's background bridge.
 
 Leave the connection mode at **Automatic (USB / Wi-Fi / Bluetooth)**. Mirroring starts over Bluetooth and prefers an approved USB accessory connection for video when a supported phone is plugged in, without USB debugging or ADB access. Otherwise it can switch video to a faster direct network connection when available. USB video adds no playback buffer; encoding, decoding and display still take time. Keeping both devices on the same Wi-Fi network can help. Tailscale isn't required.
 
+Mac Settings → Phone unlock offers **Require Touch ID to unlock phone** for the PIN saved on Android. Cancelling Touch ID opens the mirror on the lock screen for manual unlock. See [automatic unlock](Native/AUTOMATIC-UNLOCK.md) for setup and limitations.
+
 ## Everyday use
+
+Drop a file onto the active mirror to save it in the phone’s Downloads folder. Bridge transfers require clipboard sync and Android 10+, accept one file under 5 MB at a time, and use fast local networking with BLE bulk fallback. APKs are saved for installation on the phone. See [drag-and-drop details](Native/DRAG-AND-DROP.md).
 
 Keep Bluetooth enabled and the Android background bridge running. Lock your phone, open DroidMirror on the Mac, and start mirroring. You don't need to enter the pairing code each time.
 
@@ -120,3 +124,9 @@ For source builds, connection details, and advanced features, see the [technical
 ### Mac left-behind alerts (experimental)
 
 On Android, open **Notifications and wireless ADB (optional)** and enable **Mac left-behind alerts (experimental)**. Keep the background bridge enabled and DroidMirror running on your paired Mac. The phone can notify you after at least 45 seconds of Bluetooth separation when recent movement is detected. Allow DroidMirror notifications. Mac sleep or disabling Mac Bluetooth can cause false alerts; closed-lid reliability needs device testing. See [behavior and limitations](Native/LEFT-BEHIND.md).
+
+Optional [Focus / Do Not Disturb sync](Native/FOCUS-SYNC.md) uses the authenticated BLE channel. Enable each direction separately on both devices; phone-to-Mac control uses your configured Shortcuts.
+
+### Phone Camera for Mac apps
+
+A CoreMediaIO camera extension exposes the BLE-connected phone independently of screen mirroring. Camera capture runs only while a Mac app uses the device, with authenticated direct-IP video and a low-rate Bluetooth fallback. Capture switches between 1280×720 at 30 fps / 3 Mbps over direct IP (raw binary H.264) and 320×240 at 15 fps / 128 kbps over Bluetooth, reconfiguring the encoder and requesting a fresh keyframe during calls. It supports front/back cameras and requires Apple signing/provisioning, system extension approval and Android foreground consent. Builds without `DROIDMIRROR_TEAM_ID` (a paid Apple Developer team) omit the camera extension; everything else works unchanged. See [Phone Camera setup and limitations](Native/CONTINUITY-CAMERA.md).

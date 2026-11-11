@@ -3,17 +3,29 @@ import Foundation
 /// One authentication hello per subscription, even if Core Bluetooth repeats
 /// its notification-state callback while a disable/enable cycle is completing.
 struct BLENotificationSubscription {
-    enum Action { case none, disable, enable, authenticate }
-    private enum Phase { case idle, disabling, enabling, authenticating }
+    enum Action { case none, disable, enable, authenticate, release }
+    private enum Phase { case idle, disabling, enabling, authenticating, releasing }
     private var phase = Phase.idle
 
     mutating func begin(alreadyNotifying: Bool) -> Action {
         phase = alreadyNotifying ? .disabling : .enabling
         return alreadyNotifying ? .disable : .enable
     }
+    /// Ends the phone's subscription so it has no reason to send on this link.
+    /// A session that Core Bluetooth cleared for sleep reports "not notifying"
+    /// and ignores a plain disable, so that case subscribes first to force a
+    /// real descriptor write.
+    mutating func beginRelease(alreadyNotifying: Bool) -> Action {
+        phase = .releasing
+        return alreadyNotifying ? .disable : .enable
+    }
     mutating func updated(notifying: Bool) -> Action {
         switch phase {
         case .idle: return .none
+        case .releasing:
+            if notifying { return .disable }
+            phase = .idle
+            return .release
         case .disabling:
             guard !notifying else { return .none }
             phase = .enabling
@@ -27,6 +39,45 @@ struct BLENotificationSubscription {
             phase = .enabling
             return .enable
         }
+    }
+}
+
+/// Delays between automatic reconnect attempts: 0, 1, 2, 4 ... capped at a minute.
+struct BLEReconnectBackoff {
+    static let maximum: TimeInterval = 60
+    private var failures = 0
+    mutating func next() -> TimeInterval {
+        defer { failures = min(failures + 1, 16) }
+        return failures == 0 ? 0 : min(Self.maximum, pow(2, Double(failures - 1)))
+    }
+    mutating func reset() { failures = 0 }
+}
+
+/// Bluetooth stays quiet from system sleep until a full, user-visible wake.
+/// NSWorkspace reports neither edge for a dark wake, so one sleep spans every
+/// dark wake inside it. Times are uptime, which does not advance during sleep.
+struct BLESystemSleep {
+    private(set) var asleep = false
+    /// The phone has been told to stop, or there was no link left to tell.
+    private(set) var quiesced = false
+    private var enteredAt: TimeInterval = 0
+
+    @discardableResult mutating func willSleep(now: TimeInterval) -> Bool {
+        guard !asleep else { return false }
+        asleep = true; quiesced = false; enteredAt = now
+        return true
+    }
+    @discardableResult mutating func didWake() -> Bool {
+        guard asleep else { return false }
+        asleep = false; quiesced = false
+        return true
+    }
+    mutating func markQuiesced() { if asleep { quiesced = true } }
+    /// Backstop against staying disconnected if a wake notification never comes.
+    /// User input after going to sleep cannot happen during a dark wake.
+    func missedWake(now: TimeInterval, secondsSinceUserInput: TimeInterval) -> Bool {
+        let elapsed = now - enteredAt
+        return asleep && elapsed >= 30 && secondsSinceUserInput < elapsed
     }
 }
 
@@ -96,6 +147,7 @@ struct BLEOutboundQueue {
         let cost: Int
         let bulk: Bool
         let urgent: Bool
+        let enqueuedAt = ProcessInfo.processInfo.systemUptime
     }
     private var messages = [Message]()
     private var controlBurst = 0
@@ -110,7 +162,7 @@ struct BLEOutboundQueue {
         guard bytes + cost <= Self.limit else { return false }
         let bulk = object["type"] as? String == "clipboardFileChunk"
         messages.append(Message(object: object, deadline: deadline, cost: cost, bulk: bulk,
-                                urgent: ["ping", "appLaunch"].contains(object["type"] as? String ?? "")))
+                                urgent: ["ping", "appLaunch", "clipboardFilePrepare", "clipboardFilePrepareEnd", "clipboardFileStop", "clipboardBulkOpen", "clipboardIrohOpen"].contains(object["type"] as? String ?? "")))
         bytes += cost
         return true
     }

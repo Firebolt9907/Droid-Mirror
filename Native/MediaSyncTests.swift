@@ -17,11 +17,32 @@ final class MusicStub: AppleMusicAccess {
     var value: [String: Any] = ["active": false]
     var commands = [[String: Any]]()
     func clear() { snapshot = nil }
-    func poll(_ completion: @escaping ([String: Any]) -> Void) { snapshot = MediaSnapshot(value); completion(value) }
+    var polls = 0
+    func poll(_ completion: @escaping ([String: Any]) -> Void) { polls += 1; snapshot = MediaSnapshot(value); completion(value) }
     func command(_ value: [String: Any]) { commands.append(value) }
 }
 @main struct MediaSyncTests {
     static func main() {
+        // Phone volume keys: decoding, reply validation and HUD prediction.
+        if case .press(let action)? = VolumeKeyEvent.decode(subtype: 8, data1: 0x0000_0a00) { precondition(action == "up") } else { preconditionFailure() }
+        if case .press(let action)? = VolumeKeyEvent.decode(subtype: 8, data1: 0x0001_0a01) { precondition(action == "down") } else { preconditionFailure() }
+        if case .press(let action)? = VolumeKeyEvent.decode(subtype: 8, data1: 0x0007_0a00) { precondition(action == "mute") } else { preconditionFailure() }
+        if case .release? = VolumeKeyEvent.decode(subtype: 8, data1: 0x0000_0b00) {} else { preconditionFailure() }
+        precondition(VolumeKeyEvent.decode(subtype: 8, data1: 0x0010_0a00) == nil, "Play/pause is left to Now Playing")
+        precondition(VolumeKeyEvent.decode(subtype: 7, data1: 0x0000_0a00) == nil)
+        let volumeEvent: [String: Any] = ["type": "mediaVolumeState", "id": "phone", "level": 7, "max": 15, "muted": false, "name": "Pixel"]
+        let volume = PhoneVolumeState(volumeEvent, expectedID: "phone")!
+        precondition(volume.name == "Pixel" && abs(volume.fraction - 7.0 / 15) < 1e-9)
+        precondition(PhoneVolumeState(volumeEvent, expectedID: "other") == nil, "Replies are bound to the advertised session")
+        var badVolume = volumeEvent; badVolume["level"] = 16
+        precondition(PhoneVolumeState(badVolume, expectedID: "phone") == nil)
+        badVolume = volumeEvent; badVolume["max"] = 0
+        precondition(PhoneVolumeState(badVolume, expectedID: "phone") == nil)
+        precondition(volume.predicting("up").level == 8 && volume.predicting("down").level == 6)
+        precondition(volume.predicting("mute").muted && volume.predicting("mute").fraction == 0)
+        precondition(volume.predicting("mute").predicting("up").muted == false)
+        let full = PhoneVolumeState(id: "phone", level: 15, max: 15, muted: false, name: "")
+        precondition(full.predicting("up").level == 15 && PhoneVolumeState(id: "phone", level: 0, max: 15, muted: false, name: "").predicting("down").level == 0)
         var scriptError: NSDictionary?
         precondition(NSAppleScript(source: AppleMusicSync.snapshotScript)?.compileAndReturnError(&scriptError) == true,
                      "Music script must compile against its installed scripting dictionary: \(String(describing: scriptError))")
@@ -162,6 +183,34 @@ final class MusicStub: AppleMusicAccess {
         lease.observe(pausedSnapshot, now: 5)
         lease.observe(MediaSnapshot(different), now: 6)
         precondition(!lease.allows(MediaSnapshot(different)!, now: 7))
+        // Republish only when the published content changes.
+        let published = MediaSnapshot(value, uptime: 10)!
+        precondition(published.publicationKey == MediaSnapshot(value, uptime: 10)!.publicationKey)
+        precondition(published.publicationKey != MediaSnapshot(value, uptime: 11)!.publicationKey)
+        var moved = value; moved["position"] = (value["position"] as! Double) + 30
+        precondition(published.publicationKey != MediaSnapshot(moved, uptime: 10)!.publicationKey)
+
+        // Reads follow change signals, with a timer only for unannounced changes.
+        precondition(MusicPollSchedule.interval(localTimeline: false, playing: false, screenAwake: true) == 2,
+                     "Legacy peers need a heartbeat inside their 8-second lease")
+        precondition(MusicPollSchedule.interval(localTimeline: true, playing: true, screenAwake: true) == 10)
+        precondition(MusicPollSchedule.interval(localTimeline: true, playing: true, screenAwake: false) == 30)
+        precondition(MusicPollSchedule.interval(localTimeline: true, playing: false, screenAwake: true) == 60)
+        var schedule = MusicPollSchedule()
+        precondition(schedule.due(now: 0), "A new subscription reads at once")
+        schedule.begin(now: 0)
+        precondition(!schedule.due(now: 1), "One read at a time")
+        schedule.requestSoon()
+        precondition(!schedule.due(now: 1), "A change signal waits for the read in flight")
+        schedule.finish(now: 1, interval: 60)
+        precondition(schedule.due(now: 1), "A signal during a read must not be lost")
+        schedule.begin(now: 1); schedule.finish(now: 1, interval: 60)
+        precondition(!schedule.soon && !schedule.due(now: 60) && schedule.due(now: 61))
+        schedule.begin(now: 61)
+        precondition(!schedule.due(now: 68) && schedule.due(now: 69), "A dropped completion must not stop reads forever")
+        schedule.reset()
+        precondition(schedule.due(now: 0))
+
         let controller = BLEController()
         let music = MusicStub()
         let sync = MediaPlaybackSync(music: music)
@@ -213,6 +262,13 @@ final class MusicStub: AppleMusicAccess {
         sync.configure()
         sync.receive(["type": "mediaCommand", "id": "music", "action": "pause"])
         precondition(music.commands.count == 1)
+        // A command never acts on a stale snapshot: it reads first, then runs once.
+        NotificationRuntime.preferences.set(true, forKey: MediaPlaybackSync.enabledKey)
+        sync.configure()
+        music.snapshot = nil; music.value = ["active": false]
+        let readsBefore = music.polls
+        sync.receive(["type": "mediaCommand", "id": "music", "action": "play"])
+        precondition(music.polls == readsBefore + 1 && music.commands.count == 2)
         sync.stop()
         NotificationRuntime.preferences.removePersistentDomain(forName: "app.droidmirror.media-tests.\(ProcessInfo.processInfo.processIdentifier)")
         print("PASS: media validation, expiry, commands, opt-in, routing, pause lease, external audio, disconnect cleanup and app-neutral eligibility")

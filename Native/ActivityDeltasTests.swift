@@ -6,6 +6,7 @@ import Foundation
         sync.begin("probe", now: 999)
         precondition(sync.accept(["request": "probe", "clockReceivedElapsedMs": 99010, "clockSentElapsedMs": 99510], receivedAt: 999.52))
         precondition(abs(sync.localTime(phoneMilliseconds: 100000)! - 1000) < 0.0001)
+        precondition(abs(sync.phoneMilliseconds(localTime: 1000)! - 100000) < 0.001)
         precondition(sync.roundTripMilliseconds == 20, "Exclude phone queue time from network RTT")
         sync.begin("congested", now: 1010)
         precondition(!sync.accept(["request": "congested", "clockReceivedElapsedMs": 110010, "clockSentElapsedMs": 110010], receivedAt: 1014.01))

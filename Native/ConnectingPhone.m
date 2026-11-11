@@ -204,6 +204,33 @@ static void DMSetChrome(BOOL streaming) {
     if (chrome) chrome(DMNativePhone(), streaming);
 }
 
+// A session that ends in landscape leaves the persistent phone window wide.
+// Status pages and the next connection always start from a portrait phone, so
+// turn it back around its center, keeping the phone's short edge.
+static void DMRestorePortraitWindow(void) {
+    NSWindow *window = DMNativePhone();
+    if (!window || (window.styleMask & NSWindowStyleMaskFullScreen)) return;
+    NSRect frame = window.frame;
+    if (frame.size.width <= frame.size.height) return;
+    NSRect desktop = (window.screen ?: NSScreen.mainScreen).visibleFrame;
+    NSSize size = NSMakeSize(frame.size.height, frame.size.width);
+    CGFloat limit = desktop.size.height - 96;
+    if (limit > 0 && size.height > limit) {
+        CGFloat scale = limit / size.height;
+        size.width *= scale; size.height *= scale;
+    }
+    NSRect portrait = NSMakeRect(NSMidX(frame) - size.width / 2, NSMidY(frame) - size.height / 2,
+                                 size.width, size.height);
+    // Keep the turned phone fully on its screen.
+    portrait.origin.x = MAX(NSMinX(desktop), MIN(portrait.origin.x, NSMaxX(desktop) - size.width));
+    portrait.origin.y = MAX(NSMinY(desktop), MIN(portrait.origin.y, NSMaxY(desktop) - size.height));
+    // Replace the landscape aspect lock with a finite portrait one; clearing it
+    // to (0, 0) trips AppKit's Auto Layout engine (see AUTOMATIC-ROTATION.md).
+    float aspect = (float)(size.width / size.height);
+    if (DMPhoneWindow) SDL_SetWindowAspectRatio(DMPhoneWindow, aspect, aspect);
+    [window setFrame:portrait display:YES animate:window.visible && DMPhoneMotionAllowed(window)];
+}
+
 static void DMShowPhoneState(NSString *title, NSString *message, BOOL connecting) {
     NSWindow *window = DMNativePhone();
     if (!window) return;
@@ -390,6 +417,7 @@ void DroidMirrorShowConnecting(SDL_Window *sdlWindow) {
     window.minSize = NSMakeSize(310, 520);
     window.level = [NSProcessInfo.processInfo.environment[@"DROIDMIRROR_ALWAYS_ON_TOP"] isEqualToString:@"1"]
         ? NSFloatingWindowLevel : NSNormalWindowLevel;
+    DMRestorePortraitWindow();
     NSRect frame = window.frame, desktop = (window.screen ?: NSScreen.mainScreen).visibleFrame;
     if (frame.size.height > desktop.size.height - 96) {
         CGFloat scale = (desktop.size.height - 96) / frame.size.height;
@@ -638,7 +666,7 @@ int DroidMirrorNextSession(int *argc, char ***argv) {
                     DMCurrentSession = command[@"session"];
                     DMSessionRunning = YES;
                     DMStopRequested = NO;
-                    for (NSString *key in @[@"ADB", @"DROIDMIRROR_SERIAL", @"DROIDMIRROR_START_GATE", @"DROIDMIRROR_TRANSPORT"])
+                    for (NSString *key in @[@"ADB", @"DROIDMIRROR_SERIAL", @"DROIDMIRROR_START_GATE", @"DROIDMIRROR_TRANSPORT", @"DROIDMIRROR_ALLOW_UNLOCK"])
                         unsetenv(key.UTF8String);
                     for (NSString *key in environment) {
                         if ([key hasPrefix:@"DROIDMIRROR_"] || [key isEqual:@"ADB"] || [key isEqual:@"PATH"] || [key isEqual:@"SCRCPY_SERVER_PATH"])
@@ -667,6 +695,7 @@ void DroidMirrorSessionFinished(int code) {
     void (*stopped)(void) = dlsym(RTLD_DEFAULT, "DroidMirrorSessionDidStop");
     if (stopped) stopped();
     DMSetChrome(NO);
+    DMRestorePortraitWindow();
     // Present a neutral status immediately; the host supplies specific errors
     // after it has read bridge diagnostics and restored the phone's state.
     if (!DMState || [DMState[@"connecting"] boolValue])

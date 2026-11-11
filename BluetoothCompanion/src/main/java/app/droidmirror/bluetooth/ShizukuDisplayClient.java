@@ -78,7 +78,7 @@ final class ShizukuDisplayClient implements AutoCloseable {
         return new Shizuku.UserServiceArgs(new ComponentName(context.getPackageName(), DisplayGuardService.class.getName()))
             // Bump when the embedded capture code changes: Shizuku daemons can
             // survive APK replacement and otherwise keep running the old code.
-            .daemon(true).processNameSuffix("display_guard").debuggable(false).version(78);
+            .daemon(true).processNameSuffix("display_guard").debuggable(false).version(81);
     }
     private final ServiceConnection connection = new ServiceConnection() {
         @Override public void onServiceConnected(ComponentName name, IBinder binder) {
@@ -112,11 +112,11 @@ final class ShizukuDisplayClient implements AutoCloseable {
     byte[] phoneAppearance() throws Exception {
         return ready.get(10, TimeUnit.SECONDS).phoneAppearance();
     }
-    void startVideo(ParcelFileDescriptor output, ParcelFileDescriptor controls, String computerName) throws Exception {
+    void startVideo(ParcelFileDescriptor output, ParcelFileDescriptor controls, String computerName, boolean allowAutomaticUnlock) throws Exception {
         IDisplayGuard remote = ready.get(10, TimeUnit.SECONDS);
         if (closed) throw new IllegalStateException("Mirror startup cancelled");
         if (SavedUnlockPin.paused(context)) status.accept("Automatic PIN entry is cooling down for 15 seconds; streaming remains available for manual unlock.");
-        byte[] pin = SavedUnlockPin.beginAttempt(context);
+        byte[] pin = allowAutomaticUnlock ? SavedUnlockPin.beginAttempt(context) : null;
         try {
             BlackoutMessage.State appearance = blackoutOverlay ? BlackoutMessage.read(context) : null;
             if (!remote.startCapture(owner, observer, output, controls, computerName, panelOff, pin, blackoutOverlay, blackoutOverlay ? BlackoutMessage.create(appearance, computerName) : null))

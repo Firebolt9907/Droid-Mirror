@@ -16,6 +16,11 @@ sc_device_msg_deserialize(const uint8_t *buf, size_t len,
 
     msg->type = buf[0];
     switch (msg->type) {
+        case DEVICE_MSG_TYPE_NAVIGATION_MODE:
+            if (len < 2) return 0;
+            if (buf[1] > 2) return -1;
+            msg->navigation_mode = buf[1];
+            return 2;
         case DEVICE_MSG_TYPE_SECURE_WINDOW_STATE:
             if (len < 6) return 0;
             if (buf[1] > 2) return -1;

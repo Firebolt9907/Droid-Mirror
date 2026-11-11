@@ -28,6 +28,16 @@ class LeftBehindMonitor(private val context: Context) : AutoCloseable {
         private const val CHANNEL = "left-behind"
         private const val NOTIFICATION = 8041
         const val ALGORITHM = 1 // Preserve original #2 preference, notification, and feedback IDs.
+        fun confirmationMode(context: Context) = LeftBehindBeaconState.normalize(context.getSharedPreferences("left-behind", Context.MODE_PRIVATE)
+            .getInt("beacon-confirmation-mode", LeftBehindBeaconState.BALANCED))
+        fun confirmationName(context: Context) = LeftBehindBeaconState.PRESET_NAMES[confirmationMode(context)]
+        fun setConfirmationMode(context: Context, mode: Int) {
+            context.getSharedPreferences("left-behind", Context.MODE_PRIVATE).edit()
+                .putInt("beacon-confirmation-mode", LeftBehindBeaconState.normalize(mode)).apply()
+            LeftBehindFeedback.finishAlgorithm(context, ALGORITHM, "confirmation setting changed")
+            context.getSystemService(NotificationManager::class.java).cancel(NOTIFICATION + ALGORITHM)
+            BridgeRuntime.live?.refreshLeftBehind()
+        }
         fun temporary(context: Context) = context.getSharedPreferences("left-behind", Context.MODE_PRIVATE).getBoolean("beacon-live-activity", false)
         fun setTemporary(context: Context, enabled: Boolean) { context.getSharedPreferences("left-behind", Context.MODE_PRIVATE).edit().putBoolean("beacon-live-activity", enabled).apply() }
         fun enabled(context: Context) = context.getSharedPreferences("left-behind", Context.MODE_PRIVATE).getBoolean(KEY, false)
@@ -53,7 +63,7 @@ class LeftBehindMonitor(private val context: Context) : AutoCloseable {
         }
         fun stats(context: Context): String {
             val prefs = context.getSharedPreferences("left-behind", Context.MODE_PRIVATE)
-            return "Mac BLE beacon (selected detector, formerly #2): ${prefs.getLong("radio-v1-fires-2", 0)} notification posts\n${prefs.getString("radio-v1-status-2", "Not measured yet")}\nProbes: ${prefs.getLong("radio-v1-success-2", 0)} successes, ${prefs.getLong("radio-v1-miss-2", 0)} misses, ${prefs.getLong("radio-v1-unavailable-2", 0)} unavailable" + "\n\nRecent alert/recovery history (new build onward):\n" +
+            return TrustedPlaces.summary(context) + "\nConfirmation: ${confirmationName(context)}\n${prefs.getString("beacon-confirmation-progress", "Waiting for a fresh scan")}\n\nMac BLE beacon (selected detector, formerly #2): ${prefs.getLong("radio-v1-fires-2", 0)} notification posts\n${prefs.getString("radio-v1-status-2", "Not measured yet")}\nProbes: ${prefs.getLong("radio-v1-success-2", 0)} successes, ${prefs.getLong("radio-v1-miss-2", 0)} misses, ${prefs.getLong("radio-v1-unavailable-2", 0)} unavailable" + "\n\nRecent alert/recovery history (new build onward):\n" +
                 runCatching {
                     val entries = JSONArray(prefs.getString("radio-history", "[]"))
                     (0 until entries.length()).joinToString("\n") { entries.getString(it) }
@@ -79,7 +89,9 @@ class LeftBehindMonitor(private val context: Context) : AutoCloseable {
     private var active = false
     private var lastProbe = -60_000L
     private var warmup = true
+    private var trustedPause = false
     private val probes = PresenceRadioProbes(context) { present, detail ->
+        if (checkTrustedPlace()) return@PresenceRadioProbes
         val index = ALGORITHM
         val now = SystemClock.elapsedRealtime()
         if (present == true) {
@@ -117,7 +129,8 @@ class LeftBehindMonitor(private val context: Context) : AutoCloseable {
                 LeftBehindFeedback.reconcile(context)
                 evaluate()
                 val now = SystemClock.elapsedRealtime()
-                if ((warmup || state.moving(now)) && now - lastProbe >= 60_000) {
+                TrustedPlaces.ensure(context)
+                if (!checkTrustedPlace() && (warmup || state.moving(now)) && now - lastProbe >= 60_000) {
                     warmup = false; lastProbe = now; probes.run()
                 }
                 handler.postDelayed(this, 15_000)
@@ -143,14 +156,34 @@ class LeftBehindMonitor(private val context: Context) : AutoCloseable {
     fun refresh() {
         if (closed) return
         active = enabled(context) && sensor != null
+        TrustedPlaces.ensure(context)
         probes.cancel()
         warmup = true
         lastProbe = -60_000L
+        state.configure(confirmationMode(context))
         state.reset()
         handler.removeCallbacks(graceExpired)
         if (active) { listen(); handler.post(graceExpired) }
         else { sensors.cancelTriggerSensor(motion, sensor); listening = false; cancelNotifications() }
     }
+    private fun checkTrustedPlace(): Boolean {
+        val place = TrustedPlaces.pausedAt(context)
+        if (place != null) {
+            if (!trustedPause) {
+                probes.cancel(); state.reset()
+                LeftBehindFeedback.finishAlgorithm(context, ALGORITHM, "entered trusted place")
+                notifications.cancel(NOTIFICATION + ALGORITHM)
+                record(context, "Detection paused at trusted place: $place")
+            }
+            trustedPause = true
+        } else if (trustedPause) {
+            trustedPause = false
+            probes.cancel(); state.reset(); warmup = true; lastProbe = -60_000L
+            record(context, "Left trusted place; waiting for a nearby beacon to rearm")
+        }
+        return trustedPause
+    }
+    fun trustedPlacesChanged() { if (!closed) checkTrustedPlace() }
     // Authentication is only a warmup hint; losing this link is no longer a detector.
     fun presence(present: Boolean) { if (!closed && active && present) warmup = true }
     fun suspendRadioProbes() { probes.cancel(); state.unavailable() }
@@ -167,7 +200,10 @@ class LeftBehindMonitor(private val context: Context) : AutoCloseable {
         if (!listening && active && sensor != null) listening = sensors.requestTriggerSensor(motion, sensor)
     }
     private fun evaluate() {
+        if (checkTrustedPlace()) return
         val now = SystemClock.elapsedRealtime()
+        context.getSharedPreferences("left-behind", Context.MODE_PRIVATE).edit()
+            .putString("beacon-confirmation-progress", state.evidence(now)).apply()
         if (Build.VERSION.SDK_INT >= 33 && context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) return
         if (!notifications.areNotificationsEnabled()) return
         notifications.createNotificationChannel(NotificationChannel(CHANNEL, "Mac left behind", NotificationManager.IMPORTANCE_HIGH))
@@ -179,7 +215,8 @@ class LeftBehindMonitor(private val context: Context) : AutoCloseable {
             val open = PendingIntent.getActivity(context, id, Intent(context, BridgeSettingsActivity::class.java),
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
             val detail = "Your phone is moving and your Mac’s Bluetooth beacon is absent. Check that you have your Mac. Sleep and radio interruptions can also cause this reminder."
-            val event = LeftBehindFeedback.create(context, index, detail)
+            val evidence = "${confirmationName(context)}: ${state.evidence(now)}"
+            val event = LeftBehindFeedback.create(context, index, "$detail $evidence")
             try {
                 val builder = Notification.Builder(context, CHANNEL)
                     .setSmallIcon(app.droidmirror.bluetooth.R.drawable.ic_left_behind)
@@ -200,7 +237,7 @@ class LeftBehindMonitor(private val context: Context) : AutoCloseable {
                 notifications.notify(id, builder.build())
                 LeftBehindFeedback.posted(context, event, index)
                 state.delivered()
-                record(context, "#$number notification posted; ${context.getSharedPreferences("left-behind", Context.MODE_PRIVATE).getString("radio-v1-status-$number", "link absent")}")
+                record(context, "#$number notification posted ($evidence); ${context.getSharedPreferences("left-behind", Context.MODE_PRIVATE).getString("radio-v1-status-$number", "link absent")}")
                 val prefs = context.getSharedPreferences("left-behind", Context.MODE_PRIVATE)
                 val key = "radio-v1-fires-$number"
                 prefs.edit().putLong(key, prefs.getLong(key, 0) + 1).apply()

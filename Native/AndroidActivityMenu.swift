@@ -44,6 +44,7 @@ final class AndroidActivityMenu: NSObject {
         }
     }
     private var entries = [String: Entry]()
+    private let sportsHistory = ActivitySportsHistory()
     var count: Int { entries.count }
     var onAction: (([String: Any], String) -> Void)?
 
@@ -54,6 +55,17 @@ final class AndroidActivityMenu: NSObject {
 
     func update(_ event: [String: Any]) {
         guard let id = event["id"] as? String, event["version"] as? String != nil else { return }
+        let event = sportsHistory.observe(event)
+        // Wait for logos on first appearance, but retain an existing complete card
+        // while a new artwork revision hydrates. Controls always use the latest token.
+        var displayed = event
+        if ActivityScoreboard.isESPN(event) && !ActivityScoreboard.hasLoadedLogos(event) {
+            guard let existing = entries[id] else { return }
+            displayed = existing.model.presentation.event
+            for key in ["version", "canOpen", "actions"] {
+                displayed[key] = event[key]
+            }
+        }
         let anchor = ActivityClock.anchor(event: event)
         let entry = entries[id] ?? Entry(item: NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength), event: event, clockAnchor: anchor)
         let previous = entry.event
@@ -62,7 +74,7 @@ final class AndroidActivityMenu: NSObject {
         entry.expiresAt = nil
         entry.model.enabled = true
         entry.status.enabled = true
-        entry.model.presentation = AndroidActivityPresentation(event: event, clockAnchor: anchor)
+        entry.model.presentation = AndroidActivityPresentation(event: displayed, clockAnchor: anchor)
         entries[id] = entry
         let item = entry.item
         if isNew || previous["activityIcon"] as? String != event["activityIcon"] as? String ||
@@ -76,11 +88,15 @@ final class AndroidActivityMenu: NSObject {
         }
         item.button?.isEnabled = true
         let status = String((event["status"] as? String ?? "").prefix(16))
-        entry.status.event = event
+        entry.status.event = displayed
         entry.status.text = status
         let font = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .medium)
         let width = (status as NSString).size(withAttributes: [.font: font]).width
-        item.length = status.isEmpty ? NSStatusItem.squareLength : ceil(18 + 4 + width + 8)
+        if let game = ActivityScoreboard(event: displayed) {
+            item.length = ActivityCompactScoreLayout.itemWidth(game)
+        } else {
+            item.length = status.isEmpty ? NSStatusItem.squareLength : ceil(18 + 4 + width + 8)
+        }
         if entry.statusView == nil, let button = item.button {
             let label = AndroidActivityStatusHostingView(rootView: AndroidActivityStatusLabel(model: entry.status))
             label.frame = button.bounds
@@ -89,7 +105,7 @@ final class AndroidActivityMenu: NSObject {
             entry.statusView = label
             button.image = nil; button.title = ""
         }
-        item.button?.toolTip = [event["app"], event["title"], event["body"]]
+        item.button?.toolTip = [ActivityScoreboard(event: displayed)?.summary, displayed["app"], displayed["title"], displayed["status"], displayed["body"]]
             .compactMap { $0 as? String }.filter { !$0.isEmpty }.joined(separator: "\n")
         item.button?.setAccessibilityLabel(item.button?.toolTip ?? "Android activity")
         item.button?.identifier = NSUserInterfaceItemIdentifier(id)
@@ -99,6 +115,7 @@ final class AndroidActivityMenu: NSObject {
     }
 
     func remove(_ id: String) {
+        sportsHistory.remove(id)
         if let entry = entries.removeValue(forKey: id) {
             entry.popover?.close()
             NSStatusBar.system.removeStatusItem(entry.item)
@@ -107,7 +124,7 @@ final class AndroidActivityMenu: NSObject {
     func removeDisallowed(_ allows: ([String: Any]) -> Bool) {
         for (id, entry) in entries where !allows(entry.event) { remove(id) }
     }
-    func clear() { for id in Array(entries.keys) { remove(id) } }
+    func clear() { for id in Array(entries.keys) { remove(id) }; sportsHistory.clear() }
 
     @objc private func showActivity(_ sender: NSStatusBarButton) {
         guard let id = sender.identifier?.rawValue, let entry = entries[id] else { return }
@@ -120,12 +137,18 @@ final class AndroidActivityMenu: NSObject {
             entry.popover = popover
         }
         refresh(entry, id: id)
-        entry.popover?.show(relativeTo: sender.bounds, of: sender, preferredEdge: .minY)
+        entry.popover?.show(relativeTo: Self.centerAnchor(in: sender.bounds), of: sender, preferredEdge: .minY)
+    }
+
+    /// A full-width status button gives AppKit a range of possible arrow positions.
+    /// A centered one-point strip makes the desired horizontal anchor unambiguous.
+    static func centerAnchor(in bounds: NSRect) -> NSRect {
+        NSRect(x: bounds.midX - 0.5, y: bounds.minY, width: 1, height: bounds.height)
     }
 
     private func refresh(_ entry: Entry, id: String) {
         guard let popover = entry.popover else { return }
-        // One native surface clips the legibility tint, including the chevron and outer corners.
+        // NSPopover owns the native blur/glass, including the chevron and outer corners.
         popover.hasFullSizeContent = true
         popover.appearance = NSApp.effectiveAppearance
         if entry.controller == nil {
@@ -133,6 +156,8 @@ final class AndroidActivityMenu: NSObject {
                 self?.perform(id: id, version: version, action: action)
             }
             let controller = NSHostingController(rootView: root)
+            controller.view.wantsLayer = true
+            controller.view.layer?.backgroundColor = NSColor.clear.cgColor
             entry.controller = controller
             popover.contentViewController = controller
         }
@@ -150,21 +175,32 @@ final class AndroidActivityMenu: NSObject {
         let size = controller.view.fittingSize
         let desired = NSSize(width: 380, height: min(760, max(80, size.height)))
         if popover.contentSize != desired { popover.contentSize = desired }
+        if popover.isShown, let button = entry.item.button {
+            // Re-anchor after layout/score-width changes without closing the popover.
+            popover.positioningRect = Self.centerAnchor(in: button.bounds)
+        }
     }
 
     /// Authoritative membership prunes missing notifications without removing matching status items.
     func reconcile(_ ids: Set<String>) {
+        sportsHistory.reconcile(ids)
         for id in Array(entries.keys) where !ids.contains(id) { remove(id) }
     }
 
     /// A brief outage must not tear down the menu bar. Old controls remain unusable.
     func suspend(now: TimeInterval = ActivityClock.now) {
+        sportsHistory.clear()
         for (id, entry) in entries {
             entry.model.enabled = false
             entry.status.enabled = false
             // The card remains readable; only its authenticated phone actions are suspended.
             entry.item.button?.isEnabled = true
-            if entry.expiresAt == nil { entry.expiresAt = now + 30 }
+            if entry.expiresAt == nil {
+                entry.expiresAt = now + 30
+                let summary = entry.item.button?.toolTip ?? "Android activity"
+                entry.item.button?.toolTip = summary + "\nPhone disconnected. Actions are temporarily unavailable."
+                entry.item.button?.setAccessibilityLabel(entry.item.button?.toolTip ?? summary)
+            }
             if entry.popover?.isShown == true { refresh(entry, id: id) }
         }
     }
@@ -179,6 +215,7 @@ final class AndroidActivityMenu: NSObject {
                 $0["id"] as? String == action && $0["reply"] as? Bool != true
             }) else { return }
         }
+        if action == "open" { entry.popover?.close() }
         onAction?(entry.event, action)
     }
 

@@ -3,9 +3,10 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 work=$(mktemp -d /private/tmp/droidmirror-left-behind.XXXXXX)
 trap 'rm -rf "$work"' EXIT
-javac -d "$work" BluetoothCompanion/src/main/java/app/droidmirror/bluetooth/LeftBehindBeaconState.java BluetoothCompanion/tests/LeftBehindBeaconStateTest.java BluetoothCompanion/src/main/java/app/droidmirror/bluetooth/PresenceProtocol.java BluetoothCompanion/tests/PresenceProtocolTest.java BluetoothCompanion/src/main/java/app/droidmirror/bluetooth/LeftBehindFeedbackEvent.java BluetoothCompanion/tests/LeftBehindFeedbackEventTest.java
+javac -d "$work" BluetoothCompanion/src/main/java/app/droidmirror/bluetooth/LeftBehindBeaconState.java BluetoothCompanion/tests/LeftBehindBeaconStateTest.java BluetoothCompanion/src/main/java/app/droidmirror/bluetooth/PresenceProtocol.java BluetoothCompanion/tests/PresenceProtocolTest.java BluetoothCompanion/src/main/java/app/droidmirror/bluetooth/LeftBehindFeedbackEvent.java BluetoothCompanion/tests/LeftBehindFeedbackEventTest.java BluetoothCompanion/src/main/java/app/droidmirror/bluetooth/TrustedPlacePolicy.java BluetoothCompanion/tests/TrustedPlacePolicyTest.java
 java -cp "$work" LeftBehindBeaconStateTest
 java -cp "$work" PresenceProtocolTest
 java -cp "$work" LeftBehindFeedbackEventTest
+java -cp "$work" TrustedPlacePolicyTest
 xcrun swiftc -module-cache-path /private/tmp/droidmirror-swift-module-cache Native/ActivityClock.swift Native/BLESecurity.swift Native/PresenceBeaconAdvertiser.swift Native/PresenceRadioTests.swift -o "$work/presence-radio-tests"
 "$work/presence-radio-tests"

@@ -21,6 +21,9 @@ final class WirelessAudioSession implements WirelessVideoUpgrade.AudioSession, W
     private volatile OutputStream independentOutput;
     private volatile boolean failed;
     private long lastState;
+    /** Forwarding survives this long after media playback stops (pause, track gap, app switch). */
+    static final long IDLE_TIMEOUT_MS = 60_000;
+    private long idleSince;
     WirelessAudioSession(Context context, BluetoothWire wire, ShizukuDisplayClient guard) {
         manager = context.getSystemService(AudioManager.class);
         connectivity = context.getSystemService(ConnectivityManager.class);
@@ -32,7 +35,13 @@ final class WirelessAudioSession implements WirelessVideoUpgrade.AudioSession, W
             || type == AudioDeviceInfo.TYPE_HEARING_AID || type == AudioDeviceInfo.TYPE_BLE_HEADSET
             || type == AudioDeviceInfo.TYPE_BLE_SPEAKER || type == AudioDeviceInfo.TYPE_BLE_BROADCAST;
     }
-    private boolean eligible() {
+    private boolean eligible() { return routeEligible() && musicActive(); }
+    private boolean musicActive() {
+        try { return manager != null && manager.isMusicActive(); }
+        catch (RuntimeException unavailable) { return false; }
+    }
+    /** Wi-Fi, normal mode and no Bluetooth media output; independent of whether music is playing. */
+    private boolean routeEligible() {
         if (Build.VERSION.SDK_INT < 31 || manager == null) return false;
         try {
             NetworkCapabilities network = connectivity == null ? null
@@ -54,13 +63,25 @@ final class WirelessAudioSession implements WirelessVideoUpgrade.AudioSession, W
                 for (AudioDeviceInfo device : manager.getDevices(AudioManager.GET_DEVICES_OUTPUTS))
                     if (bluetooth(device)) return false;
             }
-            return manager.isMusicActive();
+            return true;
         } catch (RuntimeException unavailable) { return false; }
     }
     @Override public void poll() throws IOException {
-        boolean available = eligible();
-        if (!available && reader != null) stop();
         long now = android.os.SystemClock.elapsedRealtime();
+        boolean route = routeEligible(), music = route && musicActive();
+        boolean available = music;
+        if (reader != null) {
+            if (!route) stop(); // Bluetooth output, call or Wi-Fi loss still stops immediately.
+            else if (music) idleSince = 0;
+            else {
+                // Keep the capture and lane alive across pauses for up to one minute.
+                if (idleSince == 0) idleSince = now;
+                if (now - idleSince >= IDLE_TIMEOUT_MS) {
+                    android.util.Log.i("DroidMirrorAudio", "No media for 60 s; ending audio forwarding");
+                    stop();
+                } else available = true;
+            }
+        }
         if (now - lastState < 500) return;
         lastState = now;
         wire.audioRecord(6, new byte[]{(byte)((available ? 1 : 0) | (playing ? 2 : 0) | (failed ? 4 : 0))});
@@ -75,7 +96,7 @@ final class WirelessAudioSession implements WirelessVideoUpgrade.AudioSession, W
     }
     @Override public synchronized void start() {
         if (reader != null || !wire.isWireless() || !eligible()) return;
-        failed = false;
+        failed = false; idleSince = 0;
         ParcelFileDescriptor[] pipe = null;
         try {
             pipe = ParcelFileDescriptor.createPipe();
@@ -121,7 +142,7 @@ final class WirelessAudioSession implements WirelessVideoUpgrade.AudioSession, W
         }
     }
     @Override public synchronized void stop() {
-        ParcelFileDescriptor input = reader; reader = null; playing = false; independentOutput=null;
+        ParcelFileDescriptor input = reader; reader = null; playing = false; independentOutput=null; idleSince = 0;
         if (input != null) {
             try { input.close(); } catch (IOException ignored) {}
             guard.stopAudio();

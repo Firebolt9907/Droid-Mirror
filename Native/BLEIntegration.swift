@@ -21,6 +21,7 @@ public func refreshDroidMirrorBLEMenu() {
 
 func shareDroidMirrorLink(_ url: URL) { integration?.shareLink(url) }
 func openDroidMirrorPhoneApp(_ url: URL) { integration?.openPhoneApp(url) }
+func installDroidMirrorApk(_ url: URL) { integration?.installApk(url) }
 
 private final class BLEIntegration: NSObject {
     private let wear = WearCompanion()
@@ -38,20 +39,33 @@ private final class BLEIntegration: NSObject {
     private var adbItem: NSMenuItem?
     private let enabledKey = "DroidMirror.BLE.enabled"
     private var discoveryNotifications: DiscoveryNotifications?
+    private var focusSync: FocusSync?
     private var phoneNotifications: AndroidNotificationBridge?
     private var media: MediaPlaybackSync?
     private var mediaItem: NSMenuItem?
     private var mediaStatusItem: NSMenuItem?
     private var remoteMediaStatus = "Media syncing off"
+    private let continuityCamera = ContinuityCamera()
     private var clipboard: ClipboardSync?
     private var appLibrary: PhoneAppLibrary?
     func openPhoneApp(_ url: URL) { appLibrary?.open(url) }
+    private var apkInstalls: ApkInstallCoordinator?
+    /// Background receiver only: confirmation and Touch ID happen in the process that sends.
+    func installApk(_ url: URL) {
+        guard NotificationRuntime.background else { return }
+        MainActor.assumeIsolated {
+            if apkInstalls == nil { apkInstalls = ApkInstallCoordinator(clipboard: clipboard) }
+            apkInstalls?.request(url)
+        }
+    }
     private var taskContinuation: TaskContinuation?
     private var hotspot: PhoneHotspot?
     private var clipboardItem: NSMenuItem?
     private var clipboardStatusItem: NSMenuItem?
     private var remoteClipboardStatus = "Clipboard mirroring off"
     private var menuObservers = [NSObjectProtocol]()
+    private var powerObservers = [NSObjectProtocol]()
+    private var systemAsleep = false
     private var repairingMenu = false
     private var stopped = false
     private var remoteStatus = "Starting background receiver…"
@@ -60,6 +74,7 @@ private final class BLEIntegration: NSObject {
     override init() {
         super.init()
         discoveryNotifications = DiscoveryNotifications(warningsEnabled: !NotificationRuntime.background)
+        focusSync = NotificationRuntime.background ? FocusSync() : nil
         phoneNotifications = NotificationRuntime.background ? AndroidNotificationBridge() : nil
         media = NotificationRuntime.background ? MediaPlaybackSync() : nil
         clipboard = NotificationRuntime.background ? ClipboardSync() : nil
@@ -69,8 +84,19 @@ private final class BLEIntegration: NSObject {
         discoveryNotifications?.onResponse = { [weak self] response in self?.phoneNotifications?.respond(response) }
         NotificationRuntime.preferences.register(defaults: [enabledKey: true])
         if NotificationRuntime.background && NotificationRuntime.preferences.bool(forKey: enabledKey) { start() }
+        let workspace = NSWorkspace.shared.notificationCenter
+        powerObservers.append(workspace.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) {
+            [weak self] _ in
+            self?.systemAsleep = true
+            self?.controller?.systemWillSleep()
+        })
+        powerObservers.append(workspace.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) {
+            [weak self] _ in
+            self?.systemAsleep = false
+            self?.controller?.systemDidWake()
+        })
         let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
-            guard let self else { return }
+            guard let self, !self.systemAsleep else { return }
             if NotificationRuntime.background { self.links.tick(); self.appLibrary?.tick(); self.wear.tick(); self.publishStatus() }
             else { self.refreshMenu() }
         }
@@ -82,6 +108,15 @@ private final class BLEIntegration: NSObject {
             })
         }
         let distributed = DistributedNotificationCenter.default()
+        clipboard?.dropStatus = { message in
+            distributed.postNotificationName(Notification.Name("app.droidmirror.fileDropStatus"), object: nil,
+                userInfo: ["message": message], deliverImmediately: true)
+        }
+        menuObservers.append(distributed.addObserver(forName: Notification.Name("app.droidmirror.fileDrop"), object: nil, queue: .main) {
+            [weak self] event in
+            guard NotificationRuntime.background, let path = event.userInfo?["path"] as? String else { return }
+            _ = self?.clipboard?.sendDroppedFile(URL(fileURLWithPath: path))
+        })
         menuObservers.append(distributed.addObserver(forName: Notification.Name("app.droidmirror.sessionState"), object: nil, queue: .main) {
             [weak self] event in
             guard let pid = event.userInfo?["pid"] as? Int,
@@ -135,11 +170,17 @@ private final class BLEIntegration: NSObject {
         menuObservers.append(distributed.addObserver(forName: Notification.Name("app.droidmirror.mediaConfiguration"), object: nil, queue: .main) {
             [weak self] _ in self?.media?.configure()
         })
+        menuObservers.append(distributed.addObserver(forName: Notification.Name("app.droidmirror.bulkTest"), object: nil, queue: .main) {
+            [weak self] event in
+            guard NotificationRuntime.background, let config = event.userInfo as? [String: Any] else { return }
+            self?.controller?.startBulkTest(config)
+        })
         refreshMenu()
     }
 
     private func publishStatus() {
         NotificationRuntime.post("app.droidmirror.receiverStatus", info: [
+            "focus": focusSync?.diagnostics ?? "Focus sync off",
             "status": controller?.status ?? "Bluetooth receiver disabled",
             "bleDiagnostics": controller?.diagnostics ?? "disabled",
             "notifications": phoneNotifications?.diagnostics ?? "unavailable",
@@ -147,22 +188,32 @@ private final class BLEIntegration: NSObject {
             "battery": wear.batteryStatus,
             "media": media?.status ?? "Media syncing off",
             "clipboard": clipboard?.status ?? "Clipboard mirroring off",
+            "clipboardDiagnostics": clipboard?.diagnostics ?? "unavailable",
             "endpoint": controller?.adbStatus ?? "Wireless ADB off"])
     }
 
     private func start() {
         let bridge = BLEController()
         controller = bridge
+        if systemAsleep { bridge.systemWillSleep() }
+        bridge.clipboardCanRetry = { [weak self] id in self?.clipboard?.canRetryFile(id) == true }
+        bridge.bulkTestResult = { result in NotificationRuntime.post("app.droidmirror.bulkTestResult", info: result) }
         links.controller = bridge
         wear.controller = bridge
         phoneNotifications?.controller = bridge
         media?.controller = bridge
+        if NotificationRuntime.background { continuityCamera.controller = bridge }
         clipboard?.controller = bridge
         taskContinuation?.controller = bridge
         appLibrary?.controller = bridge
         hotspot?.controller = bridge
+        focusSync?.controller = bridge
         bridge.onEvent = { [weak self] event in
-            if (event["type"] as? String)?.hasPrefix("watch") == true {
+            if event["type"] as? String == "focusState" {
+                self?.focusSync?.receive(event)
+            } else if (event["type"] as? String)?.hasPrefix("camera") == true {
+                self?.continuityCamera.receive(event)
+            } else if (event["type"] as? String)?.hasPrefix("watch") == true {
                 self?.wear.receive(event)
             } else if ["shareLink", "openLinkResult"].contains(event["type"] as? String ?? "") {
                 self?.links.receive(event)
@@ -193,6 +244,7 @@ private final class BLEIntegration: NSObject {
             }
         }
         bridge.onDisconnected = { [weak self] in
+            self?.continuityCamera.stop()
             self?.phoneNotifications?.disconnected()
             self?.appLibrary?.disconnected()
             self?.wear.clear()
@@ -203,6 +255,8 @@ private final class BLEIntegration: NSObject {
             self?.links.disconnected()
         }
         bridge.onAuthenticated = { [weak self] in
+            if NotificationRuntime.background { self?.continuityCamera.connectedToPhone() }
+            self?.focusSync?.connected()
             self?.wear.connected()
             self?.phoneNotifications?.connected()
             self?.appLibrary?.connected()
@@ -219,16 +273,21 @@ private final class BLEIntegration: NSObject {
 
     func stop() {
         stopped = true
+        if let apkInstalls { MainActor.assumeIsolated { apkInstalls.cancel() } }
+        continuityCamera.stop()
         links.cancel()
         wear.clear()
         menuObservers.forEach { NotificationCenter.default.removeObserver($0) }
         menuObservers.forEach { DistributedNotificationCenter.default().removeObserver($0) }
         menuObservers.removeAll()
+        powerObservers.forEach { NSWorkspace.shared.notificationCenter.removeObserver($0) }
+        powerObservers.removeAll()
         media?.stop()
         clipboard?.stop()
         taskContinuation?.stop()
         appLibrary?.stop()
         hotspot?.stop()
+        focusSync?.stop()
         phoneNotifications?.stop()
         discoveryNotifications?.stop()
         timer?.invalidate()

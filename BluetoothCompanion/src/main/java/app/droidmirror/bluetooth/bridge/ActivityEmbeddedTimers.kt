@@ -26,7 +26,7 @@ object ActivityEmbeddedTimers {
         }
         listOf("title", "body", "subtitle", "status").forEach { add(it, payload.optString(it)) }
         payload.optJSONArray("lines")?.let { lines -> for (i in 0 until lines.length()) add("lines/$i", lines.optString(i)) }
-        payload.optJSONArray("customNodes")?.let { nodes -> for (i in 0 until nodes.length()) add("nodes/$i", nodes.optJSONObject(i)?.optString("text") ?: "") }
+        payload.optJSONArray("customNodes")?.let { nodes -> for (i in 0 until nodes.length()) if (nodes.optJSONObject(i)?.optString("sportsField") != "gameClock") add("nodes/$i", nodes.optJSONObject(i)?.optString("text") ?: "") }
         if (spans.length() > 0) payload.put("embeddedTimers", spans).put("timerSampleElapsedMs", now)
     }
     fun prepareToSend(payload: JSONObject, now: Long = SystemClock.elapsedRealtime()) {

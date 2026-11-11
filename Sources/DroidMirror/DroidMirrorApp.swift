@@ -60,6 +60,27 @@ final class DroidMirrorAppDelegate: NSObject, NSApplicationDelegate {
         OnboardingWindowController.shared.show(model: model)
     }
 
+    /// Finder "Open With DroidMirror" for .apk files. The background receiver owns
+    /// the authenticated phone link, so it performs the confirmation, Touch ID
+    /// check and transfer; the host only forwards the file.
+    func application(_ application: NSApplication, open urls: [URL]) {
+        let apks = urls.filter { $0.isFileURL && $0.pathExtension.lowercased() == "apk" }
+        guard !apks.isEmpty else { return }
+        let receiver = Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/DroidMirror Notifications.app")
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = false
+        NSWorkspace.shared.open(apks, withApplicationAt: receiver, configuration: configuration) { _, error in
+            guard let error else { return }
+            DispatchQueue.main.async {
+                let alert = NSAlert()
+                alert.messageText = "Couldn’t send the app to your phone"
+                alert.informativeText = "DroidMirror’s background receiver didn’t start: \(error.localizedDescription)"
+                NSApp.activate(ignoringOtherApps: true)
+                alert.runModal()
+            }
+        }
+    }
+
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         PhoneWindowController.shared.reopen(model: MirrorModel.shared)
         return true
@@ -108,6 +129,11 @@ final class DroidMirrorAppDelegate: NSObject, NSApplicationDelegate {
         // commands because this app owns its AppKit menu instead of a SwiftUI scene.
         let editItem = NSMenuItem()
         let editMenu = NSMenu(title: "Edit")
+        editMenu.addItem(NSMenuItem(title: "Undo", action: Selector(("undo:")), keyEquivalent: "z"))
+        let redoItem = NSMenuItem(title: "Redo", action: Selector(("redo:")), keyEquivalent: "z")
+        redoItem.keyEquivalentModifierMask = [.command, .shift]
+        editMenu.addItem(redoItem)
+        editMenu.addItem(.separator())
         for (title, action, key) in [
             ("Cut", #selector(NSText.cut(_:)), "x"),
             ("Copy", #selector(NSText.copy(_:)), "c"),

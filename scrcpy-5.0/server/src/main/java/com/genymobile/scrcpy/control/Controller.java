@@ -597,6 +597,7 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
     }
 
     private void sendCameraCutout() {
+        if (sender != null) sender.send(DeviceMessage.createNavigationMode(displayId == 0 ? navigationMode() : -1));
         DisplayData data = displayData.get();
         if (sender == null || data == null) {
             return;

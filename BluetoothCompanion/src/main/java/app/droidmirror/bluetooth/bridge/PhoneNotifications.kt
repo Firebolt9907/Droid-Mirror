@@ -254,8 +254,8 @@ class PhoneNotifications : NotificationListenerService() {
         live = this
         snapshot().forEach { BridgeRuntime.live?.sendEvent(it) }
     }
-    override fun onListenerDisconnected() { ActivityEmbeddedTimers.clear(); BridgeRuntime.live?.sendEvent(JSONObject().put("type", "activitiesReset")); live = null; cancelOpen(); synchronized(this) { entries.clear() } }
-    override fun onDestroy() { imageThread?.quitSafely(); imageAssets.clear(); ActivityEmbeddedTimers.clear(); live = null; cancelOpen(); super.onDestroy() }
+    override fun onListenerDisconnected() { ActivityCustomLayout.clear(); ActivityEmbeddedTimers.clear(); BridgeRuntime.live?.sendEvent(JSONObject().put("type", "activitiesReset")); live = null; cancelOpen(); synchronized(this) { entries.clear() } }
+    override fun onDestroy() { ActivityCustomLayout.clear(); imageThread?.quitSafely(); imageAssets.clear(); ActivityEmbeddedTimers.clear(); live = null; cancelOpen(); super.onDestroy() }
     @Synchronized private fun remember(sbn: StatusBarNotification): Entry {
         val entry = Entry(sbn, UUID.randomUUID().toString())
         entries[id(sbn.key)] = entry
@@ -293,7 +293,7 @@ class PhoneNotifications : NotificationListenerService() {
                 notification.extras.getCharSequence(Notification.EXTRA_BIG_TEXT) ?: notification.extras.getCharSequence(Notification.EXTRA_TEXT), 1200))
             .put("actions", actions)
         if (ActivityNotification.isActivity(notification)) {
-            val metadata = ActivityNotification.metadata(this, notification)
+            val metadata = ActivityNotification.metadata(this, notification, sbn.packageName)
             metadata.keys().forEach { key -> result.put(key, metadata.get(key)) }
             if (Build.VERSION.SDK_INT >= 36) runCatching {
                 val style = Notification.Builder.recoverBuilder(this, notification).style as? Notification.ProgressStyle
@@ -375,8 +375,25 @@ class PhoneNotifications : NotificationListenerService() {
             result.remove("appIcon")
             listOf("progressStartIcon", "progressEndIcon", "progressTrackerIcon").forEach { result.remove(it) }
         }
+        if (result.toString().toByteArray(Charsets.UTF_8).size > 5400 && result.has("customNodes")) {
+            // Custom notifications often have no useful standard extras. Preserve their
+            // teams/scores/status fields before spending space on duplicate fallback text.
+            result.remove("activityIcon")
+            result.put("body", ConversationPayload.boundedText(result.optString("body"), 120))
+            result.put("subtitle", ConversationPayload.boundedText(result.optString("subtitle"), 80))
+            val nodes = result.getJSONArray("customNodes")
+            val overhead = result.toString().toByteArray(Charsets.UTF_8).size - nodes.toString().toByteArray(Charsets.UTF_8).size
+            ActivityLayoutBudget.fit(nodes, (5400 - overhead).coerceAtLeast(1))
+        }
         if (result.toString().toByteArray(Charsets.UTF_8).size > 5400) {
-            listOf("customNodes", "progressSegments", "progressPoints", "lines").forEach { result.remove(it) }
+            listOf("progressSegments", "progressPoints", "lines").forEach { result.remove(it) }
+        }
+        if (result.toString().toByteArray(Charsets.UTF_8).size > 5400 && result.has("customNodes")) {
+            // Even geometry/revisions can exceed the transport limit in pathological
+            // cards. Fall back only after reclaiming optional content, never send
+            // an oversized frame or silently truncate one side of a custom layout.
+            result.remove("customNodes")
+            if (result.optString("layout") == "custom") result.put("layout", "standard")
         }
         if (result.toString().toByteArray(Charsets.UTF_8).size > 5400) {
             result.remove("embeddedTimers")
@@ -411,14 +428,26 @@ class PhoneNotifications : NotificationListenerService() {
         val contentChanged = changes.contentChanged(comparable, now)
         if (previous != null && sameBindings(previous.notification.notification, sbn.notification) && !contentChanged) {
             // Refresh the local PendingIntent source without changing its advertised version.
+            if (previous.notification.notification !== sbn.notification) ActivityCustomLayout.forget(previous.notification.notification)
             entries[key] = candidate
             return null
         }
+        if (previous != null && previous.notification.notification !== sbn.notification) ActivityCustomLayout.forget(previous.notification.notification)
         val current = candidate.copy(version = UUID.randomUUID().toString())
         entries[key] = current
         while (entries.size > 128) entries.remove(entries.keys.first())
         value.put("version", current.version)
         return value
+    }
+    fun sourceClockChanged(notification: Notification) {
+        openHandler.post {
+            if (live !== this || BridgeRuntime.live?.notificationStreamReady() != true) {
+                ActivityCustomLayout.pause(notification); return@post
+            }
+            val entry = synchronized(this) { entries.values.firstOrNull { it.notification.notification === notification } }
+                ?: run { ActivityCustomLayout.pause(notification); return@post }
+            changedPayload(entry.notification)?.let { BridgeRuntime.live?.sendEvent(it) }
+        }
     }
     override fun onNotificationPosted(sbn: StatusBarNotification) {
         if (!eligible(sbn)) {
@@ -426,7 +455,7 @@ class PhoneNotifications : NotificationListenerService() {
             val key = id(sbn.key)
             ActivityEmbeddedTimers.forget(key)
             synchronized(this) { changes.encode(JSONObject().put("type", "removed").put("id", key), SystemClock.elapsedRealtime()) }
-            val removed = synchronized(this) { entries.remove(key) != null }
+            val removed = synchronized(this) { entries.remove(key)?.also { ActivityCustomLayout.forget(it.notification.notification) } != null }
             if (removed) BridgeRuntime.live?.sendEvent(JSONObject().put("type", "removed").put("id", key))
             return
         }
@@ -435,7 +464,7 @@ class PhoneNotifications : NotificationListenerService() {
     override fun onNotificationRemoved(sbn: StatusBarNotification) {
         val key = id(sbn.key)
         ActivityEmbeddedTimers.forget(key)
-        synchronized(this) { entries.remove(key); changes.encode(JSONObject().put("type", "removed").put("id", key), SystemClock.elapsedRealtime()) }
+        synchronized(this) { entries.remove(key)?.let { ActivityCustomLayout.forget(it.notification.notification) }; changes.encode(JSONObject().put("type", "removed").put("id", key), SystemClock.elapsedRealtime()) }
         BridgeRuntime.live?.sendEvent(JSONObject().put("type", "removed").put("id", key))
     }
     @Synchronized fun snapshot(): List<JSONObject> {

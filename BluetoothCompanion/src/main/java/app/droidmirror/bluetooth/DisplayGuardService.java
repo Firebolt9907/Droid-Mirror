@@ -48,6 +48,7 @@ public final class DisplayGuardService extends IDisplayGuard.Stub {
     private String captureError = "";
     private long lastActivity;
     private long lastAudioRecovery;
+    private long displayRecoveryUntil;
     private String computerName;
 
     private void checkCaller() {
@@ -92,6 +93,12 @@ public final class DisplayGuardService extends IDisplayGuard.Stub {
                 boolean interactive = true;
                 try { interactive = logical.interactive(); } catch (Exception ignored) {}
                 session.tick(interactive); lease.tick();
+                if (session.owner() == null && now < displayRecoveryUntil) {
+                    // OFF may be only an intermediate state on the way to AOD.
+                    // Follow Android's policy briefly after releasing our override;
+                    // otherwise restoring OFF can outlive the doze transition.
+                    lease.recover();
+                }
                 if (blackout != null && session.owns(owner)) {
                     try {
                         if (touchBlocker == null || !touchBlocker.alive()) throw new IllegalStateException("Touch blocker ended");
@@ -161,6 +168,7 @@ public final class DisplayGuardService extends IDisplayGuard.Stub {
             owner = token; death = recipient; observer = events;
             if (!token.isBinderAlive()) throw new RemoteException("App died before capture");
             if (!session.begin(token, 10000)) throw new IllegalStateException("Remote session already active");
+            displayRecoveryUntil = 0;
             // Own recovery before waking: encoder/transport startup must not leave the
             // physical lock screen visible while waiting for the first Mac frame.
             if (usePanelOff && !lease.acquire(token, 10000)) throw new IllegalStateException(lease.getLastError());
@@ -422,6 +430,7 @@ public final class DisplayGuardService extends IDisplayGuard.Stub {
     }
     @Override public synchronized String getLastError() { return captureError.isEmpty() ? lease.getLastError() : captureError; }
     private boolean ended(Object token, int cause) {
+        long recoveryStarted = SystemClock.elapsedRealtime();
         android.util.Log.i("DroidMirrorLease", "Remote session ended, cause=" + cause);
         releaseSilentHaptics(); // Local phone feedback must return before display recovery or teardown.
         IStreamEvents events = observer;
@@ -442,12 +451,15 @@ public final class DisplayGuardService extends IDisplayGuard.Stub {
                 if (cause == RemoteSession.STOP && blackout != null) blackout.fadeOut();
                 logical.sleep();
                 lease.release(token);
+                displayRecoveryUntil = SystemClock.elapsedRealtime() + 2500;
             }
         } catch (Exception failure) {
             android.util.Log.e("DroidMirrorLease", "Lock or display recovery failed", failure);
             lease.recover();
         }
         closeBlackout();
+        android.util.Log.i("DroidMirrorLease", "Display recovery complete: cause=" + cause
+            + " awake=" + awake + " elapsedMs=" + (SystemClock.elapsedRealtime() - recoveryStarted));
         // Recovery and event delivery precede the slower notification command.
         if (events != null) {
             try { events.onEnded(cause, awake); } catch (RemoteException ignored) {}

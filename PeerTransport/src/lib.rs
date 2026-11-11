@@ -24,6 +24,7 @@ use zeroize::Zeroize;
 
 const ALPN: &[u8] = b"droidmirror/video/1";
 const LIBRARY_ALPN: &[u8] = b"droidmirror/app-library/1";
+const CLIPBOARD_ALPN: &[u8] = b"droidmirror/clipboard/1";
 const AUDIO_ALPN: &[u8] = b"droidmirror/audio/1";
 
 fn diagnostic(message: &str) {
@@ -59,6 +60,10 @@ fn identity(key: &[u8; 32], role: &[u8]) -> SecretKey {
 }
 
 async fn endpoint_mode(secret: SecretKey, library: bool) -> Result<Endpoint> {
+    endpoint_kind(secret, library, false).await
+}
+
+async fn endpoint_kind(secret: SecretKey, library: bool, clipboard: bool) -> Result<Endpoint> {
     // LAN discovery only: never register with public discovery or relay services.
     let ep = Endpoint::builder(presets::Minimal)
         .relay_mode(RelayMode::Disabled)
@@ -72,7 +77,9 @@ async fn endpoint_mode(secret: SecretKey, library: bool) -> Result<Endpoint> {
                 .build(),
         )
         .secret_key(secret)
-        .alpns(if library {
+        .alpns(if clipboard {
+            vec![CLIPBOARD_ALPN.to_vec()]
+        } else if library {
             vec![LIBRARY_ALPN.to_vec()]
         } else {
             vec![ALPN.to_vec(), AUDIO_ALPN.to_vec()]
@@ -242,7 +249,7 @@ async fn desktop(
 }
 
 #[cfg(target_os = "android")]
-async fn phone(ep: Endpoint, peer: EndpointId, library: bool) -> Result<()> {
+async fn phone(ep: Endpoint, peer: EndpointId, library: bool, clipboard: bool, camera: bool) -> Result<()> {
     use std::os::{
         android::net::SocketAddrExt,
         unix::net::{SocketAddr, UnixStream},
@@ -252,7 +259,10 @@ async fn phone(ep: Endpoint, peer: EndpointId, library: bool) -> Result<()> {
         let Ok(Ok(conn)) = tokio::time::timeout(Duration::from_secs(5), incoming).await else {
             continue;
         };
-        if !paired(&conn, peer) || (library && conn.alpn() != LIBRARY_ALPN) {
+        if !paired(&conn, peer)
+            || (library && conn.alpn() != LIBRARY_ALPN)
+            || (clipboard && conn.alpn() != CLIPBOARD_ALPN)
+        {
             continue;
         }
         let Ok(permit) = permits.clone().try_acquire_owned() else {
@@ -262,7 +272,11 @@ async fn phone(ep: Endpoint, peer: EndpointId, library: bool) -> Result<()> {
         let audio = conn.alpn() == AUDIO_ALPN;
         tokio::spawn(async move {
             let _permit = permit;
-            let name = if library {
+            let name = if camera {
+                b"droidmirror_camera".as_slice()
+            } else if clipboard {
+                b"droidmirror_clipboard".as_slice()
+            } else if library {
                 b"droidmirror_app_library".as_slice()
             } else if audio {
                 b"droidmirror_audio_upgrade".as_slice()
@@ -326,9 +340,39 @@ impl Drop for Bridge {
     }
 }
 
-fn start_mode(mut key: [u8; 32], is_phone: bool, library: bool) -> Result<(Bridge, u16)> {
-    let phone_role: &[u8] = if library { b"phone-library" } else { b"phone" };
-    let mac_role: &[u8] = if library { b"mac-library" } else { b"mac" };
+fn start_mode(key: [u8; 32], is_phone: bool, library: bool) -> Result<(Bridge, u16)> {
+    start_kind(key, is_phone, library, false)
+}
+
+fn start_kind(key: [u8; 32], is_phone: bool, library: bool, clipboard: bool) -> Result<(Bridge, u16)> {
+    start_camera_kind(key, is_phone, library, clipboard, false)
+}
+
+fn start_camera_kind(
+    mut key: [u8; 32],
+    is_phone: bool,
+    library: bool,
+    clipboard: bool,
+    camera: bool,
+) -> Result<(Bridge, u16)> {
+    let phone_role: &[u8] = if camera {
+        b"phone-camera"
+    } else if clipboard {
+        b"phone-clipboard"
+    } else if library {
+        b"phone-library"
+    } else {
+        b"phone"
+    };
+    let mac_role: &[u8] = if camera {
+        b"mac-camera"
+    } else if clipboard {
+        b"mac-clipboard"
+    } else if library {
+        b"mac-library"
+    } else {
+        b"mac"
+    };
     let secret = identity(&key, if is_phone { phone_role } else { mac_role });
     let peer = identity(&key, if is_phone { mac_role } else { phone_role }).public();
     key.zeroize();
@@ -342,7 +386,7 @@ fn start_mode(mut key: [u8; 32], is_phone: bool, library: bool) -> Result<(Bridg
         .map(|l| l.local_addr().map(|a| a.port()))
         .transpose()?
         .unwrap_or(0);
-    let audio_listener = if is_phone || library {
+    let audio_listener = if is_phone || library || clipboard {
         None
     } else {
         Some(TcpListener::bind(("127.0.0.1", 0))?)
@@ -369,9 +413,12 @@ fn start_mode(mut key: [u8; 32], is_phone: bool, library: bool) -> Result<(Bridg
             tokio::select! {
                 _ = stopped => {},
                 result = async {
-                    let ep = endpoint_mode(secret, library).await?;
+                    let ep = endpoint_kind(secret, library, clipboard).await?;
                     *worker_local.write().expect("local endpoint poisoned") = Some(ep.clone());
                     if let Some(listener) = listener {
+                        if clipboard {
+                            return desktop(ep, peer, listener, worker_remote, updates, CLIPBOARD_ALPN).await;
+                        }
                         if library {
                             return desktop(ep, peer, listener, worker_remote, updates, LIBRARY_ALPN).await;
                         }
@@ -384,7 +431,7 @@ fn start_mode(mut key: [u8; 32], is_phone: bool, library: bool) -> Result<(Bridg
                     }
                     else {
                         #[cfg(target_os = "android")]
-                        { phone(ep, peer, library).await }
+                        { phone(ep, peer, library, clipboard, camera).await }
                         #[cfg(not(target_os = "android"))]
                         { anyhow::bail!("phone endpoint requires Android") }
                     }
@@ -424,6 +471,56 @@ pub unsafe extern "C" fn dm_peer_library_start(key: *const u8, port: *mut u16) -
         bytes.copy_from_slice(std::slice::from_raw_parts(key, 32));
     }
     let result = start_mode(bytes, false, true);
+    bytes.zeroize();
+    match result {
+        Ok((bridge, value)) => {
+            unsafe {
+                *port = value;
+            }
+            Box::into_raw(Box::new(bridge))
+        }
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+/// Starts a dedicated, separately identified clipboard connection.
+/// # Safety
+/// Same pointer contract as dm_peer_start.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dm_peer_clipboard_start(key: *const u8, port: *mut u16) -> *mut Bridge {
+    if key.is_null() || port.is_null() {
+        return std::ptr::null_mut();
+    }
+    let mut bytes = [0; 32];
+    unsafe {
+        bytes.copy_from_slice(std::slice::from_raw_parts(key, 32));
+    }
+    let result = start_kind(bytes, false, false, true);
+    bytes.zeroize();
+    match result {
+        Ok((bridge, value)) => {
+            unsafe {
+                *port = value;
+            }
+            Box::into_raw(Box::new(bridge))
+        }
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+/// Dedicated camera identity and local socket; shares the reliable bulk ALPN.
+/// # Safety
+/// Same pointer contract as dm_peer_start.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dm_peer_camera_start(key: *const u8, port: *mut u16) -> *mut Bridge {
+    if key.is_null() || port.is_null() {
+        return std::ptr::null_mut();
+    }
+    let mut bytes = [0; 32];
+    unsafe {
+        bytes.copy_from_slice(std::slice::from_raw_parts(key, 32));
+    }
+    let result = start_camera_kind(bytes, false, false, true, true);
     bytes.zeroize();
     match result {
         Ok((bridge, value)) => {
@@ -560,7 +657,7 @@ mod android {
         context: JObject,
         key: JByteArray,
     ) -> jlong {
-        native_start(env, context, key, false)
+        native_start(env, context, key, false, false, false)
     }
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_app_droidmirror_bluetooth_PeerLibraryEndpoint_nativeStart(
@@ -569,9 +666,31 @@ mod android {
         context: JObject,
         key: JByteArray,
     ) -> jlong {
-        native_start(env, context, key, true)
+        native_start(env, context, key, true, false, false)
     }
-    fn native_start(mut env: JNIEnv, context: JObject, key: JByteArray, library: bool) -> jlong {
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_app_droidmirror_bluetooth_PeerClipboardEndpoint_nativeStart(
+        env: JNIEnv,
+        _: JClass,
+        context: JObject,
+        key: JByteArray,
+    ) -> jlong {
+        native_start(env, context, key, false, true, false)
+    }
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_app_droidmirror_bluetooth_PeerCameraEndpoint_nativeStart(
+        env: JNIEnv, _: JClass, context: JObject, key: JByteArray,
+    ) -> jlong {
+        native_start(env, context, key, false, true, true)
+    }
+    fn native_start(
+        mut env: JNIEnv,
+        context: JObject,
+        key: JByteArray,
+        library: bool,
+        clipboard: bool,
+        camera: bool,
+    ) -> jlong {
         let Ok(_guard) = INITIALIZE.lock() else {
             return 0;
         };
@@ -600,7 +719,7 @@ mod android {
         let mut fixed = [0; 32];
         fixed.copy_from_slice(&bytes);
         bytes.zeroize();
-        let result = start_mode(fixed, true, library);
+        let result = start_camera_kind(fixed, true, library, clipboard, camera);
         fixed.zeroize();
         match result {
             Ok((bridge, _)) => Box::into_raw(Box::new(bridge)) as jlong,
@@ -735,6 +854,137 @@ mod tests {
             drop(library_bridge);
             drop(video_bridge);
             library_server.close().await;
+            video_server.close().await;
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn clipboard_lane_is_separate_and_progresses_with_blocked_video() {
+        use tokio::io::AsyncReadExt;
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let key = [91; 32];
+            assert_ne!(
+                identity(&key, b"mac").public(),
+                identity(&key, b"mac-clipboard").public()
+            );
+            let video_server = Endpoint::builder(presets::Minimal)
+                .secret_key(identity(&key, b"phone"))
+                .alpns(vec![ALPN.to_vec()])
+                .bind()
+                .await
+                .unwrap();
+            let clipboard_server = Endpoint::builder(presets::Minimal)
+                .secret_key(identity(&key, b"phone-clipboard"))
+                .alpns(vec![CLIPBOARD_ALPN.to_vec()])
+                .bind()
+                .await
+                .unwrap();
+            let (video_bridge, video_port) = start(key, false).unwrap();
+            let (clipboard_bridge, clipboard_port) = start_kind(key, false, false, true).unwrap();
+            assert_eq!(clipboard_bridge.audio_port, 0);
+            video_bridge
+                .remote
+                .write()
+                .unwrap()
+                .extend(video_server.addr().ip_addrs().copied());
+            clipboard_bridge
+                .remote
+                .write()
+                .unwrap()
+                .extend(clipboard_server.addr().ip_addrs().copied());
+            let _video = tokio::net::TcpStream::connect(("127.0.0.1", video_port))
+                .await
+                .unwrap();
+            let video = video_server.accept().await.unwrap().await.unwrap();
+            let _blocked = prepare_stream(&video, false).await.unwrap();
+            let mut local = tokio::net::TcpStream::connect(("127.0.0.1", clipboard_port))
+                .await
+                .unwrap();
+            let connection = clipboard_server.accept().await.unwrap().await.unwrap();
+            assert_eq!(connection.alpn(), CLIPBOARD_ALPN);
+            assert!(paired(
+                &connection,
+                identity(&key, b"mac-clipboard").public()
+            ));
+            assert_ne!(connection.remote_id(), identity(&key, b"mac").public());
+            let (mut send, _recv) = prepare_stream(&connection, false).await.unwrap();
+            let payload = vec![71; 65536];
+            send.write_all(&payload).await.unwrap();
+            let mut actual = vec![0; payload.len()];
+            local.read_exact(&mut actual).await.unwrap();
+            assert_eq!(actual, payload);
+            drop(local);
+            drop(clipboard_bridge);
+            drop(video_bridge);
+            clipboard_server.close().await;
+            video_server.close().await;
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn camera_lane_is_separate_and_progresses_with_blocked_video() {
+        use tokio::io::AsyncReadExt;
+        tokio::time::timeout(Duration::from_secs(30), async {
+            let key = [91; 32];
+            assert_ne!(
+                identity(&key, b"mac").public(),
+                identity(&key, b"mac-camera").public()
+            );
+            assert_ne!(identity(&key, b"mac-camera").public(), identity(&key, b"mac-clipboard").public());
+            let video_server = Endpoint::builder(presets::Minimal)
+                .secret_key(identity(&key, b"phone"))
+                .alpns(vec![ALPN.to_vec()])
+                .bind()
+                .await
+                .unwrap();
+            let camera_server = Endpoint::builder(presets::Minimal)
+                .secret_key(identity(&key, b"phone-camera"))
+                .alpns(vec![CLIPBOARD_ALPN.to_vec()])
+                .bind()
+                .await
+                .unwrap();
+            let (video_bridge, video_port) = start(key, false).unwrap();
+            let (camera_bridge, camera_port) = start_camera_kind(key, false, false, true, true).unwrap();
+            assert_eq!(camera_bridge.audio_port, 0);
+            video_bridge
+                .remote
+                .write()
+                .unwrap()
+                .extend(video_server.addr().ip_addrs().copied());
+            camera_bridge
+                .remote
+                .write()
+                .unwrap()
+                .extend(camera_server.addr().ip_addrs().copied());
+            let _video = tokio::net::TcpStream::connect(("127.0.0.1", video_port))
+                .await
+                .unwrap();
+            let video = video_server.accept().await.unwrap().await.unwrap();
+            let _blocked = prepare_stream(&video, false).await.unwrap();
+            let mut local = tokio::net::TcpStream::connect(("127.0.0.1", camera_port))
+                .await
+                .unwrap();
+            let connection = camera_server.accept().await.unwrap().await.unwrap();
+            assert_eq!(connection.alpn(), CLIPBOARD_ALPN);
+            assert!(paired(
+                &connection,
+                identity(&key, b"mac-camera").public()
+            ));
+            assert_ne!(connection.remote_id(), identity(&key, b"mac").public());
+            let (mut send, _recv) = prepare_stream(&connection, false).await.unwrap();
+            let payload = vec![71; 65536];
+            send.write_all(&payload).await.unwrap();
+            let mut actual = vec![0; payload.len()];
+            local.read_exact(&mut actual).await.unwrap();
+            assert_eq!(actual, payload);
+            drop(local);
+            drop(camera_bridge);
+            drop(video_bridge);
+            camera_server.close().await;
             video_server.close().await;
         })
         .await

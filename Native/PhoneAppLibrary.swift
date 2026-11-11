@@ -377,6 +377,10 @@ final class PhoneAppLibrary {
         try fm.createDirectory(at: executable.deletingLastPathComponent(), withIntermediateDirectories: true)
         let resources = contents.appendingPathComponent("Resources")
         try fm.createDirectory(at: resources, withIntermediateDirectories: true)
+        // Refresh existing shortcuts too, so launcher fixes reach them on the next connect.
+        if fm.fileExists(atPath: executable.path), !fm.contentsEqual(atPath: source.path, andPath: executable.path) {
+            try fm.removeItem(at: executable)
+        }
         if !fm.fileExists(atPath: executable.path) { try fm.copyItem(at: source, to: executable) }
         var link = URLComponents(); link.scheme = "droidmirror-app"; link.host = "launch"
         link.queryItems = [URLQueryItem(name: "phone", value: identity), URLQueryItem(name: "component", value: app.component)]

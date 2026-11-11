@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleIdentifier</key><string>app.droidmirror.camera</string>
+<key>CFBundleExecutable</key><string>DroidMirrorCamera</string>
+<key>CFBundleName</key><string>DroidMirror Phone Camera</string>
+<key>CFBundlePackageType</key><string>SYSX</string>
+<key>CFBundleVersion</key><string>2</string>
+<key>CFBundleShortVersionString</key><string>1.0</string>
+<key>LSMinimumSystemVersion</key><string>14.0</string>
+<key>NSSystemExtensionUsageDescription</key><string>Make your paired Android phone available as a camera to Mac apps.</string>
+<key>CMIOExtension</key><dict><key>CMIOExtensionMachServiceName</key><string>$(TeamIdentifierPrefix)app.droidmirror.camera</string></dict>
+</dict></plist>

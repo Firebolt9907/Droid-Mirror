@@ -8,7 +8,7 @@ struct OnboardingTests {
         app.setActivationPolicy(.accessory)
         app.finishLaunching()
         let defaults = UserDefaults.standard
-        let keys = ["DroidMirror.onboarding.started", "DroidMirror.onboarding.completed", "DroidMirror.onboarding.step", "DroidMirror.BLE.enabled"]
+        let keys = ["DroidMirror.onboarding.started", "DroidMirror.onboarding.completed", "DroidMirror.onboarding.step", "DroidMirror.BLE.enabled", OnboardingWindowController.deferredKey]
         for key in keys { defaults.removeObject(forKey: key) }
         defer { for key in keys { defaults.removeObject(forKey: key) } }
         let model = MirrorModel()
@@ -19,6 +19,9 @@ struct OnboardingTests {
         precondition(!OnboardingWindowController.needsFirstRun(model: model), "Existing setups must not be forced through onboarding")
         defaults.set(true, forKey: "DroidMirror.onboarding.started")
         precondition(OnboardingWindowController.needsFirstRun(model: model), "An interrupted setup must resume")
+        defaults.set(true, forKey: OnboardingWindowController.deferredKey)
+        precondition(!OnboardingWindowController.needsFirstRun(model: model), "Set up later must stop automatic reopening")
+        defaults.removeObject(forKey: OnboardingWindowController.deferredKey)
         defaults.set(true, forKey: "DroidMirror.onboarding.completed")
         precondition(!OnboardingWindowController.needsFirstRun(model: model))
         let controller = OnboardingWindowController.shared
@@ -29,11 +32,18 @@ struct OnboardingTests {
         precondition(!model.isOnboarding && model.bluetoothPairingCode.isEmpty, "Closing clears the draft code and releases the auto-start pause")
         controller.show(model: model)
         precondition(model.isOnboarding && controller.window?.isVisible == true)
+        controller.deferSetup()
+        precondition(!model.isOnboarding && defaults.bool(forKey: OnboardingWindowController.deferredKey))
+        controller.show(model: model)
+        precondition(!defaults.bool(forKey: OnboardingWindowController.deferredKey), "Reopening setup clears the deferral")
         controller.close()
 
         model.isOnboarding = true
         model.devices = [AndroidDevice(id: "test-phone", state: "device", model: "Android phone", product: "", transport: "bluetooth-classic")]
         model.selectedID = "test-phone"
+        // The setup view rechecks the saved pairing when the selected phone
+        // first resolves; let that settle before exercising the pairing guards.
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.2))
         model.bluetoothPairingCode = "invalid-code"
         model.pairBluetooth()
         precondition(model.isPairingBluetooth)

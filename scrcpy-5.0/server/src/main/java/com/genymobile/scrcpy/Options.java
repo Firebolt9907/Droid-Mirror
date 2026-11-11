@@ -64,6 +64,7 @@ public class Options {
     private boolean cleanup = true;
     private boolean powerOn = true;
     private boolean droidMirrorSession;
+    private boolean droidMirrorAllowUnlock;
 
     private NewDisplay newDisplay;
     private boolean vdDestroyContent = true;
@@ -228,6 +229,7 @@ public class Options {
         return audioEncoder;
     }
 
+    public boolean getDroidMirrorAllowUnlock() { return droidMirrorAllowUnlock; }
     public boolean getDroidMirrorSession() { return droidMirrorSession; }
 
     public boolean getPowerOffScreenOnClose() {
@@ -467,6 +469,9 @@ public class Options {
                     break;
                 case "cleanup":
                     options.cleanup = Boolean.parseBoolean(value);
+                    break;
+                case "droidmirror_allow_unlock":
+                    options.droidMirrorAllowUnlock = Boolean.parseBoolean(value);
                     break;
                 case "droidmirror_session":
                     options.droidMirrorSession = Boolean.parseBoolean(value);

@@ -88,6 +88,14 @@ task_set_camera_cutout(void *userdata) {
     free(userdata);
 }
 
+static void
+task_set_navigation_mode(void *userdata) {
+#ifdef __APPLE__
+    void (*set_mode)(int) = (void (*)(int)) dlsym(RTLD_DEFAULT, "DroidMirrorSetNavigationMode");
+    if (set_mode) set_mode((int)(intptr_t) userdata);
+#endif
+}
+
 static struct sc_secure_screen_gate secure_gate;
 
 static void
@@ -123,6 +131,9 @@ task_set_secure_window(void *userdata) {
 static void
 process_msg(struct sc_receiver *receiver, struct sc_device_msg *msg) {
     switch (msg->type) {
+        case DEVICE_MSG_TYPE_NAVIGATION_MODE:
+            sc_run_on_main_thread(task_set_navigation_mode, (void *)(intptr_t) msg->navigation_mode, false);
+            break;
         case DEVICE_MSG_TYPE_SECURE_WINDOW_STATE: {
             struct sc_device_msg *copy = malloc(sizeof(*copy));
             if (!copy) return;

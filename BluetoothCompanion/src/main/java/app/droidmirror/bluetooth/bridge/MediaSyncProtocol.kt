@@ -36,10 +36,32 @@ object MediaSyncProtocol {
             val value = event.optDouble(key, Double.NaN)
             if (!value.isFinite() || value < 0 || value > 604800) return false
         }
+        if (event.has("playbackRate")) {
+            val rate = event.optDouble("playbackRate", Double.NaN)
+            if (!rate.isFinite() || rate !in 0.0..4.0) return false
+        }
         val actions = event.optJSONArray("actions") ?: return false
         return event.opt("playing") is Boolean && actions.length() <= 8 &&
             (0 until actions.length()).all { actions.optString(it) in listOf("play", "pause", "next", "previous", "seek", "shuffle", "repeat", "queue") }
     }
+}
+
+/**
+ * Keeps the result of an expensive conversion until its source content changes.
+ * A failed conversion is remembered too, so it is not retried on every poll.
+ */
+class LastConversion<S : Any, R : Any>(private val same: (S, S) -> Boolean, private val convert: (S) -> R?) {
+    private var source: S? = null
+    private var result: R? = null
+    fun get(value: S): R? {
+        val previous = source
+        if (previous == null || !same(previous, value)) {
+            result = convert(value)
+            source = value
+        }
+        return result
+    }
+    fun clear() { source = null; result = null }
 }
 
 /** One in-flight chunk, one cached cover per direction, tied to snapshot digest. */
@@ -59,8 +81,11 @@ class MediaArtworkTransfer {
     var completed: String? = null
         private set
     fun prepare(event: JSONObject): JSONObject {
-        outgoing = (event.remove("artwork") as? String).orEmpty().takeIf { it.length <= MAX_LENGTH }.orEmpty()
-        outgoingId = if (outgoing.isEmpty()) "" else digest(outgoing)
+        val next = (event.remove("artwork") as? String).orEmpty().takeIf { it.length <= MAX_LENGTH }.orEmpty()
+        if (next != outgoing) {
+            outgoing = next
+            outgoingId = if (outgoing.isEmpty()) "" else digest(outgoing)
+        }
         if (outgoingId.isNotEmpty()) event.put("artworkID", outgoingId).put("artworkLength", outgoing.length)
         return event
     }
@@ -153,13 +178,14 @@ class MediaStateWire {
     private var acknowledgedIncoming = ""
     private var position = 0.0
     private var positionAt = 0L
-    private var playing = false
+    private var rate = 0.0
     private var duration = 0.0
-    @JvmOverloads fun prepare(value: JSONObject, now: Long = System.nanoTime() / 1000000): JSONObject? {
-        val keys = value.keys().asSequence().filter { it != "position" }.sorted().toList()
+    @JvmOverloads fun prepare(input: JSONObject, now: Long = System.nanoTime() / 1000000): JSONObject? {
+        val value = MediaPositionTiming.advance(input, now)
+        val keys = value.keys().asSequence().filter { it != "position" && it != "positionSampleElapsedMs" }.sorted().toList()
         val next = keys.joinToString("\n") { JSONObject.quote(it) + ":" + org.json.JSONArray().put(value.get(it)).toString() }
         val currentPosition = value.optDouble("position", 0.0)
-        val projected = position + if (playing) (now - positionAt).coerceAtLeast(0) / 1000.0 else 0.0
+        val projected = position + rate * (now - positionAt).coerceAtLeast(0) / 1000.0
         val expected = if (duration > 0) minOf(duration, projected) else projected
         val changed = signature != next || (peerSupportsLocalTimeline && kotlin.math.abs(currentPosition - expected) > 1.0)
         val incomingRevision = incoming?.optString("stateRevision").orEmpty()
@@ -167,14 +193,14 @@ class MediaStateWire {
         acknowledgedIncoming = incomingRevision
         if (peerSupportsCompact && !changed && confirmedRevision == revision && revision.isNotEmpty()) {
             val compact = JSONObject().put("type", "mediaState").put("stateRevision", revision).put("unchanged", true)
-            if (value.has("position")) compact.put("position", value.get("position"))
+            if (value.has("position")) compact.put("position", value.get("position")).put("positionSampleElapsedMs", now)
             incoming?.opt("stateRevision")?.let { compact.put("receivedStateRevision", it) }
             return compact
         }
         if (changed || revision.isEmpty()) {
             revision = java.util.UUID.randomUUID().toString()
             position = currentPosition; positionAt = now
-            playing = value.optBoolean("playing"); duration = value.optDouble("duration", 0.0)
+            rate = MediaPositionTiming.rate(value); duration = value.optDouble("duration", 0.0)
         }
         signature = next
         return JSONObject(value.toString()).put("stateRevision", revision).put("supportsCompactState", true).put("supportsLocalTimeline", true)
@@ -190,6 +216,8 @@ class MediaStateWire {
                 val position = event.optDouble("position", Double.NaN)
                 if (!position.isFinite() || position < 0 || position > 604800) return null
                 full.put("position", position)
+                full.remove("positionSampleElapsedMs")
+                if (event.has("positionSampleElapsedMs")) full.put("positionSampleElapsedMs", event.get("positionSampleElapsedMs"))
             }
             return full
         }
@@ -199,5 +227,27 @@ class MediaStateWire {
         incoming = JSONObject(event.toString())
         acknowledgedIncoming = "" // Retry acknowledgments when a full snapshot is retransmitted.
         return event
+    }
+}
+
+/** No wall-clock assumptions: sender and receiver use calibrated phone elapsed-realtime samples. */
+object MediaPositionTiming {
+    @JvmStatic fun rate(value: JSONObject): Double {
+        if (!value.optBoolean("playing")) return 0.0
+        val rate = value.optDouble("playbackRate", 1.0)
+        return if (rate.isFinite() && rate in 0.0..4.0) rate else 0.0
+    }
+    @JvmStatic fun advance(input: JSONObject, now: Long): JSONObject {
+        val value = JSONObject(input.toString())
+        if (!value.optBoolean("active")) return value
+        val sample = value.optLong("positionSampleElapsedMs", now)
+        val age = (now - sample).coerceIn(0, 60000) / 1000.0
+        val position = (value.optDouble("position", 0.0) + rate(value) * age).coerceAtLeast(0.0)
+        val duration = value.optDouble("duration", 0.0)
+        return value.put("position", if (duration > 0) minOf(position, duration) else position).put("positionSampleElapsedMs", now)
+    }
+    @JvmStatic fun anchor(value: JSONObject, now: Long): Long {
+        val sample = value.optLong("positionSampleElapsedMs", now)
+        return sample.coerceIn((now - 60000).coerceAtLeast(0), now)
     }
 }

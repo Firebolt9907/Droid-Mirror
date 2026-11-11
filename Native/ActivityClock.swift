@@ -205,6 +205,11 @@ struct ActivityClockSync {
         if samples.count > 8 { samples.removeFirst() }
         return old == nil || abs((best?.offset ?? offset)-(old ?? offset)) > 0.001
     }
+    func phoneMilliseconds(localTime: Double) -> Double? {
+        guard localTime.isFinite, let best else { return nil }
+        let value = (localTime - best.offset) * 1000
+        return value.isFinite && value >= 0 ? value : nil
+    }
     func localTime(phoneMilliseconds: Double) -> Double? {
         guard phoneMilliseconds.isFinite, phoneMilliseconds >= 0, let best else { return nil }
         return phoneMilliseconds / 1000 + best.offset

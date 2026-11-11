@@ -32,8 +32,10 @@ public final class QRPairingActivity extends Activity {
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
         LinearLayout root = new LinearLayout(this); root.setOrientation(LinearLayout.VERTICAL);
-        root.setPadding(32, 48, 32, 32);
-        status = new TextView(this); status.setTextSize(18); status.setText("Scan the QR code in DroidMirror on your Mac."); root.addView(status);
+        int spacing = Math.round(24 * getResources().getDisplayMetrics().density);
+        root.setPadding(spacing, spacing, spacing, spacing);
+        setTitle("Pair with your Mac");
+        status = new TextView(this); status.setAccessibilityLiveRegion(android.view.View.ACCESSIBILITY_LIVE_REGION_POLITE); status.setTextSize(18); status.setText("Scan the QR code in DroidMirror on your Mac."); root.addView(status);
         Button close = new Button(this); close.setText("Close"); close.setOnClickListener(v -> finish()); root.addView(close);
         setContentView(root);
         peer = getIntent().getStringExtra("peer");
@@ -47,9 +49,15 @@ public final class QRPairingActivity extends Activity {
     @Override protected void onSaveInstanceState(Bundle state) { state.putBoolean("scanning", scanning); super.onSaveInstanceState(state); }
     private void requestScanner() {
         if (ended) return;
-        String permission = Build.VERSION.SDK_INT >= 31 ? Manifest.permission.BLUETOOTH_SCAN : Manifest.permission.ACCESS_FINE_LOCATION;
-        if (checkSelfPermission(permission) != PackageManager.PERMISSION_GRANTED) {
-            requestPermissions(new String[]{permission}, 9); return;
+        List<String> missing = new ArrayList<>();
+        String[] required = Build.VERSION.SDK_INT >= 31
+            ? new String[]{Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.BLUETOOTH_CONNECT}
+            : new String[]{Manifest.permission.ACCESS_FINE_LOCATION};
+        for (String permission : required) {
+            if (checkSelfPermission(permission) != PackageManager.PERMISSION_GRANTED) missing.add(permission);
+        }
+        if (!missing.isEmpty()) {
+            requestPermissions(missing.toArray(new String[0]), 9); return;
         }
         scanning = true;
         new IntentIntegrator(this).setDesiredBarcodeFormats(IntentIntegrator.QR_CODE)
@@ -58,8 +66,11 @@ public final class QRPairingActivity extends Activity {
     }
     @Override public void onRequestPermissionsResult(int request, String[] permissions, int[] results) {
         super.onRequestPermissionsResult(request, permissions, results);
-        if (request == 9 && results.length > 0 && results[0] == PackageManager.PERMISSION_GRANTED) requestScanner();
-        else fail("Nearby device scanning permission is required for QR transfer. Manual copying is still available.");
+        if (request != 9) return;
+        boolean granted = results.length > 0;
+        for (int result : results) granted &= result == PackageManager.PERMISSION_GRANTED;
+        if (granted) requestScanner();
+        else fail("Allow Nearby devices in Android app permissions to pair by QR code. You can also copy the pairing code manually.");
     }
     @Override protected void onActivityResult(int request, int result, Intent data) {
         IntentResult scan = IntentIntegrator.parseActivityResult(request, result, data);
@@ -115,7 +126,9 @@ public final class QRPairingActivity extends Activity {
         @Override public void onConnectionStateChange(BluetoothGatt source, int result, int state) { main.post(() -> {
             if (ended || source != gatt) return;
             if (result == BluetoothGatt.GATT_SUCCESS && state == BluetoothProfile.STATE_CONNECTED) {
-                if (!source.discoverServices()) fail("Could not discover the pairing service.");
+                try {
+                    if (!source.discoverServices()) fail("Could not discover the pairing service.");
+                } catch (SecurityException denied) { fail("Bluetooth permission was removed. Allow Nearby devices and retry pairing."); }
             } else fail("Mac disconnected before confirming the save. Check the Mac, then retry if needed.");
         }); }
         @Override public void onServicesDiscovered(BluetoothGatt source, int result) { main.post(() -> {
@@ -129,7 +142,9 @@ public final class QRPairingActivity extends Activity {
             if (ended || source != gatt) return;
             if (result != BluetoothGatt.GATT_SUCCESS) { fail("Mac did not accept the key. Check the Mac and scan a fresh QR code."); return; }
             if (sent == packet.length) {
-                if (!source.readCharacteristic(target)) fail("Could not verify the Mac saved the key. Check the Mac before retrying.");
+                try {
+                    if (!source.readCharacteristic(target)) fail("Could not verify the Mac saved the key. Check the Mac before retrying.");
+                } catch (SecurityException denied) { fail("Bluetooth permission was removed. Check the Mac before retrying pairing."); }
             } else writeNext();
         }); }
         @Override public void onCharacteristicRead(BluetoothGatt source, BluetoothGattCharacteristic characteristic, byte[] value, int result) {
@@ -161,7 +176,11 @@ public final class QRPairingActivity extends Activity {
     private void cleanup() {
         main.removeCallbacks(timeout);
         if (scanner != null) { try { scanner.stopScan(scanCallback); } catch (RuntimeException ignored) {} scanner = null; }
-        if (gatt != null) { try { gatt.disconnect(); } catch (RuntimeException ignored) {} gatt.close(); gatt = null; }
+        if (gatt != null) {
+            try { gatt.disconnect(); } catch (RuntimeException ignored) {}
+            try { gatt.close(); } catch (RuntimeException ignored) {}
+            gatt = null;
+        }
         if (expectedAcknowledgement != null) { Arrays.fill(expectedAcknowledgement, (byte)0); expectedAcknowledgement = null; }
         if (packet != null) { Arrays.fill(packet, (byte)0); packet = null; }
     }

@@ -741,6 +741,13 @@ sc_input_manager_process_key(struct sc_input_manager *im,
         }
         return;
     }
+    // macOS Option+Backspace deletes a word. Android Alt+Backspace deletes
+    // a line, so translate only this chord to Android Control+Backspace.
+    // Do this after Command's line-delete handling so it cannot match it.
+    if (sdl_keycode == SDLK_BACKSPACE && (mod & SDL_KMOD_ALT)
+            && !(mod & (SDL_KMOD_CTRL | SDL_KMOD_GUI | SDL_KMOD_SHIFT))) {
+        mod = (mod & ~SDL_KMOD_ALT) | SDL_KMOD_LCTRL;
+    }
 #endif
 
     uint64_t ack_to_wait = SC_SEQUENCE_INVALID;

@@ -18,7 +18,7 @@ internal object ActivityNotification {
     ) != 0 || n.extras.getBoolean("android.requestPromotedOngoing", false) ||
         (Build.VERSION.SDK_INT >= 36 && !n.shortCriticalText.isNullOrEmpty())
 
-    fun metadata(context: Context, n: Notification): JSONObject {
+    fun metadata(context: Context, n: Notification, sourcePackage: String? = null): JSONObject {
         val extras = n.extras
         fun text(key: String) = extras.getCharSequence(key)?.toString()?.trim().orEmpty()
         fun normalized(value: String) = value.trim().replace(Regex("\\s+"), " ").lowercase(java.util.Locale.ROOT)
@@ -43,7 +43,7 @@ internal object ActivityNotification {
         val metricClock = ActivityMetricClock.read(context, n, sampledAt, sampledWallTime)
         val clock = extras.getBoolean(Notification.EXTRA_SHOW_CHRONOMETER) && n.`when` > 0
         val template = extras.getString(Notification.EXTRA_TEMPLATE).orEmpty()
-        val custom = ActivityCustomLayout.read(context, n)
+        val custom = ActivityCustomLayout.read(context, n, sourcePackage)
         val layout = when {
             template.endsWith("CallStyle") || n.category == Notification.CATEGORY_CALL -> "call"
             style != null || maximum > 0 || indeterminate -> "progress"

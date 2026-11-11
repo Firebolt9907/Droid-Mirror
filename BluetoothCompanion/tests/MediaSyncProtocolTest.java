@@ -39,6 +39,13 @@ public final class MediaSyncProtocolTest {
         for (int second = 0; second < 20; second++) check(legacyWire.prepare(snapshot(), second * 1000) != null);
         check(new app.droidmirror.bluetooth.bridge.MediaStateWire().receive(new JSONObject().put("unchanged", true)
             .put("stateRevision", full.getString("stateRevision"))) == null);
+        JSONObject delayed = snapshot().put("position", 60).put("positionSampleElapsedMs", 96000);
+        JSONObject advanced = app.droidmirror.bluetooth.bridge.MediaPositionTiming.advance(delayed, 100000);
+        check(advanced.getDouble("position") == 64 && advanced.getLong("positionSampleElapsedMs") == 100000);
+        check(app.droidmirror.bluetooth.bridge.MediaPositionTiming.anchor(advanced, 102000) == 100000); // Arrival must not reset the sample anchor.
+        check(app.droidmirror.bluetooth.bridge.MediaPositionTiming.advance(new JSONObject(delayed.toString()).put("playing", false), 100000).getDouble("position") == 60);
+        check(app.droidmirror.bluetooth.bridge.MediaPositionTiming.advance(new JSONObject(delayed.toString()).put("playbackRate", 0.5), 100000).getDouble("position") == 62);
+        check(!MediaSyncProtocol.validSnapshot(snapshot().put("playbackRate", -1)));
         check(MediaSyncProtocol.validSnapshot(snapshot()));
         check(MediaSyncProtocol.fresh(1000, 8999));
         check(!MediaSyncProtocol.fresh(1000, 9000));
@@ -122,6 +129,31 @@ public final class MediaSyncProtocolTest {
         JSONObject request;
         while ((request = receiver.request(3000)) != null) check(receiver.receive(sender.reply(request)));
         check(receiver.getCompleted() == null);
-        System.out.println("PASS: Android media schema, bounds, actions and lease expiry");
+
+        // A cover is converted only when its content changes, and a failure is not retried.
+        int[] conversions = {0};
+        app.droidmirror.bluetooth.bridge.LastConversion<String, String> converted =
+            new app.droidmirror.bluetooth.bridge.LastConversion<>(String::equals, value -> {
+                conversions[0]++;
+                return value.equals("broken") ? null : "encoded:" + value;
+            });
+        check("encoded:a".equals(converted.get(new String("a"))));
+        check("encoded:a".equals(converted.get(new String("a"))));
+        check(conversions[0] == 1);
+        check("encoded:b".equals(converted.get("b")) && conversions[0] == 2);
+        check(converted.get("broken") == null && converted.get("broken") == null && conversions[0] == 3);
+        check("encoded:b".equals(converted.get("b")) && conversions[0] == 4);
+        converted.clear();
+        check("encoded:b".equals(converted.get("b")) && conversions[0] == 5);
+
+        // An unchanged cover keeps its digest, and a transfer in progress keeps working.
+        app.droidmirror.bluetooth.bridge.MediaArtworkTransfer repeated = new app.droidmirror.bluetooth.bridge.MediaArtworkTransfer();
+        String sameCover = "Q".repeat(5000);
+        String firstId = repeated.prepare(new JSONObject().put("artwork", sameCover)).getString("artworkID");
+        check(firstId.equals(repeated.prepare(new JSONObject().put("artwork", sameCover)).getString("artworkID")));
+        check(repeated.reply(new JSONObject().put("artworkID", firstId).put("offset", 0)) != null);
+        check(!repeated.prepare(new JSONObject()).has("artworkID"));
+        check(repeated.reply(new JSONObject().put("artworkID", firstId).put("offset", 0)) == null);
+        System.out.println("PASS: Android media schema, bounds, actions, lease expiry and cover reuse");
     }
 }

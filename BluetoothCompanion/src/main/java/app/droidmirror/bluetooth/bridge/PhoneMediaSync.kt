@@ -27,6 +27,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
+import android.provider.Settings
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.UUID
@@ -63,6 +64,10 @@ class PhoneMediaSync(private val context: Context, private val send: (JSONObject
         remoteArtwork = decodeArtwork(bytes)
         ++artworkVersion
     }
+    // Each poll receives a new Bitmap object for the same cover, so compare pixels.
+    private val localCover = LastConversion<Bitmap, String>(
+        { old, new -> runCatching { old.sameAs(new) }.getOrDefault(false) },
+        { encodeArtwork(it) })
     private var remote: JSONObject? = null
     private var remoteAt = 0L
     private var closed = false
@@ -136,14 +141,17 @@ class PhoneMediaSync(private val context: Context, private val send: (JSONObject
         if (selected != null) {
             val metadata = selected.metadata
             val state = selected.playbackState
+            val sampleAt = SystemClock.elapsedRealtime()
             val position = (state?.position ?: 0L).coerceAtLeast(0) +
                 (if (state?.state == PlaybackState.STATE_PLAYING && state.lastPositionUpdateTime > 0)
-                    ((SystemClock.elapsedRealtime() - state.lastPositionUpdateTime).coerceAtLeast(0) * state.playbackSpeed).toLong() else 0)
+                    ((sampleAt - state.lastPositionUpdateTime).coerceAtLeast(0) * state.playbackSpeed).toLong() else 0)
             event.put("id", localId).put("title", metadata?.getString(MediaMetadata.METADATA_KEY_TITLE).orEmpty().take(240))
                 .put("artist", metadata?.getString(MediaMetadata.METADATA_KEY_ARTIST).orEmpty().take(240))
                 .put("album", metadata?.getString(MediaMetadata.METADATA_KEY_ALBUM).orEmpty().take(240))
                 .put("externalAudio", externalAudioConnected()).put("playing", playing(selected)).put("duration", (metadata?.getLong(MediaMetadata.METADATA_KEY_DURATION) ?: 0L).coerceAtLeast(0) / 1000.0)
-                .put("position", position / 1000.0).put("actions", JSONArray(actions(selected).keys.toList()))
+                .put("position", position / 1000.0).put("positionSampleElapsedMs", sampleAt)
+                .put("volumeControl", volumeAdjustable(selected))
+                .put("playbackRate", if (state?.state == PlaybackState.STATE_PLAYING && state.playbackSpeed.isFinite()) state.playbackSpeed.toDouble().coerceIn(0.0, 4.0) else 0.0).put("actions", JSONArray(actions(selected).keys.toList()))
         }
         if (selected != null) {
             val metadata = selected.metadata
@@ -152,7 +160,7 @@ class PhoneMediaSync(private val context: Context, private val send: (JSONObject
                     ?: metadata?.getBitmap(MediaMetadata.METADATA_KEY_ART)
                     ?: metadata?.getBitmap(MediaMetadata.METADATA_KEY_DISPLAY_ICON)
             }.getOrNull()
-            if (cover != null) encodeArtwork(cover)?.let {
+            if (cover != null) localCover.get(cover)?.let {
                 event.put("artwork", it)
             }
         }
@@ -169,7 +177,7 @@ class PhoneMediaSync(private val context: Context, private val send: (JSONObject
                 remoteQueue.observe(remote)
                 artwork.observe(remote ?: JSONObject())
                 updateRemoteArtwork(if (remote != null) artwork.completed ?: event.opt("artwork") else null)
-                remoteAt = SystemClock.elapsedRealtime()
+                remoteAt = MediaPositionTiming.anchor(event, SystemClock.elapsedRealtime())
                 requestArtwork()
                 render()
             }
@@ -185,6 +193,7 @@ class PhoneMediaSync(private val context: Context, private val send: (JSONObject
                 updateRemoteArtwork(artwork.completed)
                 requestArtwork(); render()
             }
+            "mediaVolume" -> adjustVolume(event)
             "mediaCommand" -> {
                 val controller = local ?: return
                 if (event.optString("id") != localId) return
@@ -208,6 +217,48 @@ class PhoneMediaSync(private val context: Context, private val send: (JSONObject
                 refresh()
             }
         }
+    }
+    private fun volumeAdjustable(controller: MediaController): Boolean = runCatching {
+        val info = controller.playbackInfo
+        if (info.playbackType == MediaController.PlaybackInfo.PLAYBACK_TYPE_LOCAL)
+            !context.getSystemService(AudioManager::class.java).isVolumeFixed
+        else info.volumeControl != VolumeProvider.VOLUME_CONTROL_FIXED
+    }.getOrDefault(false)
+
+    /** Mac volume keys act on the advertised session's output, never on an unrelated stream. */
+    private fun adjustVolume(event: JSONObject) {
+        val controller = local ?: return
+        val id = event.optString("id")
+        if (id != localId) return
+        val direction = when (event.optString("action")) {
+            "up" -> AudioManager.ADJUST_RAISE
+            "down" -> AudioManager.ADJUST_LOWER
+            "mute" -> AudioManager.ADJUST_TOGGLE_MUTE
+            else -> return
+        }
+        val current = runCatching { manager.getActiveSessions(ComponentName(context, PhoneNotifications::class.java)) }
+            .getOrNull()?.firstOrNull { it.sessionToken == controller.sessionToken } ?: return
+        if (!volumeAdjustable(current)) return
+        runCatching {
+            if (current.playbackInfo.playbackType == MediaController.PlaybackInfo.PLAYBACK_TYPE_LOCAL)
+                context.getSystemService(AudioManager::class.java).adjustStreamVolume(AudioManager.STREAM_MUSIC, direction, 0)
+            else current.adjustVolume(direction, 0)
+        }
+        sendVolume(current, id)
+        // Remote (cast) routes apply volume asynchronously; report the settled value too.
+        handler.postDelayed({ if (!closed && local?.sessionToken == current.sessionToken && localId == id) sendVolume(current, id) }, 350)
+    }
+    private fun sendVolume(controller: MediaController, id: String) {
+        val info = runCatching { controller.playbackInfo }.getOrNull() ?: return
+        val audio = context.getSystemService(AudioManager::class.java)
+        val localPlayback = info.playbackType == MediaController.PlaybackInfo.PLAYBACK_TYPE_LOCAL
+        val max = if (localPlayback) audio.getStreamMaxVolume(AudioManager.STREAM_MUSIC) else info.maxVolume
+        val level = if (localPlayback) audio.getStreamVolume(AudioManager.STREAM_MUSIC) else info.currentVolume
+        if (max !in 1..1000) return
+        val name = runCatching { Settings.Global.getString(context.contentResolver, Settings.Global.DEVICE_NAME) }
+            .getOrNull()?.takeIf { it.isNotBlank() } ?: Build.MODEL.orEmpty()
+        send(JSONObject().put("type", "mediaVolumeState").put("id", id).put("level", level.coerceIn(0, max)).put("max", max)
+            .put("muted", localPlayback && audio.isStreamMute(AudioManager.STREAM_MUSIC)).put("name", name.take(64)))
     }
     private fun remoteFresh() = !closed && (wire.peerSupportsLocalTimeline || MediaSyncProtocol.fresh(remoteAt, SystemClock.elapsedRealtime()))
     private fun usableRemote(): JSONObject? = remote?.takeIf {
@@ -283,7 +334,7 @@ class PhoneMediaSync(private val context: Context, private val send: (JSONObject
         }
         proxy.setPlaybackState(playback.setState(
             if (isPlaying) PlaybackState.STATE_PLAYING else PlaybackState.STATE_PAUSED,
-            (value.getDouble("position") * 1000).toLong(), if (isPlaying) 1f else 0f, remoteAt).build())
+            (value.getDouble("position") * 1000).toLong(), MediaPositionTiming.rate(value).toFloat(), remoteAt).build())
         proxy.isActive = true
         val signature = listOf(value.getString("id"), value.getString("title"), value.getString("artist"), isPlaying, names, value.optBoolean("shuffle"), value.optString("repeat"), remoteArtwork).toString()
         if (signature == notificationSignature) return
@@ -348,7 +399,7 @@ class PhoneMediaSync(private val context: Context, private val send: (JSONObject
         closed = true
         handler.removeCallbacksAndMessages(null)
         remote = null; remoteArtwork = null; remoteArtworkBytes = null; publication.clear()
-        local = null; remoteQueue.observe(null); artwork.clear(); route?.close()
+        local = null; remoteQueue.observe(null); artwork.clear(); localCover.clear(); route?.close()
         proxy.isActive = false; proxy.release()
         notifications.cancel(NOTIFICATION)
         if (live === this) live = null

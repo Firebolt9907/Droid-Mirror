@@ -22,6 +22,7 @@ final class BleInputServer implements AutoCloseable {
     static final UUID CLOCK = UUID.fromString("c356a44e-6f2b-4da9-85e5-397991b8a615");
     static final UUID RESUME = UUID.fromString("c356a44e-6f2b-4da9-85e5-397991b8a616");
     static final UUID REPLAY = UUID.fromString("c356a44e-6f2b-4da9-85e5-397991b8a617");
+    static final UUID UNLOCK_DECISION = UUID.fromString("c356a44e-6f2b-4da9-85e5-397991b8a618");
     static final UUID KEY = UUID.fromString("c356a44e-6f2b-4da9-85e5-397991b8a614");
     private static final UUID CCC = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb");
     private final String selectedPeer;
@@ -159,7 +160,11 @@ final class BleInputServer implements AutoCloseable {
             android.util.Log.w("DroidMirrorBleInput", "BLE return enqueue busy; retrying bounded pending record");
         }
     }
-    boolean awaitInput() throws InterruptedException { return first.await(15, TimeUnit.SECONDS) && !closed.get(); }
+    private final UnlockSessionAuthorization unlockAuthorization = new UnlockSessionAuthorization();
+    boolean automaticUnlockAllowed() { return unlockAuthorization.allowed(); }
+    // Covers BLE discovery/authentication plus the Mac's bounded (30 s) Touch ID
+    // decision, which now runs after the authenticated channel is open.
+    boolean awaitInput() throws InterruptedException { return first.await(45, TimeUnit.SECONDS) && !closed.get(); }
     private void fail() {
         if (closed.get()) return;
         close(); new Thread(failed, "BleInputFailure").start();
@@ -181,6 +186,13 @@ final class BleInputServer implements AutoCloseable {
             } catch (RuntimeException unsupported) {
                 android.util.Log.d("DroidMirrorBleInput", "Keeping negotiated BLE PHY");
             }
+        }
+        unlockAuthorization.firstRecord(plain);
+        if (UnlockSessionAuthorization.isAuthorization(plain)) {
+            // Only the first record can grant permission; later records cannot
+            // upgrade a session that started with manual unlock.
+            first.countDown();
+            return;
         }
         if (plain.length >= 13 && plain[0] == 3
                 && java.nio.ByteBuffer.wrap(plain, 1, 4).getInt() == 8) {
@@ -271,6 +283,9 @@ final class BleInputServer implements AutoCloseable {
             try {
                 if (!selected(device)) {
                     server.sendResponse(device, request, BluetoothGatt.GATT_INSUFFICIENT_AUTHENTICATION, 0, null); return;
+                }
+                if (UNLOCK_DECISION.equals(characteristic.getUuid())) {
+                    server.sendResponse(device, request, BluetoothGatt.GATT_SUCCESS, 0, new byte[] {1}); return;
                 }
                 if (CLOCK.equals(characteristic.getUuid())) {
                     if (offset == 0) {
@@ -408,6 +423,8 @@ final class BleInputServer implements AutoCloseable {
         server = manager.openGattServer(context, callback);
         if (server == null) throw new IOException("BLE input GATT server unavailable");
         BluetoothGattService service = new BluetoothGattService(SERVICE, BluetoothGattService.SERVICE_TYPE_PRIMARY);
+        service.addCharacteristic(new BluetoothGattCharacteristic(UNLOCK_DECISION,
+            BluetoothGattCharacteristic.PROPERTY_READ, BluetoothGattCharacteristic.PERMISSION_READ));
         service.addCharacteristic(new BluetoothGattCharacteristic(INPUT,
             BluetoothGattCharacteristic.PROPERTY_WRITE | BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE, BluetoothGattCharacteristic.PERMISSION_WRITE));
         service.addCharacteristic(new BluetoothGattCharacteristic(PROOF,

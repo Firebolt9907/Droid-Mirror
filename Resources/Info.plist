@@ -1,6 +1,8 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
+    <key>NSFocusStatusUsageDescription</key>
+    <string>Sync your shared Mac Focus status with your Android phone when enabled.</string>
   <key>CFBundleExecutable</key><string>DroidMirror</string>
   <key>CFBundleIdentifier</key><string>app.droidmirror.mac</string>
   <key>CFBundleName</key><string>DroidMirror</string>
@@ -17,5 +19,29 @@
   <key>DroidMirrorSupportsLaunchCheck</key><true/>
   <key>LSUIElement</key><true/>
   <key>NSAppleEventsUsageDescription</key><string>Sync Apple Music playback and controls with your paired Android phone.</string>
+  <key>NSSystemExtensionUsageDescription</key><string>Make your paired Android phone available as a camera to Mac apps.</string>
+  <key>CFBundleDocumentTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleTypeName</key><string>Android App Package</string>
+      <key>CFBundleTypeRole</key><string>Viewer</string>
+      <key>LSHandlerRank</key><string>Default</string>
+      <key>LSItemContentTypes</key><array><string>com.android.package-archive</string></array>
+      <key>CFBundleTypeIconFile</key><string>DroidMirror.icns</string>
+    </dict>
+  </array>
+  <key>UTImportedTypeDeclarations</key>
+  <array>
+    <dict>
+      <key>UTTypeIdentifier</key><string>com.android.package-archive</string>
+      <key>UTTypeDescription</key><string>Android App Package</string>
+      <key>UTTypeConformsTo</key><array><string>public.data</string><string>public.archive</string></array>
+      <key>UTTypeTagSpecification</key>
+      <dict>
+        <key>public.filename-extension</key><array><string>apk</string></array>
+        <key>public.mime-type</key><array><string>application/vnd.android.package-archive</string></array>
+      </dict>
+    </dict>
+  </array>
   <key>NSPrincipalClass</key><string>NSApplication</string>
 </dict></plist>
