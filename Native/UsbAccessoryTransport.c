@@ -9,6 +9,11 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <errno.h>
+#include <sys/time.h>
+// macOS suppresses SIGPIPE per socket; Linux per send call.
+#ifndef MSG_NOSIGNAL
+#define MSG_NOSIGNAL 0
+#endif
 
 typedef struct {
     libusb_context *usb;
@@ -88,7 +93,7 @@ static int dm_usb_find(DMUsb *usb) {
 }
 static int dm_usb_send(int fd,const unsigned char *bytes,int length) {
     while (length) {
-        ssize_t n=send(fd,bytes,length,0);
+        ssize_t n=send(fd,bytes,length,MSG_NOSIGNAL);
         if (n<0 && errno==EINTR) continue;
         if (n<=0) return 0;
         bytes+=n; length-=n;
@@ -121,7 +126,9 @@ static void *dm_usb_run(void *context) {
         int local=accept(usb->listener,NULL,NULL);
         if (local>=0 && !atomic_load(&usb->stopped)) {
             usb->local=local;
+#ifdef SO_NOSIGPIPE
             int yes=1; setsockopt(local,SOL_SOCKET,SO_NOSIGPIPE,&yes,sizeof(yes));
+#endif
             struct timeval timeout={1,0}; setsockopt(local,SOL_SOCKET,SO_SNDTIMEO,&timeout,sizeof(timeout));
             pthread_t upload; int started=!pthread_create(&upload,NULL,dm_usb_upload,usb);
             unsigned char bytes[16384];

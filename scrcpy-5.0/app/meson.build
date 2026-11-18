@@ -182,6 +182,11 @@ if usb_support
     dependencies += dependency('libusb-1.0', static: static)
 endif
 
+if host_machine.system() == 'linux'
+    # The DroidMirror extensions use libm (rounding/scaling helpers).
+    dependencies += cc.find_library('m', required: false)
+endif
+
 if host_machine.system() == 'windows'
     dependencies += cc.find_library('mingw32')
     dependencies += cc.find_library('ws2_32')

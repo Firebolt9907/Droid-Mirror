@@ -1,0 +1,9 @@
+# DroidMirror USB video (Android Open Accessory) without ADB.
+# Lets the logged-in user switch a connected Android phone into accessory mode
+# and open its accessory interface. Install with:
+#   sudo install -m 644 Linux/data/70-droidmirror-usb.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload && sudo udevadm trigger
+# Google accessory-mode IDs (any phone vendor switches to these):
+SUBSYSTEM=="usb", ATTR{idVendor}=="18d1", ATTR{idProduct}=="2d0[0-5]", TAG+="uaccess"
+# Common Android vendors, for the initial accessory-mode request:
+SUBSYSTEM=="usb", ATTR{idVendor}=="18d1|04e8|22b8|0bb4|12d1|2717|2a70|0fce|1004|05c6|0e8d|2ae5|19d2|1949|0489|054c|2916", ENV{DEVTYPE}=="usb_device", TAG+="uaccess"

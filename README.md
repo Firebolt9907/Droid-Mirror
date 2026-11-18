@@ -2,6 +2,8 @@
 
 Mirror and control your Android phone from your Mac. Install DroidMirror on both devices, complete the one-time setup, then start mirroring from your Mac.
 
+> **Linux:** an early Linux port (Bluetooth mirroring, Wi-Fi upgrade, notifications, multiple phones) lives in [`Linux/`](Linux/README.md). The Android app can now trust several computers (Macs and Linux laptops) at once.
+
 ## What you need
 
 - **Mac:** an Apple silicon Mac (M1 or newer) running macOS 14 Sonoma or later. The current builds target Apple silicon.

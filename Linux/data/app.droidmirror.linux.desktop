@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=DroidMirror
+GenericName=Phone Mirroring
+Comment=Mirror and control your Android phones over Bluetooth and Wi-Fi
+Exec=@BIN@
+Icon=app.droidmirror.linux
+Terminal=false
+Categories=Utility;GTK;
+Keywords=android;phone;mirror;scrcpy;bluetooth;
+StartupWMClass=app.droidmirror.linux
