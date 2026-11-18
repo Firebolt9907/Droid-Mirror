@@ -26,6 +26,9 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
+    <uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES" android:usesPermissionFlags="neverForLocation" />
+    <uses-feature android:name="android.hardware.wifi.aware" android:required="false" />
     <!-- Optional development grant from authorized ADB; setup shows the command. -->
     <uses-permission android:name="android.permission.WRITE_SECURE_SETTINGS" tools:ignore="ProtectedPermissions" />
     <uses-feature android:name="android.hardware.bluetooth_le" android:required="false" />
@@ -36,7 +39,7 @@
         </intent>
     </queries>
     <uses-permission android:name="android.permission.ACCESS_NOTIFICATION_POLICY" />
-    <application android:label="DroidMirror" android:theme="@android:style/Theme.Material.Light.NoActionBar" android:allowBackup="false">
+    <application android:label="${appLabel}" android:theme="@android:style/Theme.Material.Light.NoActionBar" android:allowBackup="false">
         <service android:name=".bridge.ContinuityCameraService" android:exported="false" android:foregroundServiceType="camera" />
         <activity android:name=".bridge.ContinuityCameraPermissionActivity" android:exported="false" />
         <activity android:name=".UsbAccessoryActivity" android:exported="true"

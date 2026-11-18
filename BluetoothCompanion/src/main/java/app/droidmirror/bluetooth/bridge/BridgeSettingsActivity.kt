@@ -228,7 +228,7 @@ class BridgeSettingsActivity : Activity() {
             "Bluetooth connect permission: ${if (Build.VERSION.SDK_INT < 31 || checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED) "allowed" else "missing — background Bluetooth features may be unavailable"}\n" +
             "Notification access: ${if (access) "allowed" else "missing — complete step 3"}\n" +
             "Notification listener: ${if (PhoneNotifications.live != null) "connected" else if (access) "disconnected — try reconnecting below" else "waiting for access"}\n" +
-            "Shared Mac pairing code: ${if (BleTrust.key(this) != null) "available (does not confirm Mac connection)" else "select a Mac and tap Pair Mac"}\n" +
+            "Trusted computers: ${BleTrust.keys(this).size} of ${app.droidmirror.bluetooth.ComputerPeers.MAXIMUM} · connected now: ${BridgeRuntime.live?.activeComputers()?.size ?: 0}\n" +
             (if (secure) "Optional wireless ADB setup: authorized\n" else
                 "Start and authorize Shizuku in the main setup screen. DroidMirror grants secure settings automatically, or tap Grant secure settings with Shizuku to retry.\n") +
             grantMessage

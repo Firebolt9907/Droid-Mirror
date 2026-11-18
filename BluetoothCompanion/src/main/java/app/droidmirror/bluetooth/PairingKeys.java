@@ -19,6 +19,17 @@ public final class PairingKeys {
         java.nio.ByteBuffer buffer = java.nio.ByteBuffer.wrap(bytes);
         return new java.util.UUID(buffer.getLong(), buffer.getLong());
     }
+    /**
+     * Public identifier a computer may include in its BLE hello so the phone can
+     * select that computer's credential. It reveals nothing about the key, and a
+     * wrong selection simply fails the mutual HMAC handshake.
+     */
+    public static byte[] keyId(byte[] notificationKey) throws GeneralSecurityException {
+        if (notificationKey.length != 32) throw new GeneralSecurityException("Invalid notification key");
+        Mac mac = Mac.getInstance("HmacSHA256");
+        mac.init(new SecretKeySpec(notificationKey, "HmacSHA256"));
+        return java.util.Arrays.copyOf(mac.doFinal("DroidMirror BLE key id v1".getBytes(StandardCharsets.US_ASCII)), 8);
+    }
     public static byte[] notifications(byte[] pairing) throws GeneralSecurityException {
         if (pairing.length != 32) throw new GeneralSecurityException("Invalid pairing code");
         Mac mac = Mac.getInstance("HmacSHA256");

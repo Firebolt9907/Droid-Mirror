@@ -48,6 +48,31 @@ struct NotificationAppPreferencesTests {
         precondition(!activityRestart.record(timer), "Catalog updates do not reset exclusions")
         activityRestart.setAllowed(true, source: source)
         precondition(activityRestart.allows(timer))
+        // Rotating per-trip channels from one app collapse into a single source.
+        let tripA: [String: Any] = ["package": "com.google.android.apps.maps", "app": "Maps", "category": "navigation",
+                                    "channel": "navigation_1731700000", "channelName": "Navigation 1731700000"]
+        let tripB: [String: Any] = ["package": "com.google.android.apps.maps", "app": "Maps", "category": "navigation",
+                                    "channel": "navigation_1731790000", "channelName": "Turn-by-turn"]
+        precondition(ActivityAppPreferences.source(tripA) == ActivityAppPreferences.source(tripB))
+        precondition(ActivityAppPreferences.kind(tripA).name == "Navigation")
+        let before = activityRestart.sources.count
+        activityRestart.record(tripA); activityRestart.record(tripB)
+        precondition(activityRestart.sources.count == before + 1, "One navigation run adds one settings row")
+        let uncategorizedA: [String: Any] = ["package": "com.example.rides", "channel": "ride_3f9a2b7c11", "channelName": "Ride 42"]
+        let uncategorizedB: [String: Any] = ["package": "com.example.rides", "channel": "ride_9c0d1e2f33", "channelName": "Ride 43"]
+        precondition(ActivityAppPreferences.source(uncategorizedA) == ActivityAppPreferences.source(uncategorizedB))
+        precondition(ActivityAppPreferences.kind(uncategorizedA).name == "Ride")
+        precondition(ActivityAppPreferences.source(timer) != ActivityAppPreferences.source(navigation),
+                     "Distinct activity kinds stay separate")
+        // Exclusions saved under the old per-channel key migrate to the group.
+        let legacy: [String: Any] = ["package": "com.example.legacy", "category": "progress", "channel": "upload_7"]
+        activityRestart.setAllowed(false, source: ActivityAppPreferences.legacySource(legacy)!)
+        precondition(!activityRestart.allows(legacy), "Legacy exclusions apply before migration")
+        precondition(activityRestart.record(legacy))
+        precondition(activityRestart.excluded.contains(ActivityAppPreferences.source(legacy)!))
+        precondition(!activityRestart.excluded.contains(ActivityAppPreferences.legacySource(legacy)!))
+        activityRestart.setAllowed(true, source: ActivityAppPreferences.source(legacy)!)
+        precondition(activityRestart.allows(legacy), "Re-enabling a migrated group restores it")
         print("Notification and activity preference tests passed")
     }
 }

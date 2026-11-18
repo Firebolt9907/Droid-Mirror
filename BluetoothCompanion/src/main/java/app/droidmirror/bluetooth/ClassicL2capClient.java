@@ -14,6 +14,9 @@ final class ClassicL2capClient implements AutoCloseable {
     private volatile IClassicL2cap remote;
     private volatile boolean closed;
     private volatile int transmitMtu;
+    private volatile String connectedPeer = "";
+    /** The trusted computer that opened the accepted connection. */
+    String connectedPeer() { return connectedPeer; }
     int transmitMtu() { return transmitMtu; }
     private final ServiceConnection connection = new ServiceConnection() {
         @Override public void onServiceConnected(ComponentName name, IBinder binder) {
@@ -27,9 +30,10 @@ final class ClassicL2capClient implements AutoCloseable {
     };
     ClassicL2capClient(Context context) {
         args = new Shizuku.UserServiceArgs(new ComponentName(context.getPackageName(), ClassicL2capService.class.getName()))
-            .daemon(true).processNameSuffix("classic_l2cap").debuggable(false).version(5);
+            .daemon(true).processNameSuffix("classic_l2cap").debuggable(false).version(6);
         Shizuku.bindUserService(args, connection);
     }
+    /** peers: comma-separated trusted computer addresses. */
     void listen(String peer) throws Exception {
         IClassicL2cap service = ready.get(10, TimeUnit.SECONDS);
         if (closed || !service.listen(owner, peer)) throw new IOException(service.getLastError());
@@ -40,6 +44,7 @@ final class ClassicL2capClient implements AutoCloseable {
         ParcelFileDescriptor result = service.accept(owner);
         if (result == null) throw new IOException(service.getLastError());
         transmitMtu = service.getTransmitMtu(owner);
+        connectedPeer = service.getConnectedPeer(owner);
         return result;
     }
     void disconnect() {

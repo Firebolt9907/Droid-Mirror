@@ -100,7 +100,12 @@ final class BLESecureSession {
         guard key.count == 32, nonce.count == 32 else { throw BLECryptoError.invalid }
         master = SymmetricKey(data: key); macNonce = nonce
     }
-    var hello: [String: Any] { ["type": "hello", "nonce": macNonce.base64EncodedString()] }
+    /// `keyId` lets a phone that trusts several computers pick this computer's
+    /// credential; it reveals nothing about the key, and older phones ignore it.
+    var hello: [String: Any] {
+        let keyID = Data(HMAC<SHA256>.authenticationCode(for: Data("DroidMirror BLE key id v1".utf8), using: master)).prefix(8)
+        return ["type": "hello", "nonce": macNonce.base64EncodedString(), "keyId": keyID.base64EncodedString()]
+    }
     func challenge(_ object: [String: Any]) throws -> [String: Any] {
         guard sendKey == nil, let nonce = Data(base64Encoded: object["nonce"] as? String ?? ""), nonce.count == 32,
               let proof = Data(base64Encoded: object["proof"] as? String ?? ""),

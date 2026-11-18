@@ -25,6 +25,7 @@ class BlePeripheral(
     private val context: Context,
     private val endpoint: () -> AdbEndpoint?,
     private val onWatchEvent: (JSONObject, () -> Boolean, (JSONObject) -> Boolean) -> Unit = { _, _, _ -> },
+    /** (computer address, present): an authenticated background session started or ended. */
     private val onPresence: (String, Boolean) -> Unit = { _, _ -> },
     private val onPresenceReset: () -> Unit = {},
     private val onCommand: (String) -> Unit = {},
@@ -40,7 +41,7 @@ class BlePeripheral(
     private val onMediaEvent: (JSONObject, () -> Boolean) -> Unit = { _, _ -> },
     private val onTaskSubscription: (Boolean, Long, Boolean) -> Unit = { _, _, _ -> },
     private val onCatalogSubscription: (String, () -> Boolean, (JSONObject) -> Unit) -> Unit = { _, _, reply -> reply(JSONObject().put("success", false)) },
-    private val onAppLibrary: (JSONObject, () -> Boolean, (JSONObject) -> Unit) -> Unit = { _, _, reply -> reply(JSONObject().put("success", false)) },
+    private val onAppLibrary: (String, JSONObject, () -> Boolean, (JSONObject) -> Unit) -> Unit = { _, _, _, reply -> reply(JSONObject().put("success", false)) },
     private val onOpenLink: (String, () -> Boolean, (Boolean) -> Unit) -> Unit = { _, _, reply -> reply(false) },
     private val onShareLinkResult: (String, Boolean) -> Unit = { _, _ -> },
     private val onFocus: (JSONObject, () -> Boolean, (JSONObject) -> Unit) -> Unit = { _, _, _ -> },
@@ -57,7 +58,8 @@ class BlePeripheral(
     private val adapter: BluetoothAdapter? get() = manager.adapter
     private var server: BluetoothGattServer? = null
     private var characteristic: BluetoothGattCharacteristic? = null
-    private val presencePeers = ConcurrentHashMap.newKeySet<android.bluetooth.BluetoothDevice>()
+    /** Device -> computer of each authenticated background session (the activity gate). */
+    private val presencePeers = ConcurrentHashMap<android.bluetooth.BluetoothDevice, String>()
     private val connected = ConcurrentHashMap.newKeySet<android.bluetooth.BluetoothDevice>()
     private val subscribed = ConcurrentHashMap<android.bluetooth.BluetoothDevice, Boolean>()
     private val indicationInFlight = ConcurrentHashMap.newKeySet<android.bluetooth.BluetoothDevice>()
@@ -70,21 +72,25 @@ class BlePeripheral(
     private var cameraDevice: android.bluetooth.BluetoothDevice? = null
     private var nextMessage = 1
     private var advertiser: android.bluetooth.le.BluetoothLeAdvertiser? = null
-    private var advertiseCallback: AdvertiseCallback? = null
+    private val advertiseCallbacks = mutableListOf<AdvertiseCallback>()
     private val publishedEndpoints = mutableMapOf<android.bluetooth.BluetoothDevice, String>()
     private var publishedPort: Int? = null
     private var revision = 0L
     private var bulkTestDevice: android.bluetooth.BluetoothDevice? = null
     private var bulkTestGeneration = 0L
     private var bulkTestId: String? = null
+    // Background features are shared by every computer with an authenticated
+    // session (at most ComputerPeers.MAXIMUM). Clipboard text, media and task
+    // updates fan out to all subscribers. A clipboard file transfer is one
+    // interactive pipeline, owned by the most recent subscriber still connected.
+    private val clipboardSubscribers = LinkedHashMap<android.bluetooth.BluetoothDevice, JSONObject>()
     private var clipboardDevice: android.bluetooth.BluetoothDevice? = null
     private var clipboardGeneration = 0L
     private var clipboardBulkRequested = false
-    private var linkDevice: android.bluetooth.BluetoothDevice? = null
-    private var linkSession: BleSecureSession? = null
-    private var taskDevice: android.bluetooth.BluetoothDevice? = null
+    private val linkSubscribers = LinkedHashMap<android.bluetooth.BluetoothDevice, BleSecureSession>()
+    private val taskSubscribers = LinkedHashMap<android.bluetooth.BluetoothDevice, Boolean>()
     private var taskGeneration = 0L
-    private var mediaDevice: android.bluetooth.BluetoothDevice? = null
+    private val mediaSubscribers = LinkedHashSet<android.bluetooth.BluetoothDevice>()
     private var mediaGeneration = 0L
     private var hotspotEpoch = 0L
 
@@ -99,9 +105,17 @@ class BlePeripheral(
         }.onFailure { android.util.Log.w("DroidMirrorClipboard", "Could not request 2M PHY", it) }
     }
 
-    @Synchronized fun shareLink(url: String, request: String): Boolean {
-        val device = linkDevice ?: return false
-        val session = sessions[device]?.takeIf { it.authenticated && it === linkSession } ?: return false
+    private fun live(device: android.bluetooth.BluetoothDevice): BleSecureSession? =
+        sessions[device]?.takeIf { it.authenticated && subscribed[device] == true }
+
+    /** Computers that can open a shared link right now. */
+    @Synchronized fun linkComputers(): List<String> =
+        linkSubscribers.entries.filter { (device, session) -> live(device) === session }.map { it.value.computer }.distinct()
+
+    @Synchronized fun shareLink(url: String, request: String, computer: String?): Boolean {
+        val (device, session) = linkSubscribers.entries.lastOrNull { (device, session) ->
+            live(device) === session && (computer == null || session.computer == computer)
+        }?.toPair() ?: return false
         return runCatching {
             enqueueSecure(device, session, JSONObject().put("type", "shareLink").put("url", url).put("request", request))
         }.getOrElse { revokeSession(device); false }
@@ -109,17 +123,50 @@ class BlePeripheral(
 
     @Synchronized fun sendMediaEvent(value: JSONObject, generation: Long) {
         if (generation != mediaGeneration) return
-        val device = mediaDevice ?: return
-        val session = sessions[device]?.takeIf { it.authenticated } ?: return
-        runCatching { enqueueSecure(device, session, value) }.onFailure { revokeSession(device) }
+        mediaSubscribers.toList().forEach { device ->
+            val session = live(device) ?: return@forEach
+            runCatching { enqueueSecure(device, session, value) }.onFailure { revokeSession(device) }
+        }
     }
 
     @Synchronized fun sendTaskEvent(value: JSONObject, generation: Long) {
         if (generation != taskGeneration) return
-        val device = taskDevice ?: return
-        val session = sessions[device]?.takeIf { it.authenticated } ?: return
-        runCatching { enqueueSecure(device, session, value) }.onFailure { revokeSession(device) }
+        taskSubscribers.keys.toList().forEach { device ->
+            val session = live(device) ?: return@forEach
+            runCatching { enqueueSecure(device, session, value) }.onFailure { revokeSession(device) }
+        }
     }
+
+    /** force: a computer joined; restart sync so every subscriber gets a full snapshot. */
+    private fun refreshMedia(force: Boolean = false) {
+        val active = mediaSubscribers.isNotEmpty()
+        if (active != mediaActive || (force && active)) { mediaActive = active; onMediaSubscription(active, ++mediaGeneration) }
+    }
+    private var mediaActive = false
+
+    private fun refreshTasks() {
+        onTaskSubscription(taskSubscribers.isNotEmpty(), ++taskGeneration,
+            taskSubscribers.isNotEmpty() && taskSubscribers.values.all { it })
+    }
+
+    /** Re-elects the clipboard file owner: the most recent subscriber with a live session. */
+    private fun refreshClipboard(force: Boolean = false) {
+        val owner = clipboardSubscribers.keys.lastOrNull { live(it) != null }
+        val flags = owner?.let { clipboardSubscribers[it] }
+        if (!force && owner == clipboardDevice) return
+        clipboardDevice = owner
+        clipboardBulkRequested = flags != null && flags.optBoolean("files") && flags.optInt("bulk") == 1 && Build.VERSION.SDK_INT >= 29
+        onClipboardSubscription(owner != null, ++clipboardGeneration, flags?.optBoolean("files") == true,
+            clipboardBulkRequested, flags?.optInt("race") == 1)
+    }
+
+    /** The computer whose key protects the current clipboard file channels. */
+    @Synchronized fun clipboardComputer(generation: Long): String? =
+        if (clipboardAuthorized(generation)) clipboardDevice?.let { sessions[it]?.computer } else null
+    @Synchronized fun bulkTestComputer(generation: Long): String? =
+        if (bulkTestAuthorized(generation)) bulkTestDevice?.let { sessions[it]?.computer } else null
+    /** Computers with an authenticated background session right now. */
+    @Synchronized fun activeComputers(): Set<String> = presencePeers.values.toSet()
 
     @Synchronized fun bulkTestAuthorized(generation: Long): Boolean = generation == bulkTestGeneration &&
         bulkTestDevice?.let { sessions[it]?.authenticated == true } == true
@@ -144,17 +191,24 @@ class BlePeripheral(
 
     @Synchronized fun sendClipboardEvent(value: JSONObject, generation: Long) {
         if (generation != clipboardGeneration) return
-        val device = clipboardDevice ?: return
-        val session = sessions[device]?.takeIf { it.authenticated } ?: return
-        runCatching { enqueueSecure(device, session, value) }.onFailure { revokeSession(device) }
+        // Text and availability reach every subscribed computer; file transfer
+        // control belongs to the owner's single pipeline.
+        val recipients = if (value.optString("type") in setOf("clipboard", "clipboardStatus")) clipboardSubscribers.keys.toList()
+            else listOfNotNull(clipboardDevice)
+        recipients.forEach { device ->
+            val session = live(device) ?: return@forEach
+            runCatching { enqueueSecure(device, session, value) }.onFailure { revokeSession(device) }
+        }
     }
 
     @SuppressLint("MissingPermission")
     fun start(onStatus: (String) -> Unit) {
         stop()
-        val discovery = runCatching {
-            app.droidmirror.bluetooth.PairingKeys.discovery(requireNotNull(BleTrust.key(context)))
-        }.getOrNull() ?: return onStatus("Select and pair a Mac before enabling BLE")
+        // One connectable advertisement per trusted computer, each carrying only
+        // that computer's discovery UUID (a legacy payload fits one 128-bit UUID).
+        val discoveries = BleTrust.keys(context).mapNotNull { (_, key) ->
+            runCatching { app.droidmirror.bluetooth.PairingKeys.discovery(key) }.getOrNull()
+        }.ifEmpty { return onStatus("Select and pair a computer before enabling BLE") }
         val bluetooth = adapter ?: return onStatus("Bluetooth is unavailable")
         val bleAdvertiser = bluetooth.bluetoothLeAdvertiser
             ?: return onStatus("BLE advertising is unavailable")
@@ -190,25 +244,51 @@ class BlePeripheral(
         }
         gatt.addService(service)
 
-        val callback = object : AdvertiseCallback() {
-            override fun onStartSuccess(settingsInEffect: AdvertiseSettings?) =
-                onStatus("BLE ready — waiting for Mac")
+        advertiseStatus = onStatus
+        advertise(bleAdvertiser, discoveries, onStatus)
+    }
 
-            override fun onStartFailure(errorCode: Int) =
-                onStatus("BLE advertising failed: $errorCode")
+    private var advertiseStatus: ((String) -> Unit)? = null
+
+    @SuppressLint("MissingPermission")
+    private fun advertise(bleAdvertiser: android.bluetooth.le.BluetoothLeAdvertiser, discoveries: List<java.util.UUID>, onStatus: (String) -> Unit) {
+        for (discovery in discoveries) {
+            val callback = object : AdvertiseCallback() {
+                override fun onStartSuccess(settingsInEffect: AdvertiseSettings?) =
+                    onStatus("BLE ready — waiting for your computer")
+
+                override fun onStartFailure(errorCode: Int) =
+                    onStatus("BLE advertising failed: $errorCode")
+            }
+            advertiseCallbacks.add(callback)
+            bleAdvertiser.startAdvertising(
+                AdvertiseSettings.Builder()
+                    .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_LOW_POWER)
+                    .setConnectable(true)
+                    .build(),
+                AdvertiseData.Builder()
+                    .setIncludeDeviceName(false)
+                    .addServiceUuid(ParcelUuid(discovery))
+                    .build(),
+                callback
+            )
         }
-        advertiseCallback = callback
-        bleAdvertiser.startAdvertising(
-            AdvertiseSettings.Builder()
-                .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_LOW_POWER)
-                .setConnectable(true)
-                .build(),
-            AdvertiseData.Builder()
-                .setIncludeDeviceName(false)
-                .addServiceUuid(ParcelUuid(discovery))
-                .build(),
-            callback
-        )
+    }
+
+    /**
+     * Re-advertises after a computer was added or removed. Existing GATT
+     * sessions (and any active mirror) are left untouched.
+     */
+    @SuppressLint("MissingPermission")
+    @Synchronized fun refreshAdvertising() {
+        val bleAdvertiser = advertiser ?: return
+        val onStatus = advertiseStatus ?: return
+        advertiseCallbacks.forEach { bleAdvertiser.stopAdvertising(it) }
+        advertiseCallbacks.clear()
+        val discoveries = BleTrust.keys(context).mapNotNull { (_, key) ->
+            runCatching { app.droidmirror.bluetooth.PairingKeys.discovery(key) }.getOrNull()
+        }
+        advertise(bleAdvertiser, discoveries, onStatus)
     }
 
     @SuppressLint("MissingPermission")
@@ -216,15 +296,15 @@ class BlePeripheral(
         presencePeers.clear()
         onPresenceReset()
         ++hotspotEpoch
-        advertiseCallback?.let { advertiser?.stopAdvertising(it) }
-        advertiseCallback = null
+        advertiseCallbacks.forEach { advertiser?.stopAdvertising(it) }
+        advertiseCallbacks.clear()
         advertiser = null
-        mediaDevice = null
+        mediaSubscribers.clear(); mediaActive = false
         onMediaSubscription(false, ++mediaGeneration)
         bulkTestDevice = null; onBulkTest(null, ++bulkTestGeneration)
-        clipboardDevice = null
+        clipboardSubscribers.clear(); clipboardDevice = null
         onClipboardSubscription(false, ++clipboardGeneration, false, false, false)
-        taskDevice = null
+        taskSubscribers.clear(); linkSubscribers.clear()
         onTaskSubscription(false, ++taskGeneration, false)
         server?.close()
         server = null
@@ -390,10 +470,15 @@ class BlePeripheral(
         if (cameraDevice == device) { cameraDevice = null; ContinuityCameraService.disconnected() }
         // GATT services share the physical link with mirroring input. Revoking a
         // notification session must not disconnect that other authenticated service.
-        if (mediaDevice == device) { mediaDevice = null; onMediaSubscription(false, ++mediaGeneration) }
+        if (mediaSubscribers.remove(device)) refreshMedia()
         if (bulkTestDevice == device) { bulkTestDevice = null; onBulkTest(null, ++bulkTestGeneration) }
-        if (clipboardDevice == device) { clipboardDevice = null; onClipboardSubscription(false, ++clipboardGeneration, false, false, false) }
-        if (taskDevice == device) { taskDevice = null; onTaskSubscription(false, ++taskGeneration, false) }
+        linkSubscribers.remove(device)
+        if (taskSubscribers.remove(device) != null) refreshTasks()
+        presencePeers.remove(device)?.let { computer -> if (computer !in presencePeers.values) onPresence(computer, false) }
+        if (clipboardSubscribers.remove(device) != null || clipboardDevice == device) {
+            sessions.remove(device) // the owner election below must not pick this device
+            refreshClipboard()
+        }
         notificationMode.remove(device)
         subscribed.remove(device)
         indicationInFlight.remove(device)
@@ -426,7 +511,8 @@ class BlePeripheral(
             newState: Int
         ): Unit = synchronized(this@BlePeripheral) {
             if (newState == BluetoothProfile.STATE_CONNECTED) {
-                if (connected.size >= 4) { revokeSession(device); return }
+                // Two computers, each possibly with a stale link during reconnects.
+                if (connected.size >= 2 * app.droidmirror.bluetooth.ComputerPeers.MAXIMUM) { revokeSession(device); return }
                 connected += device
                 android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
                     if (connected.contains(device) && subscribed[device] == true
@@ -434,7 +520,6 @@ class BlePeripheral(
                 }, 15000)
             }
             else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
-                if (presencePeers.remove(device)) onPresence(device.address, false)
                 revokeSession(device)
                 BleLinkMtu.disconnected(device.address)
                 connected -= device
@@ -511,7 +596,11 @@ class BlePeripheral(
                     runCatching {
                         val data = fragments.getOrPut(device) { BleFragments() }.accept(value) ?: return
                         val objectValue = JSONObject(String(data, Charsets.UTF_8))
-                        val session = sessions[device] ?: BleSecureSession(requireNotNull(BleTrust.key(context))).also { sessions[device] = it }
+                        val session = sessions[device] ?: run {
+                            require(objectValue.optString("type") == "hello") { "No session" }
+                            val (computer, key) = requireNotNull(BleTrust.computerFor(context, objectValue, device.address)) { "Unknown computer" }
+                            BleSecureSession(key, computer).also { sessions[device] = it }
+                        }
                         when {
                             objectValue.optString("type") == "hello" -> {
                                 if (cameraDevice == device) { cameraDevice = null; ContinuityCameraService.disconnected() }
@@ -522,8 +611,13 @@ class BlePeripheral(
                             }
                             objectValue.optString("type") == "finish" -> {
                                 session.finish(objectValue)
-                                presencePeers.add(device)
-                                onPresence(device.address, true)
+                                BleTrust.authenticated(device.address)
+                                // One live background session per computer: a reconnect replaces a stale one.
+                                sessions.entries.filter { (other, existing) -> other != device && existing.authenticated && existing.computer == session.computer }
+                                    .map { it.key }.forEach { revokeSession(it) }
+                                val firstForComputer = session.computer !in presencePeers.values
+                                presencePeers[device] = session.computer
+                                if (firstForComputer) onPresence(session.computer, true)
                                 android.util.Log.i("DroidMirrorNotifications", "BLE notification session authenticated")
                                 enqueueSecure(device, session, JSONObject().put("type", "ready").put("activityImages", 1).put("watchCompanion", 1).put("sessionHealth", 1).put("changePush", 1).put("clipboard", 1).put("clipboardFiles", 1).put("apkInstall", if (app.droidmirror.bluetooth.PackageInstallClient.available()) 1 else 0).put("clipboardDownloads", if (Build.VERSION.SDK_INT >= 29) 1 else 0).put("clipboardBulk", if (Build.VERSION.SDK_INT >= 29) 1 else 0).put("clipboardProgress", 1).put("clipboardIroh", 1).put("bulkTest", if (Build.VERSION.SDK_INT >= 29) 1 else 0).put("taskUrls", 1).put("appLibrary", 1).put("appLibraryIroh", 1).put("linkSharing", 1).put("media", 1)
                                     .put("focusSync", 1).put("hotspot", if (Build.VERSION.SDK_INT >= 30) 2 else 0))
@@ -539,7 +633,7 @@ class BlePeripheral(
                                             val valid = { synchronized(this@BlePeripheral) {
                                                 cameraDevice == device && sessions[device] === session && session.authenticated
                                             } }
-                                            ContinuityCameraService.command(context, command, valid) { value -> synchronized(this@BlePeripheral) {
+                                            ContinuityCameraService.command(context, session.computer, command, valid) { value -> synchronized(this@BlePeripheral) {
                                                 // Bound video backlog; optional camera traffic never revokes BLE.
                                                 valid() && (pendingMessages[device]?.bytes ?: 0) < 180000 && enqueueSecure(device, session, value)
                                             } }
@@ -547,11 +641,12 @@ class BlePeripheral(
                                     }
 
                                     "watchMacState", "watchMacTicket", "watchFindResult" -> {
-                                        // Watch commands may only route to the selected capture Mac and this exact BLE session.
-                                        if (device.address == context.getSharedPreferences("ready", Context.MODE_PRIVATE).getString("peer", "")) {
+                                        // Watch commands route only through this exact authenticated session
+                                        // of a trusted computer; the watch follows the most recent one.
+                                        run {
                                             val valid = { synchronized(this@BlePeripheral) {
                                                 sessions[device] === session && session.authenticated &&
-                                                    device.address == context.getSharedPreferences("ready", Context.MODE_PRIVATE).getString("peer", "")
+                                                    app.droidmirror.bluetooth.ComputerPeers.contains(context, session.computer)
                                             } }
                                             onWatchEvent(command, valid, { value -> synchronized(this@BlePeripheral) {
                                                 if (valid()) runCatching { enqueueSecure(device, session, value) }.getOrElse { revokeSession(device); false }
@@ -580,9 +675,9 @@ class BlePeripheral(
                                             }
                                         } }
                                     }
-                                    "linkSubscribe" -> { linkDevice = device; linkSession = session }
+                                    "linkSubscribe" -> { linkSubscribers.remove(device); linkSubscribers[device] = session }
                                     "shareLinkResult" -> {
-                                        if (device == linkDevice && session === linkSession) {
+                                        if (linkSubscribers[device] === session) {
                                             onShareLinkResult(command.optString("request"), command.optBoolean("success"))
                                         }
                                     }
@@ -626,15 +721,12 @@ class BlePeripheral(
                                         bulkTestDevice = null; onBulkTest(null, ++bulkTestGeneration)
                                     }
                                     "clipboardSubscribe" -> {
+                                        // The latest subscriber becomes the file-transfer owner.
+                                        clipboardSubscribers.remove(device)
                                         if (command.optBoolean("enabled")) {
-                                            // One paired clipboard owner avoids cross-Mac forwarding.
-                                            clipboardDevice = device
-                                            clipboardBulkRequested = command.optBoolean("files") && command.optInt("bulk") == 1 && Build.VERSION.SDK_INT >= 29
-                                            onClipboardSubscription(true, ++clipboardGeneration, command.optBoolean("files"), clipboardBulkRequested, command.optInt("race") == 1)
-                                        } else if (clipboardDevice == device) {
-                                            clipboardDevice = null
-                                            onClipboardSubscription(false, ++clipboardGeneration, false, false, false)
-                                        }
+                                            clipboardSubscribers[device] = command
+                                            refreshClipboard(force = true)
+                                        } else refreshClipboard()
                                     }
                                     "clipboardFilePrepare", "clipboardFilePrepareEnd" -> {
                                         require(command.optString("id").matches(Regex("[a-fA-F0-9-]{36}")))
@@ -650,34 +742,26 @@ class BlePeripheral(
                                         if (clipboardDevice == device && !clipboardBulkRequested) onClipboardFile(command)
                                     }
                                     "clipboardSet" -> {
-                                        if (clipboardDevice == device) onClipboardText(command.optString("text"))
+                                        if (clipboardSubscribers.containsKey(device)) onClipboardText(command.optString("text"))
                                     }
                                     "mediaSubscribe" -> {
-                                        if (command.optBoolean("enabled")) {
-                                            mediaDevice = device
-                                            onMediaSubscription(true, ++mediaGeneration)
-                                        } else if (mediaDevice == device) {
-                                            mediaDevice = null
-                                            onMediaSubscription(false, ++mediaGeneration)
-                                        }
+                                        val joined = command.optBoolean("enabled") && mediaSubscribers.add(device)
+                                        if (!command.optBoolean("enabled")) mediaSubscribers.remove(device)
+                                        refreshMedia(force = joined)
                                     }
                                     "mediaState", "mediaQueue", "mediaCommand", "mediaVolume", "mediaArtworkRequest", "mediaArtworkChunk" -> {
                                         val generation = mediaGeneration
-                                        if (mediaDevice == device) onMediaEvent(command) {
+                                        if (device in mediaSubscribers) onMediaEvent(command) {
                                             synchronized(this@BlePeripheral) {
-                                                mediaGeneration == generation && mediaDevice == device &&
+                                                mediaGeneration == generation && device in mediaSubscribers &&
                                                     sessions[device] === session && session.authenticated
                                             }
                                         }
                                     }
                                     "taskSubscribe" -> {
-                                        if (command.optBoolean("enabled")) {
-                                            taskDevice = device
-                                            onTaskSubscription(true, ++taskGeneration, command.optBoolean("changeOnly"))
-                                        } else if (taskDevice == device) {
-                                            taskDevice = null
-                                            onTaskSubscription(false, ++taskGeneration, false)
-                                        }
+                                        if (command.optBoolean("enabled")) taskSubscribers[device] = command.optBoolean("changeOnly")
+                                        else taskSubscribers.remove(device)
+                                        refreshTasks()
                                     }
                                     "appCatalogSubscribe" -> {
                                         val request = command.optString("request")
@@ -699,7 +783,7 @@ class BlePeripheral(
                                             "appIconRequest" -> "appIconResult"
                                             else -> "appLaunchResult"
                                         }
-                                        onAppLibrary(command, { synchronized(this@BlePeripheral) {
+                                        onAppLibrary(session.computer, command, { synchronized(this@BlePeripheral) {
                                             sessions[device] === session && session.authenticated
                                         } }) { result -> synchronized(this@BlePeripheral) {
                                             if (sessions[device] === session && session.authenticated) {

@@ -58,7 +58,7 @@ public final class ClipboardSyncClient implements AutoCloseable {
             .daemon(false)
             .processNameSuffix("clipboard_bridge")
             .debuggable(false)
-            .version(42);
+            .version(43);
         Log.i(TAG, "ClipboardSyncClient started, filesEnabled=" + filesEnabled);
         main.post(this::connect);
         work.scheduleWithFixedDelay(this::poll, 0, 750, TimeUnit.MILLISECONDS);

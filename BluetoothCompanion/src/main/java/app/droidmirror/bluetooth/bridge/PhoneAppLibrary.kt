@@ -98,7 +98,8 @@ class PhoneAppLibrary(private val context: Context, private val ready: () -> Boo
             }
         }
     }
-    fun receive(command: JSONObject, authorized: () -> Boolean, reply: (JSONObject) -> Unit, bulk: Boolean = false) {
+    /** computer: the trusted computer whose authenticated session sent this command. */
+    fun receive(command: JSONObject, authorized: () -> Boolean, reply: (JSONObject) -> Unit, bulk: Boolean = false, computer: String = "") {
         if (closed) return
         val queuedAt = SystemClock.elapsedRealtime()
         val launch = if (command.optString("type") == "appLaunch") launchGeneration.incrementAndGet() else launchGeneration.get()
@@ -111,9 +112,9 @@ class PhoneAppLibrary(private val context: Context, private val ready: () -> Boo
                         val token = command.getString("token")
                         require(token.matches(Regex("[a-fA-F0-9]{64}")))
                         lane?.close(); lane = null
-                        val key = requireNotNull(BleTrust.key(context)).copyOf()
+                        val key = requireNotNull(BleTrust.key(context, computer)).copyOf()
                         val fresh = PhoneLibraryLane(context, key, token, authorized) { request, done ->
-                            receive(request, authorized, done, bulk = true)
+                            receive(request, authorized, done, bulk = true, computer = computer)
                         }
                         lane = fresh
                         var addresses = fresh.addresses(context)

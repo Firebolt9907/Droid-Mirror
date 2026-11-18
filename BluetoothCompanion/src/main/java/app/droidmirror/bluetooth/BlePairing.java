@@ -8,10 +8,9 @@ import java.security.SecureRandom;
 
 /** A one-time code binds the two transports without sending secrets over Classic. */
 public final class BlePairing {
-    /** Never creates pairing material while processing an unauthenticated BLE hello. */
-    public static synchronized byte[] notificationKey(Context context) throws java.security.GeneralSecurityException, IOException {
-        String peer = context.getSharedPreferences("ready", Context.MODE_PRIVATE).getString("peer", "");
-        if (peer.isEmpty()) return null;
+    /** Notification credential for one trusted computer, or null when it has no code yet. Never creates pairing material. */
+    public static synchronized byte[] notificationKey(Context context, String peer) throws java.security.GeneralSecurityException, IOException {
+        if (peer == null || peer.isEmpty()) return null;
         String saved = context.getSharedPreferences("ble_pairing", Context.MODE_PRIVATE).getString(peer, null);
         if (saved == null) return null;
         byte[] pairing;

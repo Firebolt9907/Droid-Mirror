@@ -15,7 +15,9 @@ public final class ClassicL2capService extends IClassicL2cap.Stub {
     static final int PSM = 0xD001;
     private IBinder owner;
     private IBinder.DeathRecipient death;
-    private String peer;
+    private java.util.Set<String> peers = new java.util.HashSet<>();
+    private String peerList = "";
+    private String connectedPeer = "";
     private BluetoothServerSocket listener;
     private BluetoothSocket connection;
     private ParcelFileDescriptor relay;
@@ -25,8 +27,9 @@ public final class ClassicL2capService extends IClassicL2cap.Stub {
     public ClassicL2capService(Context context) { this(); }
 
     @Override public synchronized boolean listen(IBinder token, String address) {
-        if (token == null || !BluetoothAdapter.checkBluetoothAddress(address)) { error = "Invalid selected Mac"; return false; }
-        if (owner == token && listener != null && address.equals(peer)) return true;
+        java.util.Set<String> requested = ComputerPeers.parse(address);
+        if (token == null || requested.isEmpty()) { error = "Invalid selected computer"; return false; }
+        if (owner == token && listener != null && address.equals(peerList)) return true;
         if (owner != null) { error = "Classic L2CAP listener already owned"; return false; }
         long identity = android.os.Binder.clearCallingIdentity();
         try {
@@ -42,11 +45,13 @@ public final class ClassicL2capService extends IClassicL2cap.Stub {
             Context shell = com.genymobile.scrcpy.FakeContext.get().getBaseContext().createPackageContext("com.android.shell", 0);
             BluetoothAdapter adapter = shell.getSystemService(BluetoothManager.class).getAdapter();
             if (adapter == null || !adapter.isEnabled()) throw new IOException("Enable Bluetooth on the phone");
-            BluetoothDevice device = adapter.getRemoteDevice(address);
-            if (device.getBondState() != BluetoothDevice.BOND_BONDED) throw new IOException("Pair the selected Mac first");
+            boolean bonded = false;
+            for (String candidate : requested)
+                if (adapter.getRemoteDevice(candidate).getBondState() == BluetoothDevice.BOND_BONDED) bonded = true;
+            if (!bonded) throw new IOException("Pair a trusted computer in Bluetooth settings first");
             // Hidden Classic API, not the public LE-only listenUsingL2capChannel().
             listener = (BluetoothServerSocket) BluetoothAdapter.class.getMethod("listenUsingL2capOn", int.class).invoke(adapter, PSM);
-            owner = token; peer = address; death = () -> stop(token);
+            owner = token; peers = requested; peerList = address; death = () -> stop(token);
             token.linkToDeath(death, 0);
             if (!token.isBinderAlive()) throw new IOException("Listener owner died");
             error = "";
@@ -75,9 +80,11 @@ public final class ClassicL2capService extends IClassicL2cap.Stub {
                 synchronized (this) {
                     if (owner != token || listener != server) { candidate.close(); return null; }
                     BluetoothDevice device = candidate.getRemoteDevice();
-                    if (!peer.equals(device.getAddress()) || device.getBondState() != BluetoothDevice.BOND_BONDED) {
+                    // Only bonded computers the app explicitly trusts may connect.
+                    if (!peers.contains(device.getAddress()) || device.getBondState() != BluetoothDevice.BOND_BONDED) {
                         candidate.close(); continue;
                     }
+                    connectedPeer = device.getAddress();
                     ParcelFileDescriptor[] pair = ParcelFileDescriptor.createPipe();
                     connection = candidate; relay = pair[0];
                     InputStream localInput = new ParcelFileDescriptor.AutoCloseInputStream(ParcelFileDescriptor.dup(relay.getFileDescriptor()));
@@ -128,7 +135,7 @@ public final class ClassicL2capService extends IClassicL2cap.Stub {
     private void closeConnection() {
         try { if (connection != null) connection.close(); } catch (IOException ignored) {}
         try { if (relay != null) relay.close(); } catch (IOException ignored) {}
-        connection = null; relay = null;
+        connection = null; relay = null; connectedPeer = "";
     }
     private void closeListener() {
         closeConnection();
@@ -141,6 +148,9 @@ public final class ClassicL2capService extends IClassicL2cap.Stub {
     @Override public synchronized void stop(IBinder token) { if (owner == token) closeListener(); }
     @Override public synchronized int getTransmitMtu(IBinder token) {
         return owner == token && connection != null ? connection.getMaxTransmitPacketSize() : 0;
+    }
+    @Override public synchronized String getConnectedPeer(IBinder token) {
+        return owner == token && connection != null ? connectedPeer : "";
     }
     @Override public synchronized String getLastError() { return error; }
     @Override public synchronized void destroy() { closeListener(); System.exit(0); }

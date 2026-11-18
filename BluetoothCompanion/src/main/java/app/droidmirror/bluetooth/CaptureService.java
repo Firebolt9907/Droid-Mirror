@@ -17,10 +17,26 @@ import java.util.concurrent.atomic.*;
 public final class CaptureService extends Service {
     private volatile boolean shutdown;
     private volatile BridgeRuntime bridge;
-    private volatile String captureStatus = "Select a paired Mac to enable mirroring";
+    private volatile String captureStatus = "Select a paired computer to enable mirroring";
     private volatile ClassicL2capClient listener;
     private volatile String listenerPeer;
+    /** The trusted computer that opened the current Classic session. */
+    private volatile String sessionPeer;
+    /** One direct-IP (Iroh) endpoint per trusted computer, each keyed with that computer's code. */
+    private final java.util.Map<String, PeerVideoTransport> peerTransports = new java.util.concurrent.ConcurrentHashMap<>();
+    private void bindPeerTransports() {
+        java.util.List<String> computers = ComputerPeers.all(this);
+        for (String computer : new java.util.ArrayList<>(peerTransports.keySet())) {
+            if (!computers.contains(computer)) { PeerVideoTransport old = peerTransports.remove(computer); if (old != null) old.close(); }
+        }
+        for (String computer : computers) {
+            if (peerTransports.containsKey(computer)) continue;
+            try { peerTransports.put(computer, new PeerVideoTransport(this, BlePairing.key(this, computer), null)); }
+            catch (IOException unavailable) { android.util.Log.d("DroidMirrorIroh", "LAN discovery unavailable", unavailable); }
+        }
+    }
     private volatile ParcelFileDescriptor socket;
+    /** The current session's endpoint (one of peerTransports). */
     private volatile PeerVideoTransport peerTransport;
     private static final class SessionState {
         final String token = UUID.randomUUID().toString();
@@ -31,6 +47,7 @@ public final class CaptureService extends Service {
         volatile ParcelFileDescriptor controlPipe;
         volatile BluetoothWire wire;
         volatile WirelessVideoUpgrade wirelessUpgrade;
+        volatile WifiAwareEndpoint wifiAware;
         volatile WirelessAudioUpgrade wirelessAudio;
         volatile BleInputServer ble;
         volatile ShizukuDisplayClient guard;
@@ -76,9 +93,10 @@ public final class CaptureService extends Service {
         if (Build.VERSION.SDK_INT >= 31 && (context.checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED
                 || context.checkSelfPermission(Manifest.permission.BLUETOOTH_ADVERTISE) != PackageManager.PERMISSION_GRANTED)) return ReadyResult.PERMISSION_REQUIRED;
         try {
-            byte[] pairing = settings.getString("peer", "").isEmpty() ? new byte[0]
-                : BlePairing.key(context, settings.getString("peer", ""));
-            java.util.Arrays.fill(pairing, (byte)0);
+            for (String computer : ComputerPeers.all(context)) {
+                byte[] pairing = BlePairing.key(context, computer);
+                java.util.Arrays.fill(pairing, (byte)0);
+            }
         } catch (IOException error) {
             android.util.Log.w("DroidMirrorReady", "Could not initialize BLE pairing", error);
             return ReadyResult.FAILED;
@@ -166,9 +184,11 @@ public final class CaptureService extends Service {
             }
         }
         // Discovery and notification forwarding work before a capture Mac is selected.
-        if (getSharedPreferences("ready", MODE_PRIVATE).getString("peer", "").isEmpty()) return START_STICKY;
+        if (ComputerPeers.all(this).isEmpty()) return START_STICKY;
         if (server != null) {
-            if (listener != null && !getSharedPreferences("ready", MODE_PRIVATE).getString("peer", "").equals(listenerPeer)) listener.close();
+            // Never replace the shell listener under an active mirror: the new
+            // trusted-computer list is applied when the current session ends.
+            if (listener != null && current == null && !ComputerPeers.joined(this).equals(listenerPeer)) listener.close();
             return START_STICKY;
         }
         watchdog = Executors.newSingleThreadScheduledExecutor();
@@ -235,20 +255,23 @@ public final class CaptureService extends Service {
                 BluetoothAdapter adapter = getSystemService(BluetoothManager.class).getAdapter();
                 if (adapter == null || !adapter.isEnabled()) { status("Enable Bluetooth to connect your Mac"); Thread.sleep(2000); continue; }
                 if (!ShizukuDisplayClient.authorized()) { status("Authorize Shizuku to enable Classic L2CAP"); Thread.sleep(2000); continue; }
+                if (listener != null && !ComputerPeers.joined(this).equals(listenerPeer)) { listener.close(); listener = null; }
                 if (listener == null) {
+                    listenerPeer=ComputerPeers.joined(this);
+                    if (listenerPeer.isEmpty()) { status("Select a paired computer"); Thread.sleep(2000); continue; }
                     listener = new ClassicL2capClient(this);
-                    listenerPeer=getSharedPreferences("ready", MODE_PRIVATE).getString("peer", "");
                     listener.listen(listenerPeer);
                     // Bind LAN discovery while idle, alongside the Classic accept.
-                    if (peerTransport != null) peerTransport.close();
-                    try { peerTransport = new PeerVideoTransport(this, BlePairing.key(this, listenerPeer), null); }
-                    catch (IOException unavailable) { peerTransport = null; android.util.Log.d("DroidMirrorIroh", "LAN discovery unavailable", unavailable); }
-                    status("Ready for your paired Mac · Classic L2CAP");
+                    bindPeerTransports();
+                    int computers = ComputerPeers.all(this).size();
+                    status((computers > 1 ? "Ready for " + computers + " paired computers" : "Ready for your paired computer") + " · Classic L2CAP");
                 }
                 // Shell enforces authentication, bonding and the selected Mac before
                 // passing this video-only write descriptor. The fixed PSM remains stable.
                 socket = listener.accept();
-                if (!getSharedPreferences("ready", MODE_PRIVATE).getString("peer", "").equals(listenerPeer)) throw new IOException("Selected Mac changed");
+                String connected = listener.connectedPeer();
+                if (!ComputerPeers.contains(this, connected)) throw new IOException("Connection from a computer that is no longer trusted");
+                sessionPeer = connected;
                 serve();
             } catch (Exception error) {
                 if (listener != null) listener.close();
@@ -260,6 +283,8 @@ public final class CaptureService extends Service {
                 }
             } finally {
                 stopSession();
+                sessionPeer = null;
+                peerTransport = null;
             }
         }
     }
@@ -271,8 +296,11 @@ public final class CaptureService extends Service {
         try {
             if (Build.VERSION.SDK_INT >= 31 && checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED)
                 throw new SecurityException("Nearby Devices permission was revoked");
-            String peer = getSharedPreferences("ready", MODE_PRIVATE).getString("peer", "");
+            String peer = sessionPeer;
+            if (peer == null || peer.isEmpty()) throw new IOException("Unknown mirroring computer");
             state.computerName = SessionAudit.computerName(this, peer);
+            android.util.Log.i("DroidMirrorBluetooth", "Mirror session requested by a trusted computer");
+            peerTransport = peerTransports.get(peer);
             wire = new BluetoothWire(new FileOutputStream(socket.getFileDescriptor()), SystemClock::elapsedRealtime, BluetoothWire.videoChunkForMtu(listener.transmitMtu())); state.wire = wire;
             // Bound data queued ahead of the receiver; socket writes can otherwise
             // enqueue seconds of old video even though the radio is reliable.
@@ -328,6 +356,15 @@ public final class CaptureService extends Service {
                 BluetoothWire appearanceWire = wire;
                 new Thread(() -> refreshAppearance(state, appearanceWire), "PhoneAppearance").start();
                 if (state.wirelessUpgrade != null) state.wirelessUpgrade.captureReady();
+                // Wi-Fi Aware is offered only during a session, keyed to its computer.
+                if (state.wirelessUpgrade != null && WifiAwareEndpoint.supported(this)) {
+                    try {
+                        byte[] awareKey = BlePairing.key(this, peer);
+                        state.wifiAware = new WifiAwareEndpoint(this, awareKey);
+                        java.util.Arrays.fill(awareKey, (byte)0);
+                        state.wifiAware.start();
+                    } catch (IOException unavailable) { android.util.Log.d("DroidMirrorAware", "Unavailable", unavailable); }
+                }
             }
             ByteArrayOutputStream header = new ByteArrayOutputStream();
             VideoWire.deviceHeader(new DataOutputStream(header), Build.MODEL);
@@ -499,6 +536,7 @@ public final class CaptureService extends Service {
             state.videoWindow.close();
             if (state.wirelessAudio != null) state.wirelessAudio.close();
             if (state.wirelessUpgrade != null) state.wirelessUpgrade.close();
+            if (state.wifiAware != null) state.wifiAware.close();
             if (peerTransport != null) peerTransport.attach(null);
             if (state.ble != null) state.ble.close();
             try { if (state.inputPipe != null) state.inputPipe.close(); } catch (IOException ignored) {}
@@ -522,7 +560,8 @@ public final class CaptureService extends Service {
         if (bridge != null) { bridge.close(); bridge = null; }
         stopSession();
         if (listener != null) listener.close();
-        if (peerTransport != null) { peerTransport.close(); peerTransport = null; }
+        for (PeerVideoTransport transport : peerTransports.values()) transport.close();
+        peerTransports.clear(); peerTransport = null;
         if (watchdog != null) watchdog.shutdownNow();
         unregisterReceiver(screenActions);
         super.onDestroy();

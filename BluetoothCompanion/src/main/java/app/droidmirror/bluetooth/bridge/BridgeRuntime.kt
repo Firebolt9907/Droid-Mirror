@@ -100,7 +100,7 @@ class BridgeRuntime(private val context: Context, private val onChanged: Runnabl
         clipboardIrohAttempted = true
         val epoch = ++clipboardIrohEpoch
         return runCatching {
-            ClipboardIrohChannel(context, requireNotNull(BleTrust.key(context)),
+            ClipboardIrohChannel(context, requireNotNull(ble.clipboardComputer(generation)?.let { BleTrust.key(context, it) }),
                 { !destroyed && ble.clipboardAuthorized(generation) },
                 { if (clipboardGeneration == generation && clipboardIrohEpoch == epoch) receiveClipboardFile(it, 1) },
                 { if (clipboardGeneration == generation && clipboardIrohEpoch == epoch) {
@@ -134,7 +134,7 @@ class BridgeRuntime(private val context: Context, private val onChanged: Runnabl
         val epoch = ++clipboardBulkEpoch
         ble.preferClipboardBulkPhy(generation)
         return runCatching {
-            val channel = ClipboardBulkChannel(context, requireNotNull(BleTrust.key(context)),
+            val channel = ClipboardBulkChannel(context, requireNotNull(ble.clipboardComputer(generation)?.let { BleTrust.key(context, it) }),
                 { !destroyed && ble.clipboardAuthorized(generation) },
                 { if (clipboardGeneration == generation) receiveClipboardFile(it, 0) },
                 { if (clipboardGeneration == generation && clipboardBulkEpoch == epoch) { clipboardBulk = null; if (clipboardIroh == null) { clipboardActivity.clear(); clipboard?.bulkFailed() } } })
@@ -168,13 +168,18 @@ class BridgeRuntime(private val context: Context, private val onChanged: Runnabl
     private var focusSync: PhoneFocusSync? = null
     private var media: PhoneMediaSync? = null
     private val sharedLinks = mutableMapOf<String, java.util.function.Consumer<Boolean>>()
-    fun shareLink(url: String, reply: java.util.function.Consumer<Boolean>): String? {
+    /** Computers connected over Bluetooth that can open a shared link now. */
+    fun linkComputers(): List<String> = if (destroyed) emptyList() else ble.linkComputers()
+    /** Computers with an authenticated background session (the feature gate). */
+    fun activeComputers(): Set<String> = if (destroyed) emptySet() else ble.activeComputers()
+    /** computer: a specific connected computer, or null when only one can receive it. */
+    fun shareLink(url: String, computer: String?, reply: java.util.function.Consumer<Boolean>): String? {
         if (destroyed || sharedLinks.isNotEmpty() || !app.droidmirror.bluetooth.TaskUrlResolver.webUrl(url)) {
             reply.accept(false); return null
         }
         val id = java.util.UUID.randomUUID().toString()
         sharedLinks[id] = reply
-        if (!ble.shareLink(url, id)) { sharedLinks.remove(id); reply.accept(false); return null }
+        if (!ble.shareLink(url, id, computer)) { sharedLinks.remove(id); reply.accept(false); return null }
         return id
     }
     fun cancelSharedLink(id: String) { sharedLinks.remove(id) }
@@ -217,12 +222,13 @@ class BridgeRuntime(private val context: Context, private val onChanged: Runnabl
         ble = BlePeripheral(
             context = context,
             endpoint = { finder.endpoint },
+            // Left-behind arms while any trusted computer is connected.
             onPresence = { _, present -> handler.post { if (!destroyed) leftBehind?.presence(present) } },
             onPresenceReset = { handler.post { if (!destroyed) leftBehind?.disarm() } },
             onWatchEvent = { event, valid, send -> WearPhoneBridge.receiveMac(context, event, valid, send) },
             onCommand = { command ->
-                if (command == "CONNECTED") update("Mac connected", details)
-                else if (finder.endpoint != null) update("Ready for Mac", details)
+                if (command == "CONNECTED") update("Computer connected", details)
+                else if (finder.endpoint != null) update("Ready for your computers", details)
             },
             onClipboardSubscription = { enabled, generation, files, bulk, racing -> handler.post {
                 closeClipboardBulk(); clipboard?.close(); clipboard = null
@@ -234,7 +240,8 @@ class BridgeRuntime(private val context: Context, private val onChanged: Runnabl
                 if (config != null && !destroyed && ble.bulkTestAuthorized(generation)) {
                     ble.preferBulkTestPhy(generation)
                     runCatching {
-                        val test = BleBulkTest(context, config, requireNotNull(ble.bulkTestPeer(generation)), { !destroyed && ble.bulkTestAuthorized(generation) },
+                        val test = BleBulkTest(context, requireNotNull(ble.bulkTestComputer(generation)?.let { BleTrust.key(context, it) }),
+                            config, requireNotNull(ble.bulkTestPeer(generation)), { !destroyed && ble.bulkTestAuthorized(generation) },
                             { event -> ble.sendBulkTestEvent(event, generation) })
                         bulkTest = test; test.start()
                     }.onFailure { bulkTest?.close(); bulkTest = null; ble.sendBulkTestEvent(org.json.JSONObject().put("type", "bulkTestError")
@@ -284,7 +291,7 @@ class BridgeRuntime(private val context: Context, private val onChanged: Runnabl
                 taskUrls?.setSubscribed(enabled && !destroyed, changeOnly)
             } },
             onCatalogSubscription = { peer, authorized, reply -> appLibrary.subscribeCatalog(peer, authorized, reply) },
-            onAppLibrary = { command, authorized, reply -> appLibrary.receive(command, authorized, reply) },
+            onAppLibrary = { computer, command, authorized, reply -> appLibrary.receive(command, authorized, reply, computer = computer) },
             onShareLinkResult = { id, success -> handler.post { sharedLinks.remove(id)?.accept(success) } },
             onOpenLink = { url, authorized, reply -> handler.post {
                 val client = taskUrls
@@ -323,6 +330,8 @@ class BridgeRuntime(private val context: Context, private val onChanged: Runnabl
     fun sendEvent(value: org.json.JSONObject) { ble.sendEvent(value) }
     fun canForwardHaptics(): Boolean = ble.canForwardHaptics()
     fun resetTrust() { ble.revokeTrust() }
+    /** A trusted computer was added or removed: advertise each computer's discovery UUID. */
+    fun computersChanged() { handler.post { if (!destroyed) ble.refreshAdvertising() } }
 
     @JvmOverloads fun findEndpoint(enableWirelessDebugging: Boolean = false) {
         if (destroyed) return

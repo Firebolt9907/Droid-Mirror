@@ -65,6 +65,20 @@ final class AndroidNotificationBridge {
             }
             self.flush()
         }
+        activities.describeSource = { event in
+            let app = event["app"] as? String ?? "this app"
+            return app + " · " + ActivityAppPreferences.kind(event).name
+        }
+        activities.onHideAlways = { [weak self] event in
+            guard let self, let source = ActivityAppPreferences.source(event) else { return }
+            if self.activityPreferences.record(event) {
+                NotificationRuntime.post(ActivityAppPreferences.catalogChanged.rawValue)
+            }
+            self.activityPreferences.setAllowed(false, source: source)
+            // Settings reloads on catalog changes; the receiver applies exclusions locally.
+            NotificationRuntime.post(ActivityAppPreferences.catalogChanged.rawValue)
+            self.applyAppPreferences()
+        }
 
         categories[Self.fallbackCategory] = NotificationDismissalCategory.make(identifier: Self.fallbackCategory, actions: [])
         center.setNotificationCategories(Set(categories.values))
@@ -200,6 +214,7 @@ final class AndroidNotificationBridge {
         case "removed":
             guard let id = event["id"] as? String else { return }
             remove(id)
+            activities.forget(id)
         case "notification":
             received += 1
             if AndroidActivityMenu.isActivity(event) {
@@ -212,11 +227,12 @@ final class AndroidNotificationBridge {
                 if activityPreferences.record(event) {
                     NotificationRuntime.post(ActivityAppPreferences.catalogChanged.rawValue)
                 }
-                if activityPreferences.allows(event) { activities.update(activityImages.observe(event)) }
+                if let id = event["id"] as? String, activities.isHidden(id) { activityImages.remove(id) }
+                else if activityPreferences.allows(event) { activities.update(activityImages.observe(event)) }
                 else if let id = event["id"] as? String { activityImages.remove(id); activities.remove(id) }
                 return
             }
-            if let id = event["id"] as? String { activityImages.remove(id); activities.remove(id) }
+            if let id = event["id"] as? String { activityImages.remove(id); activities.remove(id); activities.forget(id) }
             // Deliver live events even while the mirror host is running.
             guard policy.shouldDeliver(event: event) else {
                 suppressed += 1

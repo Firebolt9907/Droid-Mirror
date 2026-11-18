@@ -48,8 +48,9 @@ public final class CaptureActivity extends Activity {
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
+        java.util.List<String> trustedNow = ComputerPeers.all(this);
         chosenPeer = getSharedPreferences("ready", MODE_PRIVATE).getString("setupPeer",
-            getSharedPreferences("ready", MODE_PRIVATE).getString("peer", ""));
+            trustedNow.isEmpty() ? "" : trustedNow.get(0));
         step = state != null ? state.getInt("setupStep", 0)
             : getSharedPreferences("ready", MODE_PRIVATE).getInt("setupStep",
                 getSharedPreferences("ready", MODE_PRIVATE).getBoolean("phoneSetupSeen", false) ? 3 : 0);
@@ -70,8 +71,8 @@ public final class CaptureActivity extends Activity {
         picker = null; screenOff = null;
         LinearLayout root = column(); root.setPadding(dp(24), dp(28), dp(24), dp(24));
         root.addView(text("DroidMirror", 16, true));
-        root.addView(text("Your phone, on your Mac", 28, true));
-        root.addView(text("Set up once. Start future sessions from your Mac.", 16, false));
+        root.addView(text("Your phone, on your computer", 28, true));
+        root.addView(text("Set up once. Start future sessions from your Mac or Linux laptop.", 16, false));
         progress = text("STEP " + (step + 1) + " OF 4", 13, true); progress.setTextColor(ACCENT);
         root.addView(progress);
         LinearLayout dots = new LinearLayout(this);
@@ -104,14 +105,15 @@ public final class CaptureActivity extends Activity {
     }
 
     private void bluetoothPage() {
-        card("1. Allow Nearby devices", "DroidMirror uses Bluetooth to find and securely connect to your Mac. Allow Nearby devices when prompted.");
+        card("1. Allow Nearby devices", "DroidMirror uses Bluetooth to find and securely connect to your computer. Allow Nearby devices when prompted.");
         page.addView(button("Allow Nearby devices", this::requestBluetooth));
-        card("2. Pair in Bluetooth settings", "Keep your Mac nearby. Open Bluetooth settings on both devices, select the other device and accept the matching system code. On the Mac: System Settings → Bluetooth.");
+        card("2. Pair in Bluetooth settings", "Keep your computer nearby. Open Bluetooth settings on both devices, select the other device and accept the matching system code. On a Mac: System Settings → Bluetooth. On Linux: your desktop's Bluetooth settings.");
         page.addView(button("Open Bluetooth settings", () -> open(new Intent(Settings.ACTION_BLUETOOTH_SETTINGS))));
-        page.addView(text("Choose your Mac", 16, true));
-        picker = new Spinner(this); picker.setContentDescription("Paired Mac"); page.addView(picker);
+        page.addView(text("Choose a computer to set up", 16, true));
+        picker = new Spinner(this); picker.setContentDescription("Paired computer"); page.addView(picker);
         page.addView(button("Refresh paired devices", this::refreshPeers));
-        page.addView(text("Only system-paired devices appear here. Choose your Mac, rather than headphones or another accessory. Pairing DroidMirror itself comes in step 3.", 14, false));
+        page.addView(text("Only system-paired devices appear here. Choose your Mac or Linux laptop, rather than headphones or another accessory. You can set up several computers: run setup again and choose another one. Pairing DroidMirror itself comes in step 3.", 14, false));
+        trustedComputers();
     }
 
     private void shizukuPage() {
@@ -136,20 +138,65 @@ public final class CaptureActivity extends Activity {
     }
 
     private void pairingPage() {
-        card("1. Save your private code on the Mac", "On your Mac, open DroidMirror → Set Up Phone… and choose this phone. At Pair DroidMirror, choose Pair with QR code and scan it here, or enter the code manually. This long private code is separate from the short system Bluetooth code.");
-        page.addView(button("Scan Mac QR code", () -> {
+        card("1. Save your private code on the computer", "On a Mac, open DroidMirror → Set Up Phone… and choose this phone. At Pair DroidMirror, choose Pair with QR code and scan it here, or enter the code manually. On Linux, choose Set up… next to this phone in DroidMirror and paste the code. Every computer gets its own private code, separate from the short system Bluetooth code.");
+        page.addView(button("Scan computer QR code", () -> {
             if (selectMac()) startActivity(new Intent(this, QRPairingActivity.class).putExtra("peer", chosenPeer));
         }));
         page.addView(button("Show pairing code", this::showCode));
-        card("2. Keep the connection ready", "Enable the background bridge below. It lets your Mac start mirroring when needed. Your Mac will verify the private code on its first connection.");
+        card("2. Keep the connection ready", "Enable the background bridge below. It lets your computers start mirroring when needed. Each computer verifies its private code on its first connection.");
         page.addView(button("Enable background bridge", this::enableBridge));
         page.addView(button("Connection recovery", this::showOptions));
         page.addView(text("You can leave this screen after setup. Bluetooth must stay on, and Shizuku must stay running. Wireless ADB and notification forwarding are optional.", 15, false));
     }
 
+    /** Lists every trusted computer with a Remove action. */
+    private void trustedComputers() {
+        List<String> trusted = ComputerPeers.all(this);
+        if (trusted.isEmpty()) return;
+        page.addView(text("Trusted computers", 16, true));
+        for (String address : trusted) {
+            LinearLayout row = new LinearLayout(this);
+            row.setOrientation(LinearLayout.HORIZONTAL);
+            boolean connected = runtimeComputers().contains(address);
+            TextView label = text(peerName(address) + (connected ? " · connected" : ""), 15, false);
+            row.addView(label, new LinearLayout.LayoutParams(0, -2, 1));
+            row.addView(button("Remove", () -> removeComputer(address)));
+            page.addView(row);
+        }
+        page.addView(text("Up to " + ComputerPeers.MAXIMUM + " computers. Each one receives notifications, clipboard, media and other background features while it is connected over Bluetooth.", 13, false));
+    }
+    private java.util.Set<String> runtimeComputers() {
+        app.droidmirror.bluetooth.bridge.BridgeRuntime runtime = app.droidmirror.bluetooth.bridge.BridgeRuntime.Companion.getLive();
+        return runtime == null ? java.util.Collections.emptySet() : runtime.activeComputers();
+    }
+    private String peerName(String address) {
+        try {
+            BluetoothAdapter adapter = getSystemService(BluetoothManager.class).getAdapter();
+            String name = adapter == null ? null : adapter.getRemoteDevice(address).getName();
+            return (name == null ? "Computer" : name) + " · " + address;
+        } catch (SecurityException | IllegalArgumentException unavailable) { return address; }
+    }
+    private void removeComputer(String address) {
+        new AlertDialog.Builder(this).setTitle("Remove " + peerName(address) + "?")
+            .setMessage("This computer will no longer be able to start mirroring or receive notifications. Its private code is deleted; set it up again to reconnect. An active mirror session continues until it ends.")
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Remove", (dialog, which) -> {
+                ComputerPeers.remove(this, address);
+                if (address.equals(chosenPeer)) chosenPeer = "";
+                computersChanged();
+                render();
+            }).show();
+    }
+    private void computersChanged() {
+        app.droidmirror.bluetooth.bridge.BridgeRuntime runtime = app.droidmirror.bluetooth.bridge.BridgeRuntime.Companion.getLive();
+        if (runtime != null) runtime.computersChanged();
+        // The capture listener applies the new list once any active session ends.
+        CaptureService.enableIfConfigured(this);
+    }
+
     private void finishPage() {
         card("1. Lock your phone", "Press your phone’s power button before starting. Optionally save your PIN under Optional features and recovery to unlock automatically before video starts. DroidMirror will wait while your phone is unlocked and in use.");
-        card("2. Start on the Mac", "In the Mac setup, press Mirror my phone. A successful mirror verifies the pairing. Next time, just press Mirror on your Mac.");
+        card("2. Start on the computer", "On a Mac, press Mirror my phone in the setup. On Linux, press Mirror next to this phone. A successful mirror verifies the pairing. Next time, just press Mirror on the computer.");
         card("3. Keep these ready", "Keep Bluetooth on, Shizuku running and the background bridge enabled. On the same Wi-Fi, video can upgrade automatically. Wireless debugging is optional for video fallback.");
         page.addView(button("Enable / retry background bridge", this::enableBridge));
         page.addView(button("Optional features and recovery", this::showOptions));
@@ -167,7 +214,7 @@ public final class CaptureActivity extends Activity {
             TextView value = text(code, 20, true); value.setTypeface(Typeface.MONOSPACE); value.setTextIsSelectable(true);
             value.setPadding(dp(24), dp(16), dp(24), dp(16));
             AlertDialog dialog = new AlertDialog.Builder(this).setTitle("Private DroidMirror code")
-                .setMessage("For the selected Mac only. Enter all characters in the Mac’s Pair DroidMirror step, then Save pairing code. Keep this code private.")
+                .setMessage("For " + peerName(chosenPeer) + " only. Enter all characters in that computer's DroidMirror pairing step, then save the pairing code. Keep this code private.")
                 .setView(value).setPositiveButton("Done", null)
                 .setNeutralButton("Copy code", null).create();
             dialog.setOnShowListener(ignored -> dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener(v -> {
@@ -190,7 +237,7 @@ public final class CaptureActivity extends Activity {
         BackgroundBridgePreferences.setEnabled(this, true);
         CaptureService.ReadyResult result = CaptureService.enableIfConfigured(this);
         switch (result) {
-            case START_REQUESTED: status.setText("Bridge start requested. Wait for the live status below, then continue on your Mac."); break;
+            case START_REQUESTED: status.setText("Bridge start requested. Wait for the live status below, then continue on your computer."); break;
             case PERMISSION_REQUIRED: status.setText("Nearby devices access is missing. Allow it in step 1 or Android Settings → Apps → DroidMirror → Permissions."); break;
             case BACKGROUND_RESTRICTED: status.setText("Android blocked background startup. Keep this app open and retry Enable background bridge."); break;
             default: status.setText("Bridge could not start. Check Bluetooth and retry. You can stop it under Optional features and recovery."); break;
@@ -200,16 +247,16 @@ public final class CaptureActivity extends Activity {
 
     private boolean selectMac() {
         if (!hasBluetoothPermissions() || !bluetoothEnabled() || chosenPeer.isEmpty() || !isBonded(chosenPeer)) {
-            status.setText("Return to Connect Bluetooth and select your paired Mac."); return false;
+            status.setText("Return to Connect Bluetooth and select your paired computer."); return false;
         }
-        String previous = getSharedPreferences("ready", MODE_PRIVATE).getString("peer", "");
-        if (chosenPeer.equals(previous)) return true;
-        // Do not reset trust or swap service components under an active mirror.
-        if (BackgroundBridgePreferences.enabled(this) || app.droidmirror.bluetooth.bridge.BridgeRuntime.Companion.getLive() != null) {
-            status.setText("Before changing Macs, stop mirroring on your Mac, then stop the background bridge under Optional features and recovery.");
-            return false;
+        if (ComputerPeers.contains(this, chosenPeer)) return true;
+        // Adding a computer never changes an existing computer's trust or code,
+        // and an active mirror keeps running: the listener picks up the new list
+        // once that session ends.
+        if (!ComputerPeers.add(this, chosenPeer)) {
+            status.setText("You can trust up to " + ComputerPeers.MAXIMUM + " computers. Remove one in step 1 first."); return false;
         }
-        getSharedPreferences("ready", MODE_PRIVATE).edit().putString("peer", chosenPeer).commit();
+        computersChanged();
         return true;
     }
 
@@ -251,18 +298,18 @@ public final class CaptureActivity extends Activity {
         boolean bluetooth = hasBluetoothPermissions() && bluetoothEnabled();
         boolean selected = bluetooth && !chosenPeer.isEmpty() && isBonded(chosenPeer);
         boolean authorized = ShizukuDisplayClient.authorized();
-        String saved = getSharedPreferences("ready", MODE_PRIVATE).getString("peer", "");
-        boolean keySaved = !saved.isEmpty() && getSharedPreferences("ble_pairing", MODE_PRIVATE).contains(saved);
+        boolean trusted = ComputerPeers.contains(this, chosenPeer);
+        boolean keySaved = trusted && getSharedPreferences("ble_pairing", MODE_PRIVATE).contains(chosenPeer);
         app.droidmirror.bluetooth.bridge.BridgeRuntime runtime = app.droidmirror.bluetooth.bridge.BridgeRuntime.Companion.getLive();
         boolean bridge = BackgroundBridgePreferences.enabled(this) && runtime != null;
-        String nearby = !hasBluetoothPermissions() ? "Nearby devices permission needed" : !bluetooth ? "Turn Bluetooth on" : !selected ? "Select a paired Mac" : "Bluetooth device selected";
+        String nearby = !hasBluetoothPermissions() ? "Nearby devices permission needed" : !bluetooth ? "Turn Bluetooth on" : !selected ? "Select a paired computer" : "Bluetooth device selected";
         if (step == 0) liveStatus.setText(nearby);
         else if (step == 1) liveStatus.setText(authorized ? "✓ Shizuku authorized" : "Shizuku needs to be started and authorized");
         else liveStatus.setText((authorized ? "✓ Shizuku authorized" : "Start and authorize Shizuku") + "\n"
-            + (!selected ? nearby : keySaved && saved.equals(chosenPeer) ? "✓ Private code available · verify on Mac" : "Show your private code first") + "\n"
+            + (!selected ? nearby : keySaved ? "✓ Private code available · verify on the computer" : "Show your private code first") + "\n"
             + (bridge ? "Bridge: " + runtime.getStatus() : BackgroundBridgePreferences.enabled(this) ? "Bridge enabled · waiting for service" : "Enable the background bridge"));
         next.setEnabled(step == 0 ? selected : step == 1 ? authorized
-            : step == 2 ? bluetooth && selected && authorized && bridge && keySaved && saved.equals(chosenPeer) : true);
+            : step == 2 ? bluetooth && selected && authorized && bridge && keySaved : true);
         if (screenOff != null) screenOff.setEnabled(authorized && !getSharedPreferences("ready", MODE_PRIVATE).getBoolean("blackoutOverlay", false));
     }
 
@@ -284,8 +331,11 @@ public final class CaptureActivity extends Activity {
         return false;
     }
     private void requestBluetooth() {
-        if (hasBluetoothPermissions()) { status.setText("Nearby devices allowed. Pair your Mac in Bluetooth settings below."); refreshPeers(); return; }
-        requestPermissions(new String[]{Manifest.permission.BLUETOOTH_CONNECT, Manifest.permission.BLUETOOTH_ADVERTISE}, 2);
+        if (hasBluetoothPermissions()) { status.setText("Nearby devices allowed. Pair your computer in Bluetooth settings below."); refreshPeers(); return; }
+        // Nearby Wi-Fi devices enables the optional Wi-Fi Aware video path.
+        requestPermissions(Build.VERSION.SDK_INT >= 33
+            ? new String[]{Manifest.permission.BLUETOOTH_CONNECT, Manifest.permission.BLUETOOTH_ADVERTISE, Manifest.permission.NEARBY_WIFI_DEVICES}
+            : new String[]{Manifest.permission.BLUETOOTH_CONNECT, Manifest.permission.BLUETOOTH_ADVERTISE}, 2);
     }
     private void refreshPeers() {
         if (picker == null) return;
@@ -300,7 +350,7 @@ public final class CaptureActivity extends Activity {
             } catch (SecurityException denied) { status.setText("Allow Nearby devices to load paired devices."); }
         }
         // Force an explicit choice; do not silently trust the first paired accessory.
-        labels.add(0, "Select your Mac…");
+        labels.add(0, "Select your computer…");
         picker.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item, labels));
         int selected = 0;
         for (int i = 0; i < peers.size(); i++) if (chosenPeer.equals(peers.get(i).getAddress())) selected = i + 1;

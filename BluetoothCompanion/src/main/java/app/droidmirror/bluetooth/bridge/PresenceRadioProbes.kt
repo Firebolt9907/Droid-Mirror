@@ -28,7 +28,8 @@ class PresenceRadioProbes(private val context: Context, private val result: (Boo
         if (closed || running) return
         // Retain the existing radio-ownership guard; an interrupted scan is never a miss.
         if (mirroring()) { result(null, "Beacon scan deferred during active mirroring"); return }
-        val key = BleTrust.key(context) ?: return
+        // Any trusted computer's presence beacon counts.
+        val keys = BleTrust.keys(context).map { it.second }.ifEmpty { return }
         if (Build.VERSION.SDK_INT >= 31 && context.checkSelfPermission(Manifest.permission.BLUETOOTH_SCAN) != PackageManager.PERMISSION_GRANTED) {
             result(null, "Bluetooth SCAN permission required; open detection settings"); return
         }
@@ -62,7 +63,7 @@ class PresenceRadioProbes(private val context: Context, private val result: (Boo
         }
         scanner = radio; scan = callback
         try {
-            radio.startScan(listOf(ScanFilter.Builder().setServiceUuid(ParcelUuid(PresenceProtocol.beacon(key))).build()),
+            radio.startScan(keys.map { ScanFilter.Builder().setServiceUuid(ParcelUuid(PresenceProtocol.beacon(it))).build() },
                 ScanSettings.Builder().setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY).build(), callback)
         } catch (error: Exception) { finish(null, "BLE scan unavailable: ${error.javaClass.simpleName}"); return }
         handler.postDelayed({

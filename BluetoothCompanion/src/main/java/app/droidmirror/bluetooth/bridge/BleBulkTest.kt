@@ -13,14 +13,14 @@ import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 
 /** Explicit synthetic test. No ClipboardManager, clipboard bridge or Shizuku access. */
-class BleBulkTest(private val context: Context, private val config: JSONObject, private val peer: android.bluetooth.BluetoothDevice,
+class BleBulkTest(private val context: Context, computerKey: ByteArray, private val config: JSONObject, private val peer: android.bluetooth.BluetoothDevice,
     private val valid: () -> Boolean, private val control: (JSONObject) -> Unit) : AutoCloseable {
     private val main = Handler(Looper.getMainLooper())
     val id: String = config.getString("id")
     private val size = config.getInt("bytes")
     private val window = config.getInt("window")
     private val transport = config.getString("transport")
-    private val key = ClipboardBulkCodec.benchmarkKey(requireNotNull(BleTrust.key(context)))
+    private val key = ClipboardBulkCodec.benchmarkKey(computerKey)
     private val token = ByteArray(32).also { SecureRandom().nextBytes(it) }.joinToString("") { "%02x".format(it.toInt() and 255) }
     private val worker = ThreadPoolExecutor(1, 1, 0, TimeUnit.SECONDS, ArrayBlockingQueue<Runnable>(128))
     private var codec = ClipboardBulkCodec(key, token)

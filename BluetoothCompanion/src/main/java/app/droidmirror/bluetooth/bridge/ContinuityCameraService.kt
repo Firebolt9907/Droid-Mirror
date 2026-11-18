@@ -18,7 +18,8 @@ class ContinuityCameraService : Service() {
     companion object {
         private val main = Handler(Looper.getMainLooper())
         private var instance: ContinuityCameraService? = null
-        fun command(context: Context, event: JSONObject, valid: () -> Boolean, send: (JSONObject) -> Boolean) {
+        /** computer: the trusted computer whose session owns this camera request (its key protects the lane). */
+        fun command(context: Context, computer: String, event: JSONObject, valid: () -> Boolean, send: (JSONObject) -> Boolean) {
             main.post {
                 if (!valid()) return@post
                 val service = instance
@@ -27,7 +28,7 @@ class ContinuityCameraService : Service() {
                         if (service == null) {
                             send(JSONObject().put("type", "cameraState").put("session", event.optString("session"))
                                 .put("error", "Open DroidMirror phone settings and arm Phone Camera first"))
-                        } else service.startCapture(event, valid, send)
+                        } else { service.computer = computer; service.startCapture(event, valid, send) }
                     }
                     "cameraLease" -> {
                         if (service != null && service.session == event.optString("session")) service.lease = SystemClock.elapsedRealtime()
@@ -52,6 +53,7 @@ class ContinuityCameraService : Service() {
     private var surface: Surface? = null
     private var wakeLock: PowerManager.WakeLock? = null
     @Volatile private var session: String? = null
+    @Volatile private var computer: String = ""
     @Volatile private var epoch = 0
     private var lease = 0L
     private var captureEpoch = 0
@@ -116,7 +118,7 @@ class ContinuityCameraService : Service() {
         nextLaneAttempt = now + 10000
         val owner = epoch
         runCatching {
-            val channel = CameraIrohChannel(this, requireNotNull(BleTrust.key(this)), id) {
+            val channel = CameraIrohChannel(this, requireNotNull(BleTrust.key(this, computer)), id) {
                 epoch == owner && session == id && valid()
             }
             lane = channel

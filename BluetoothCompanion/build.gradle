@@ -4,7 +4,7 @@ plugins {
 }
 android {
     namespace 'app.droidmirror.bluetooth'
-    buildFeatures { aidl true }
+    buildFeatures { aidl true; buildConfig true }
     compileSdk 36
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17
@@ -17,7 +17,10 @@ android {
         main.jniLibs.srcDirs += "$buildDir/iroh-jni"
     }
     defaultConfig {
-        applicationId 'app.droidmirror.bluetooth'
+        // A side-by-side test install can use another id, e.g.
+        // ./gradlew -PdroidmirrorApplicationId=app.droidmirror.bluetooth.linux :assembleDebug
+        applicationId project.findProperty('droidmirrorApplicationId') ?: 'app.droidmirror.bluetooth'
+        manifestPlaceholders = [appLabel: project.findProperty('droidmirrorAppLabel') ?: 'DroidMirror']
         minSdk 26
         testInstrumentationRunner 'app.droidmirror.bluetooth.BlackoutAppearanceTest'
         targetSdk 35

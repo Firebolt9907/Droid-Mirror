@@ -130,7 +130,7 @@ struct ActivityAppsView: View {
     }
     var body: some View {
         Section("Live activities") {
-            Text("Choose which Android live activities and persistent notifications appear in the menu bar. Each Android notification has its own item. Turning a source off removes its items from this Mac; your phone and regular notification settings stay unchanged.")
+            Text("Choose which Android live activities and persistent notifications appear in the menu bar. Each Android notification has its own item; sources are grouped by app and activity type. Right-click a menu bar item to hide it once or always. Turning a source off removes its items from this Mac; your phone and regular notification settings stay unchanged.")
                 .font(.caption).foregroundStyle(.secondary)
             if model.sources.isEmpty {
                 Text("No live activities received yet. Start an activity on your phone while connected to this Mac.")

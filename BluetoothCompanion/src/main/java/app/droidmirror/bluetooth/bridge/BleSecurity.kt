@@ -12,14 +12,47 @@ import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.SecretKeySpec
 
 object BleTrust {
-    fun key(context: Context): ByteArray? = runCatching {
-        app.droidmirror.bluetooth.BlePairing.notificationKey(context)
-    }.getOrNull()
+    /** Notification credentials for every trusted computer. */
+    fun keys(context: Context): List<Pair<String, ByteArray>> =
+        app.droidmirror.bluetooth.ComputerPeers.all(context).mapNotNull { peer ->
+            runCatching { app.droidmirror.bluetooth.BlePairing.notificationKey(context, peer) }.getOrNull()?.let { peer to it }
+        }
+    /** Notification credential of one trusted computer. */
+    fun key(context: Context, computer: String): ByteArray? =
+        if (!app.droidmirror.bluetooth.ComputerPeers.contains(context, computer)) null
+        else runCatching { app.droidmirror.bluetooth.BlePairing.notificationKey(context, computer) }.getOrNull()
+
+    private val legacyAttempts = java.util.concurrent.ConcurrentHashMap<String, Int>()
+    /**
+     * Chooses the computer whose credential answers a background hello. Current
+     * Mac and Linux apps name their key (`keyId`), selecting it exactly. For
+     * older Mac apps the identity address is tried, then a sole trusted
+     * computer; with two candidates and no hint, successive attempts from that
+     * address alternate between them (a wrong guess fails the mutual HMAC
+     * handshake and the computer simply reconnects).
+     */
+    fun computerFor(context: Context, hello: JSONObject, address: String): Pair<String, ByteArray>? {
+        val all = keys(context)
+        val requested = hello.optString("keyId", "")
+        if (requested.isNotEmpty()) {
+            val id = runCatching { unb64(requested) }.getOrNull() ?: return null
+            return all.firstOrNull { (_, key) ->
+                java.security.MessageDigest.isEqual(app.droidmirror.bluetooth.PairingKeys.keyId(key), id)
+            }
+        }
+        all.firstOrNull { it.first == address }?.let { return it }
+        if (all.isEmpty()) return null
+        val attempt = legacyAttempts.merge(address, 1, Int::plus) ?: 1
+        return all[(attempt - 1) % all.size]
+    }
+    /** Called once a legacy hello authenticated, so the next reconnect starts with the same computer. */
+    fun authenticated(address: String) { legacyAttempts.computeIfPresent(address) { _, n -> n - 1 } }
     fun b64(data: ByteArray): String = Base64.encodeToString(data, Base64.NO_WRAP)
     fun unb64(data: String): ByteArray = Base64.decode(data, Base64.NO_WRAP)
 }
 
-class BleSecureSession(private val master: ByteArray) {
+/** One authenticated background session with one trusted computer. */
+class BleSecureSession(private val master: ByteArray, val computer: String) {
     private var macNonce: ByteArray? = null
     private var phoneNonce: ByteArray? = null
     private var incomingKey: ByteArray? = null

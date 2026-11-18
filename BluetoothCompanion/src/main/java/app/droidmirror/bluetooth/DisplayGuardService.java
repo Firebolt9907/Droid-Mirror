@@ -420,7 +420,7 @@ public final class DisplayGuardService extends IDisplayGuard.Stub {
         Process command = null;
         try {
             command = new ProcessBuilder("/system/bin/cmd", "package", "grant", "--user", Integer.toString(user),
-                "app.droidmirror.bluetooth", "android.permission.WRITE_SECURE_SETTINGS")
+                BuildConfig.APPLICATION_ID, "android.permission.WRITE_SECURE_SETTINGS")
                 .redirectErrorStream(true).redirectOutput(new java.io.File("/dev/null")).start();
             if (!command.waitFor(5, TimeUnit.SECONDS)) { command.destroyForcibly(); return false; }
             return command.exitValue() == 0;

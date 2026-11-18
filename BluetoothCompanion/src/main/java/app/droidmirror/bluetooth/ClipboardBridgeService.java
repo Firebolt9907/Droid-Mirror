@@ -241,7 +241,7 @@ public final class ClipboardBridgeService extends IClipboardBridge.Stub {
             ensureLooper();
             if (expectedToken == null || !expectedToken.equals(readToken())) return false;
             android.net.Uri uri = android.net.Uri.parse(value);
-            if (!"content".equals(uri.getScheme()) || !"app.droidmirror.bluetooth.clipboard.files".equals(uri.getAuthority())) return false;
+            if (!"content".equals(uri.getScheme()) || !(BuildConfig.APPLICATION_ID + ".clipboard.files").equals(uri.getAuthority())) return false;
             try (ClipboardResolver resolver = new ClipboardResolver()) {
                 manager().setPrimaryClip(ClipData.newUri(resolver, "DroidMirror", uri));
             }

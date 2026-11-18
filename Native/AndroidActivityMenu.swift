@@ -47,6 +47,13 @@ final class AndroidActivityMenu: NSObject {
     private let sportsHistory = ActivitySportsHistory()
     var count: Int { entries.count }
     var onAction: (([String: Any], String) -> Void)?
+    /// "Always hide" excludes the activity's source (app + kind) in preferences.
+    var onHideAlways: (([String: Any]) -> Void)?
+    /// Describes the source that "Always hide" affects, e.g. "Maps · Navigation".
+    var describeSource: (([String: Any]) -> String?)?
+    /// Notifications hidden once from the menu bar; they return only as a new Android notification.
+    private var hidden = Set<String>()
+    private var hiddenOrder = [String]()
 
     static func isActivity(_ event: [String: Any]) -> Bool {
         guard event["category"] as? String != "transport", event["layout"] as? String != "media" else { return false }
@@ -54,7 +61,7 @@ final class AndroidActivityMenu: NSObject {
     }
 
     func update(_ event: [String: Any]) {
-        guard let id = event["id"] as? String, event["version"] as? String != nil else { return }
+        guard let id = event["id"] as? String, event["version"] as? String != nil, !hidden.contains(id) else { return }
         let event = sportsHistory.observe(event)
         // Wait for logos on first appearance, but retain an existing complete card
         // while a new artwork revision hydrates. Controls always use the latest token.
@@ -111,6 +118,7 @@ final class AndroidActivityMenu: NSObject {
         item.button?.identifier = NSUserInterfaceItemIdentifier(id)
         item.button?.target = self
         item.button?.action = #selector(showActivity(_:))
+        item.button?.sendAction(on: [.leftMouseUp, .rightMouseUp])
         if entry.popover?.isShown == true { refresh(entry, id: id) }
     }
 
@@ -126,8 +134,28 @@ final class AndroidActivityMenu: NSObject {
     }
     func clear() { for id in Array(entries.keys) { remove(id) }; sportsHistory.clear() }
 
+    /// Hides this notification's item until Android removes it. Updates to the same
+    /// notification stay hidden; the phone and other activities are unaffected.
+    func hide(_ id: String) {
+        if hidden.insert(id).inserted {
+            hiddenOrder.append(id)
+            if hiddenOrder.count > 256 { hidden.remove(hiddenOrder.removeFirst()) }
+        }
+        remove(id)
+    }
+    /// The phone ended this notification, so a later one with the same key is new.
+    func forget(_ id: String) {
+        guard hidden.remove(id) != nil else { return }
+        hiddenOrder.removeAll { $0 == id }
+    }
+    func isHidden(_ id: String) -> Bool { hidden.contains(id) }
+
     @objc private func showActivity(_ sender: NSStatusBarButton) {
         guard let id = sender.identifier?.rawValue, let entry = entries[id] else { return }
+        if let event = NSApp.currentEvent, event.type == .rightMouseUp ||
+            (event.type == .leftMouseUp && event.modifierFlags.contains(.control)) {
+            showContextMenu(for: entry, id: id); return
+        }
         if entry.popover?.isShown == true { entry.popover?.close(); return }
         for other in entries.values { other.popover?.close() }
         if entry.popover == nil {
@@ -138,6 +166,41 @@ final class AndroidActivityMenu: NSObject {
         }
         refresh(entry, id: id)
         entry.popover?.show(relativeTo: Self.centerAnchor(in: sender.bounds), of: sender, preferredEdge: .minY)
+    }
+
+    private func showContextMenu(for entry: Entry, id: String) {
+        entry.popover?.close()
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        let hide = NSMenuItem(title: "Hide Live Activity", action: #selector(hideFromMenu(_:)), keyEquivalent: "")
+        hide.target = self
+        hide.representedObject = id
+        hide.toolTip = "Removes this item from the menu bar until the activity ends on your phone."
+        menu.addItem(hide)
+        let always = NSMenuItem(title: "Always Hide This Live Activity", action: #selector(hideAlwaysFromMenu(_:)), keyEquivalent: "")
+        always.target = self
+        always.representedObject = id
+        always.isEnabled = onHideAlways != nil
+        let source = describeSource?(entry.event) ?? (entry.event["app"] as? String ?? "this app")
+        always.toolTip = "Stops showing \(source) activities on this Mac. Turn them back on in Settings → Live activities."
+        menu.addItem(always)
+        // Attaching the menu only for this click keeps left-click opening the card.
+        entry.item.menu = menu
+        entry.item.button?.performClick(nil)
+        entry.item.menu = nil
+    }
+    @objc private func hideFromMenu(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String else { return }
+        // Remove the status item after menu tracking on it has fully unwound.
+        DispatchQueue.main.async { [weak self] in self?.hide(id) }
+    }
+    @objc private func hideAlwaysFromMenu(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String, let event = entries[id]?.event else { return }
+        DispatchQueue.main.async { [weak self] in
+            self?.onHideAlways?(event)
+            // Preferences remove every matching item; ensure this one goes even if the event lacks a package.
+            self?.remove(id)
+        }
     }
 
     /// A full-width status button gives AppKit a range of possible arrow positions.
@@ -184,6 +247,8 @@ final class AndroidActivityMenu: NSObject {
     /// Authoritative membership prunes missing notifications without removing matching status items.
     func reconcile(_ ids: Set<String>) {
         sportsHistory.reconcile(ids)
+        for id in hiddenOrder where !ids.contains(id) { hidden.remove(id) }
+        hiddenOrder.removeAll { !ids.contains($0) }
         for id in Array(entries.keys) where !ids.contains(id) { remove(id) }
     }
 
