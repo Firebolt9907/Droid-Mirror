@@ -39,3 +39,7 @@ __pycache__/
 /outputs/aod-overlay-preview/
 /outputs/paste-fix/
 /outputs/*
+
+# Linux build output
+/Linux/build/
+/Linux/helper/target/
